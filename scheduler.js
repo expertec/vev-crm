@@ -149,60 +149,111 @@ async function processSequences() {
 }
 
 /**
- * Genera letras para los registros en 'letras' con status 'Sin letra',
- * guarda la letra, marca status → 'enviarLetra' y añade marca de tiempo.
+ * Genera guiones VSL para los registros en 'guionesVideo' con status 'Sin guion',
+ * guarda el guion, marca status → 'enviarGuion' y añade marca de tiempo.
  */
-async function generateLetras() {
-  console.log("▶️ generateLetras: inicio");
+async function generateGuiones() {
+  console.log("▶️ generateGuiones: inicio");
   try {
-    const snap = await db.collection('letras').where('status', '==', 'Sin letra').get();
-    console.log(`✔️ generateLetras: encontrados ${snap.size} registros con status 'Sin letra'`);
+    const snap = await db.collection('guionesVideo').where('status', '==', 'Sin guion').get();
+    console.log(`✔️ encontrados ${snap.size} guiones pendientes`);
+
     for (const docSnap of snap.docs) {
       const data = docSnap.data();
-      const prompt = `Escribe una letra de canción con lenguaje simple que su estructura sea verso 1, verso 2, coro, verso 3, verso 4 y coro. Agrega titulo de la canción en negritas. No pongas datos personales que no se puedan confirmar. Agrega un coro cantable y memorable. Solo responde con la letra de la canción sin texto adicional. Propósito: ${data.purpose}. Nombre: ${data.includeName}. Anecdotas o fraces: ${data.anecdotes}`;
+      // Adaptamos tu prompt VSL con placeholders
+      const prompt = `
+Eres un generador de guiones para Video Sales Letters (VSL) de alta conversión.
+Tu tarea es crear un guion de VSL de 1 minuto, dividido en segmentos temporales, que incluya:
+
+- **Variables**:
+  - Nombre del negocio: ${data.businessName}
+  - Giro del negocio: ${data.giro}
+  - Propósito del anuncio: ${data.purpose}
+  - Promoción especial: ${data.promo || 'ninguna'}
+
+- **Estructura** (con tiempos aproximados):
+  1. **0:00–0:10 Hook y Promesa**
+     - Gancho inmediato que detenga el scroll y prometa el principal beneficio de ${data.businessName}.
+  2. **0:10–0:20 Prueba Social Rápida**
+     - Una frase de testimonio o resultado contundente de un cliente que aprovechó ${data.promo || 'la promoción'}.
+  3. **0:20–0:30 Dolor y Agitación**
+     - Describe en una o dos oraciones el problema urgente que enfrenta tu audiencia en ${data.giro}.
+  4. **0:30–0:40 Solución Express**
+     - Explica brevemente cómo ${data.businessName} resuelve ese problema de forma única.
+  5. **0:40–0:55 Llamado a la Acción con Urgencia**
+     - Invita a la audiencia a aprovechar ${data.promo || 'la promoción'} ahora, añade un motivo de urgencia o escasez.
+  6. **0:55–1:00 Cierre Visual y Contacto**
+     - Pantalla final limpia con CTA directo, logotipo y datos de contacto.
+
+- **Texto para voz en off**:
+  Define exactamente qué dirá la voz en cada segmento y con qué tono (energético, confiable, urgente).
+
+- **Notas de edición**:
+  Ritmo muy dinámico: cortes cada 1–3 segundos, overlays de texto en negrita, transiciones rápidas. Música de fondo que suba intensidad en 0:20–0:30 y mantenga energía hasta el final.
+
+- **Recomendaciones de imágenes/B-roll**:
+  - 0:00–0:10: logo animado o escena impactante del problema.
+  - 0:10–0:20: captura real o foto del cliente satisfecho.
+  - 0:20–0:30: metáfora visual del dolor (ej. reloj corriendo).
+  - 0:30–0:40: demo rápida del producto o servicio en acción.
+  - 0:40–0:55: texto grande con “¡Oferta por tiempo limitado!” sobre fondo limpio.
+  - 0:55–1:00: logotipo y botón animado de “Compra ahora” o “Contáctanos”.
+
+Genera el guion completo en español, con cada segmento numerado y su texto para voz en off, más las notas de edición y las sugerencias de imágenes, todo listo para producir. Máximo 250–300 palabras.
+      `.trim();
+
       console.log(`📝 prompt para ${docSnap.id}:\n${prompt}`);
 
       const response = await openai.createChatCompletion({
         model: 'gpt-4o',
         messages: [
-          { role: 'system', content: 'Eres un compositor creativo.' },
+          { role: 'system', content: 'Eres un experto creador de guiones de video persuasivos.' },
           { role: 'user', content: prompt }
         ]
       });
 
-      const letra = response.data.choices?.[0]?.message?.content?.trim();
-      if (letra) {
-        console.log(`✅ letra generada para ${docSnap.id}`);
+      const guion = response.data.choices?.[0]?.message?.content?.trim();
+      if (guion) {
+        console.log(`✅ guion generado para ${docSnap.id}`);
         await docSnap.ref.update({
-          letra,
-          status: 'enviarLetra',
-          letraGeneratedAt: FieldValue.serverTimestamp()
+          guion,
+          status: 'enviarGuion',
+          guionGeneratedAt: FieldValue.serverTimestamp()
         });
       }
     }
-    console.log("▶️ generateLetras: finalizado");
+    console.log("▶️ generateGuiones: finalizado");
   } catch (err) {
-    console.error("❌ Error generateLetras:", err);
+    console.error("❌ Error generateGuiones:", err);
   }
 }
 
+
 /**
- * Envía por WhatsApp las letras generadas (status 'enviarLetra'),
- * añade trigger 'LetraEnviada' al lead y marca status → 'enviada'.
- * Solo envía si han pasado al menos 15 minutos desde 'letraGeneratedAt'.
+ * Envía por WhatsApp los guiones generados (status 'enviarGuion'),
+ * añade trigger 'GuionEnviado' al lead y marca status → 'enviado'.
+ * Solo envía si han pasado al menos 15 minutos desde 'guionGeneratedAt'.
  */
-async function sendLetras() {
+async function sendGuiones() {
   try {
     const now = Date.now();
-    const snap = await db.collection('letras').where('status', '==', 'enviarLetra').get();
-    const VIDEO_URL = 'https://cantalab.com/wp-content/uploads/2025/04/WhatsApp-Video-2025-04-23-at-8.01.51-PM.mp4';
+    // Busca todos los guiones pendientes de envío
+    const snap = await db
+      .collection('guionesVideo')
+      .where('status', '==', 'enviarGuion')
+      .get();
+
+    const VIDEO_URL = 'https://cantalab.com/wp-content/uploads/ejemplo-guion-video.mp4';
 
     for (const docSnap of snap.docs) {
       const data = docSnap.data();
-      let { leadPhone, leadId, letra, requesterName, letraGeneratedAt } = data;
-      if (!leadPhone || !letra || !letraGeneratedAt) continue;
+      const { leadPhone, leadId, guion, guionGeneratedAt, requesterName } = data;
 
-      const genTime = letraGeneratedAt.toDate().getTime();
+      // Asegura que existan los datos necesarios
+      if (!leadPhone || !guion || !guionGeneratedAt) continue;
+
+      // Verifica que hayan pasado al menos 15 minutos desde la generación
+      const genTime = guionGeneratedAt.toDate().getTime();
       if (now - genTime < 15 * 60 * 1000) continue;
 
       const sock = getWhatsAppSock();
@@ -212,20 +263,20 @@ async function sendLetras() {
       const jid = `${phoneClean}@s.whatsapp.net`;
       const firstName = (requesterName || '').trim().split(' ')[0] || '';
 
-      // 1) Mensaje de cierre
-      const greeting = `Listo ${firstName}, ya terminé la letra para tu canción. *Léela y dime si te gusta.*`;
-      await sock.sendMessage(jid, { text: greeting });
+      // 1) Aviso inicial
+      const aviso = `Hola ${firstName}, tu guion de video está listo. ¡Échale un vistazo!`;
+      await sock.sendMessage(jid, { text: aviso });
       await db
         .collection('leads').doc(leadId).collection('messages')
-        .add({ content: greeting, sender: 'business', timestamp: new Date() });
+        .add({ content: aviso, sender: 'business', timestamp: new Date() });
 
-      // 2) Enviar la letra
-      await sock.sendMessage(jid, { text: letra });
+      // 2) Enviar el guion
+      await sock.sendMessage(jid, { text: guion });
       await db
         .collection('leads').doc(leadId).collection('messages')
-        .add({ content: letra, sender: 'business', timestamp: new Date() });
+        .add({ content: guion, sender: 'business', timestamp: new Date() });
 
-      // 3) Enviar el video
+      // 3) (Opcional) Enviar un video demo o promocional
       await sock.sendMessage(jid, { video: { url: VIDEO_URL } });
       await db
         .collection('leads').doc(leadId).collection('messages')
@@ -236,39 +287,28 @@ async function sendLetras() {
           timestamp: new Date()
         });
 
-      // 4) Mensaje promocional
-      const promo = `${firstName} el costo normal es de $1997 MXN pero tenemos la promocional esta semana de $697 MXN.\n\n` +
-        `Puedes pagar en esta cuenta:\n\n🏦 Transferencia bancaria:\n` +
-        `Cuenta: 4152 3143 2669 0826\nBanco: BBVA\nTitular: Iván Martínez Jiménez\n\n` +
-        `🌐 Pago en línea o en dolares 🇺🇸 (45 USD):\n` +
-        `https://cantalab.com/tu-cancion-mx/`;
-      await sock.sendMessage(jid, { text: promo });
-      await db
-        .collection('leads').doc(leadId).collection('messages')
-        .add({ content: promo, sender: 'business', timestamp: new Date() });
+      // 4) Actualizar lead con etiqueta y secuencia de “GuionEnviado”
+      await db.collection('leads').doc(leadId).update({
+        etiquetas: FieldValue.arrayUnion('GuionEnviado'),
+        secuenciasActivas: FieldValue.arrayUnion({
+          trigger: 'GuionEnviado',
+          startTime: new Date().toISOString(),
+          index: 0
+        })
+      });
 
-      // 5) Actualizar lead
-      if (leadId) {
-        await db.collection('leads').doc(leadId).update({
-          etiquetas: FieldValue.arrayUnion('LetraEnviada'),
-          secuenciasActivas: FieldValue.arrayUnion({
-            trigger: 'LetraEnviada',
-            startTime: new Date().toISOString(),
-            index: 0
-          })
-        });
-      }
-
-      // 6) Marcar documento como enviado
-      await docSnap.ref.update({ status: 'enviada' });
+      // 5) Marcar el documento como enviado
+      await docSnap.ref.update({ status: 'enviado' });
     }
   } catch (err) {
-    console.error("❌ Error en sendLetras:", err);
+    console.error("❌ Error en sendGuiones:", err);
   }
 }
 
+
 export {
   processSequences,
-  generateLetras,
-  sendLetras
+  generateGuiones,
+  sendGuiones
 };
+
