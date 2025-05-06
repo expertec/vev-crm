@@ -27,11 +27,9 @@ import {
   sendMessageToLead,
   getSessionPhone
 } from './whatsappService.js';
-import {
-  processSequences,
-  generateLetras,
-  sendLetras
-} from './scheduler.js';
+import { processSequences, generateGuiones, sendGuiones } from './scheduler.js';
+
+
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -152,13 +150,13 @@ app.listen(port, () => {
     console.error("Error al conectar WhatsApp en startup:", err)
   );
 
-  // Arranque inmediato de generación/envío de letras pendientes
-  generateLetras().catch(err =>
-    console.error("Error inicial en generateLetras:", err)
+  generateGuiones().catch(err =>
+    console.error("Error inicial en generateGuiones:", err)
   );
-  sendLetras().catch(err =>
-    console.error("Error inicial en sendLetras:", err)
+  sendGuiones().catch(err =>
+    console.error("Error inicial en sendGuiones:", err)
   );
+  
 });
 
 // Scheduler: ejecuta las secuencias activas cada minuto
@@ -167,14 +165,14 @@ cron.schedule('* * * * *', () => {
   processSequences().catch(err => console.error('Error en processSequences:', err));
 });
 
-// Genera letras pendientes cada minuto
+// Genera guiones pendientes cada minuto
 cron.schedule('* * * * *', () => {
-  console.log('🖋️ generateLetras:', new Date().toISOString());
-  generateLetras().catch(err => console.error('Error en generateLetras:', err));
+  console.log('🖋️ generateGuiones:', new Date().toISOString());
+  generateGuiones().catch(err => console.error('Error en generateGuiones:', err));
 });
 
-// Envía letras pendientes cada minuto
+// Envía guiones pendientes cada minuto
 cron.schedule('* * * * *', () => {
-  console.log('📨 sendLetras:', new Date().toISOString());
-  sendLetras().catch(err => console.error('Error en sendLetras:', err));
+  console.log('📨 sendGuiones:', new Date().toISOString());
+  sendGuiones().catch(err => console.error('Error en sendGuiones:', err));
 });
