@@ -161,46 +161,30 @@ async function generateGuiones() {
     for (const docSnap of snap.docs) {
       const data = docSnap.data();
       // Adaptamos tu prompt VSL con placeholders
-      const prompt = `
-Eres un creador de guiones para videos de un minuto, usando el método de viralidad en ventas.
-Tu tarea es escribir un guion claro y cercano, dividido en partes con tiempos aproximados:
-
-- **Datos del negocio**:
-  - Nombre: ${data.businessName}
-  - Giro: ${data.giro}
-  - Objetivo del anuncio: ${data.purpose}
-  - Promoción especial: ${data.promo || 'ninguna'}
-
-- **Estructura (tiempos)**:
-  1. **0:00–0:10 Gancho**  
-     Un mensaje breve que capte atención y muestre el beneficio principal de ${data.businessName}.
-  2. **0:10–0:20 Testimonio Rápido**  
-     Frase de un cliente feliz que aprovechó ${data.promo || 'la promoción'}.
-  3. **0:20–0:30 Dolor y Necesidad**  
-     Explica en una o dos frases el problema que tienen tus clientes en ${data.giro}.
-  4. **0:30–0:40 Nuestra Solución**  
-     Muestra cómo ${data.businessName} resuelve ese problema de forma única.
-  5. **0:40–0:55 Llamado a la Acción**  
-     Invita a usar ${data.promo || 'la promoción'} con urgencia (oferta por tiempo limitado).
-  6. **0:55–1:00 Cierre**  
-     Pantalla con nombre, logo y contacto.
-
-- **Texto para voz**:  
-  Indica exactamente lo que dice la voz en cada parte, con tono cercano y entusiasta.
-
-- **Notas de producción**:  
-  Rápido ritmo (cambios cada 2–3 s), texto en pantalla, música animada que sube en la parte 3.
-
-- **Ideas de imágenes**:  
-  - Gancho: escena del problema.  
-  - Testimonio: foto sonriendo del cliente.  
-  - Dolor: imagen que represente urgencia.  
-  - Solución: demo breve del servicio.  
-  - CTA: texto “¡Oferta por tiempo limitado!”.  
-  - Cierre: logo y datos.
-
-Escribe el guion en español, sencillo y directo, listo para grabar. Máximo 250–300 palabras.
-`.trim();
+            // Adaptamos tu nuevo prompt con description y lenguaje sencillo
+            const prompt = `
+            Eres un creador de guiones de 1 minuto usando el método de viralidad en ventas.
+            Tu lenguaje debe ser muy sencillo y cercano al dueño de negocio.
+            Divide el guion en bloques con tiempos aproximados y utiliza estos datos:
+            
+            - Descripción del negocio/producto: ${data.description}
+            - Nombre del negocio: ${data.businessName}
+            - Objetivo del anuncio: ${data.purpose}
+            - Promoción (si la hay): ${data.promo || 'ninguna'}
+            
+            Estructura sugerida:
+            1. 0:00–0:10 Gancho: breve frase que capte atención y muestre el beneficio principal.
+            2. 0:10–0:20 Testimonio: cita corta de un cliente satisfecho.
+            3. 0:20–0:30 Dolor: describe el problema que enfrenta tu cliente.
+            4. 0:30–0:40 Solución: muestra cómo resuelves ese problema.
+            5. 0:40–0:55 Llamado a la acción: invita a aprovechar la promoción con urgencia.
+            6. 0:55–1:00 Cierre: logo, contacto y CTA final.
+            
+            Texto para voz con tono cercano y entusiasta. Notas de edición: ritmo dinámico, texto en pantalla, música que sube en la parte 3.
+            
+            Escribe el guion en español, máximo 250–300 palabras, listo para grabar.
+            `.trim();
+            
 
 
       console.log(`📝 prompt para ${docSnap.id}:\n${prompt}`);
