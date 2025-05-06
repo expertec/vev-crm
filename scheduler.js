@@ -162,45 +162,46 @@ async function generateGuiones() {
       const data = docSnap.data();
       // Adaptamos tu prompt VSL con placeholders
       const prompt = `
-Eres un generador de guiones para Video Sales Letters (VSL) de alta conversión.
-Tu tarea es crear un guion de VSL de 1 minuto, dividido en segmentos temporales, que incluya:
+Eres un creador de guiones para videos de un minuto, usando el método de viralidad en ventas.
+Tu tarea es escribir un guion claro y cercano, dividido en partes con tiempos aproximados:
 
-- **Variables**:
-  - Nombre del negocio: ${data.businessName}
-  - Giro del negocio: ${data.giro}
-  - Propósito del anuncio: ${data.purpose}
+- **Datos del negocio**:
+  - Nombre: ${data.businessName}
+  - Giro: ${data.giro}
+  - Objetivo del anuncio: ${data.purpose}
   - Promoción especial: ${data.promo || 'ninguna'}
 
-- **Estructura** (con tiempos aproximados):
-  1. **0:00–0:10 Hook y Promesa**
-     - Gancho inmediato que detenga el scroll y prometa el principal beneficio de ${data.businessName}.
-  2. **0:10–0:20 Prueba Social Rápida**
-     - Una frase de testimonio o resultado contundente de un cliente que aprovechó ${data.promo || 'la promoción'}.
-  3. **0:20–0:30 Dolor y Agitación**
-     - Describe en una o dos oraciones el problema urgente que enfrenta tu audiencia en ${data.giro}.
-  4. **0:30–0:40 Solución Express**
-     - Explica brevemente cómo ${data.businessName} resuelve ese problema de forma única.
-  5. **0:40–0:55 Llamado a la Acción con Urgencia**
-     - Invita a la audiencia a aprovechar ${data.promo || 'la promoción'} ahora, añade un motivo de urgencia o escasez.
-  6. **0:55–1:00 Cierre Visual y Contacto**
-     - Pantalla final limpia con CTA directo, logotipo y datos de contacto.
+- **Estructura (tiempos)**:
+  1. **0:00–0:10 Gancho**  
+     Un mensaje breve que capte atención y muestre el beneficio principal de ${data.businessName}.
+  2. **0:10–0:20 Testimonio Rápido**  
+     Frase de un cliente feliz que aprovechó ${data.promo || 'la promoción'}.
+  3. **0:20–0:30 Dolor y Necesidad**  
+     Explica en una o dos frases el problema que tienen tus clientes en ${data.giro}.
+  4. **0:30–0:40 Nuestra Solución**  
+     Muestra cómo ${data.businessName} resuelve ese problema de forma única.
+  5. **0:40–0:55 Llamado a la Acción**  
+     Invita a usar ${data.promo || 'la promoción'} con urgencia (oferta por tiempo limitado).
+  6. **0:55–1:00 Cierre**  
+     Pantalla con nombre, logo y contacto.
 
-- **Texto para voz en off**:
-  Define exactamente qué dirá la voz en cada segmento y con qué tono (energético, confiable, urgente).
+- **Texto para voz**:  
+  Indica exactamente lo que dice la voz en cada parte, con tono cercano y entusiasta.
 
-- **Notas de edición**:
-  Ritmo muy dinámico: cortes cada 1–3 segundos, overlays de texto en negrita, transiciones rápidas. Música de fondo que suba intensidad en 0:20–0:30 y mantenga energía hasta el final.
+- **Notas de producción**:  
+  Rápido ritmo (cambios cada 2–3 s), texto en pantalla, música animada que sube en la parte 3.
 
-- **Recomendaciones de imágenes/B-roll**:
-  - 0:00–0:10: logo animado o escena impactante del problema.
-  - 0:10–0:20: captura real o foto del cliente satisfecho.
-  - 0:20–0:30: metáfora visual del dolor (ej. reloj corriendo).
-  - 0:30–0:40: demo rápida del producto o servicio en acción.
-  - 0:40–0:55: texto grande con “¡Oferta por tiempo limitado!” sobre fondo limpio.
-  - 0:55–1:00: logotipo y botón animado de “Compra ahora” o “Contáctanos”.
+- **Ideas de imágenes**:  
+  - Gancho: escena del problema.  
+  - Testimonio: foto sonriendo del cliente.  
+  - Dolor: imagen que represente urgencia.  
+  - Solución: demo breve del servicio.  
+  - CTA: texto “¡Oferta por tiempo limitado!”.  
+  - Cierre: logo y datos.
 
-Genera el guion completo en español, con cada segmento numerado y su texto para voz en off, más las notas de edición y las sugerencias de imágenes, todo listo para producir. Máximo 250–300 palabras.
-      `.trim();
+Escribe el guion en español, sencillo y directo, listo para grabar. Máximo 250–300 palabras.
+`.trim();
+
 
       console.log(`📝 prompt para ${docSnap.id}:\n${prompt}`);
 
@@ -237,73 +238,60 @@ Genera el guion completo en español, con cada segmento numerado y su texto para
 async function sendGuiones() {
   try {
     const now = Date.now();
-    // Busca todos los guiones pendientes de envío
     const snap = await db
       .collection('guionesVideo')
       .where('status', '==', 'enviarGuion')
       .get();
 
-    const VIDEO_URL = 'https://cantalab.com/wp-content/uploads/ejemplo-guion-video.mp4';
+    const VIDEO_URL = 'https://cantalab.com/.../ejemplo-video.mp4';
 
     for (const docSnap of snap.docs) {
       const data = docSnap.data();
-      const { leadPhone, leadId, guion, guionGeneratedAt, requesterName } = data;
-
-      // Asegura que existan los datos necesarios
+      const { leadPhone, leadId, guion, guionGeneratedAt, senderName } = data;
       if (!leadPhone || !guion || !guionGeneratedAt) continue;
 
-      // Verifica que hayan pasado al menos 15 minutos desde la generación
       const genTime = guionGeneratedAt.toDate().getTime();
       if (now - genTime < 15 * 60 * 1000) continue;
 
+      // 1) MARCAR como enviado
+      await docSnap.ref.update({ status: 'enviado' });
+      console.log(`[sendGuiones] 🔒 ${docSnap.id} marcado como 'enviado'`);
+
+      // 2) Envío a WhatsApp
       const sock = getWhatsAppSock();
       if (!sock) continue;
-
       const phoneClean = leadPhone.replace(/\D/g, '');
       const jid = `${phoneClean}@s.whatsapp.net`;
-      const firstName = (requesterName || '').trim().split(' ')[0] || '';
+      const firstName = (senderName||'').split(' ')[0] || '';
 
-      // 1) Aviso inicial
       const aviso = `Hola ${firstName}, tu guion de video está listo. ¡Échale un vistazo!`;
       await sock.sendMessage(jid, { text: aviso });
-      await db
-        .collection('leads').doc(leadId).collection('messages')
+      await db.collection('leads').doc(leadId).collection('messages')
         .add({ content: aviso, sender: 'business', timestamp: new Date() });
 
-      // 2) Enviar el guion
       await sock.sendMessage(jid, { text: guion });
-      await db
-        .collection('leads').doc(leadId).collection('messages')
+      await db.collection('leads').doc(leadId).collection('messages')
         .add({ content: guion, sender: 'business', timestamp: new Date() });
 
-      // 3) (Opcional) Enviar un video demo o promocional
       await sock.sendMessage(jid, { video: { url: VIDEO_URL } });
-      await db
-        .collection('leads').doc(leadId).collection('messages')
-        .add({
-          mediaType: 'video',
-          mediaUrl: VIDEO_URL,
-          sender: 'business',
-          timestamp: new Date()
-        });
+      await db.collection('leads').doc(leadId).collection('messages')
+        .add({ mediaType:'video', mediaUrl: VIDEO_URL, sender:'business', timestamp: new Date() });
 
-      // 4) Actualizar lead con etiqueta y secuencia de “GuionEnviado”
+      // 3) Actualizar lead
       await db.collection('leads').doc(leadId).update({
         etiquetas: FieldValue.arrayUnion('GuionEnviado'),
         secuenciasActivas: FieldValue.arrayUnion({
-          trigger: 'GuionEnviado',
-          startTime: new Date().toISOString(),
-          index: 0
+          trigger: 'GuionEnviado', startTime: new Date().toISOString(), index: 0
         })
       });
 
-      // 5) Marcar el documento como enviado
-      await docSnap.ref.update({ status: 'enviado' });
+      console.log(`[sendGuiones] ✅ Guion ${docSnap.id} enviado`);
     }
   } catch (err) {
     console.error("❌ Error en sendGuiones:", err);
   }
 }
+
 
 
 export {
