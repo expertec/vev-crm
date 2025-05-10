@@ -223,8 +223,8 @@ async function generateGuiones() {
  * añade trigger 'GuionEnviado' al lead y marca status → 'enviado'.
  * Solo envía si han pasado al menos 15 minutos desde 'guionGeneratedAt'.
  */
-import { getWhatsAppSock } from './whatsappService.js';
-import { FieldValue } from 'firebase-admin/firestore';
+
+
 
 async function sendGuiones() {
   try {
@@ -299,9 +299,6 @@ async function sendGuiones() {
     console.error("❌ Error en sendGuiones:", err);
   }
 }
-
-export { sendGuiones };
-
 
 
 
