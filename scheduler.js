@@ -3,14 +3,11 @@ import admin from 'firebase-admin';
 import { getWhatsAppSock } from './whatsappService.js';
 import { db } from './firebaseAdmin.js';
 import axios from 'axios';
-import { prepareWAMessageMedia } from '@whiskeysockets/baileys/lib/Utils/messages-media.js';
-
-
-
+// Importamos todo el paquete CommonJS como “pkg” y luego extraemos lo que necesitamos:
+import pkgMessages from '@whiskeysockets/baileys/lib/Utils/messages-media.js';
+const { prepareWAMessageMedia } = pkgMessages;
 import { Configuration, OpenAIApi } from 'openai';
-
 const { FieldValue } = admin.firestore;
-
 // Asegúrate de que la API key esté definida
 if (!process.env.OPENAI_API_KEY) {
   throw new Error("Falta la variable de entorno OPENAI_API_KEY");
