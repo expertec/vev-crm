@@ -258,7 +258,7 @@ async function sendGuiones() {
       const firstName = (senderName || '').split(' ')[0] || '';
 
       // 3) Envío del aviso
-      const aviso = `¡Hola ${firstName}! Tu guion está listo. Échale un vistazo y dime si necesitas ajustes.`;
+      const aviso = `¡Listo ${firstName}! el guion de tu anuncio está listo. Leelo y dime si tienes alguna duda.`;
       await sock.sendMessage(jid, { text: aviso });
       await db.collection('leads').doc(leadId).collection('messages')
         .add({ content: aviso, sender: 'business', timestamp: new Date() });
