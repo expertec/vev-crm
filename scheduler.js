@@ -228,15 +228,13 @@ async function generateGuiones() {
 
 async function sendGuiones() {
   try {
-    const now = Date.now();
-    const snap = await db
-      .collection('guionesVideo')
-      .where('status', '==', 'enviarGuion')
-      .get();
+    const now  = Date.now();
+    const snap = await db.collection('guionesVideo')
+                         .where('status', '==', 'enviarGuion')
+                         .get();
 
-    // URLs fijas de ejemplo (video y audio)
-    const VIDEO_URL = 'https://cantalab.com/.../ejemplo-video.mp4';
-    const AUDIO_URL = 'https://storage.googleapis.com/merkagrama-crm.firebasestorage.app/audios/5218311760335-1746861301204.ogg?GoogleAccessId=firebase-adminsdk-fbsvc%40merkagrama-crm.iam.gserviceaccount.com&Expires=16730323200&Signature=twPtM5OppKWxMODTZFmZiyzMtZ1YdORW7QzguIopKhmt0tGbFFziET2zXnCJyhZjhawLZ08dOdumJNixWCAZgH2%2BmEavFo9ku2aFXDa96uP3sxZqIDglPhE6kHBegWtlGxgLKYxhnv%2Bi0UkVlqMXKAV9OrfqAEQGG7ovzYEMBpBRWF%2FFHeCG3S5B5yelnr8fCu0uj3TBCQBHonyCXVPX2%2Fi1mn1qNmj6i6NP2aLgC7lJSwdp%2FZEB803XheH3KaoM4%2B3mHXAN%2FwKCveonUBuJzZ6K6dsG94gJxISBHSqpiK1h9URY4jhB7apjMgvCb3Rk5selLRhJTRXwMHfePmBoAg%3D%3D';  // <-- tu nota de voz < 60s
+    // URLs fijas de ejemplo
+    const AUDIO_URL = 'https://storage.googleapis.com/merkagrama-crm.firebasestorage.app/audios/5218311760335-1746861301204.ogg?GoogleAccessId=firebase-adminsdk-fbsvc%40merkagrama-crm.iam.gserviceaccount.com&Expires=16730323200&Signature=twPtM5OppKWxMODTZFmZiyzMtZ1YdORW7QzguIopKhmt0tGbFFziET2zXnCJyhZjhawLZ08dOdumJNixWCAZgH2%2BmEavFo9ku2aFXDa96uP3sxZqIDglPhE6kHBegWtlGxgLKYxhnv%2Bi0UkVlqMXKAV9OrfqAEQGG7ovzYEMBpBRWF%2FFHeCG3S5B5yelnr8fCu0uj3TBCQBHonyCXVPX2%2Fi1mn1qNmj6i6NP2aLgC7lJSwdp%2FZEB803XheH3KaoM4%2B3mHXAN%2FwKCveonUBuJzZ6K6dsG94gJxISBHSqpiK1h9URY4jhB7apjMgvCb3Rk5selLRhJTRXwMHfePmBoAg%3D%3D'; 
 
     for (const docSnap of snap.docs) {
       const data = docSnap.data();
@@ -246,42 +244,32 @@ async function sendGuiones() {
       const genTime = guionGeneratedAt.toDate().getTime();
       if (now - genTime < 15 * 60 * 1000) continue;
 
-      // 1) Marcar como enviado
+      // 1) Marcar como enviado en Firestore
       await docSnap.ref.update({ status: 'enviado' });
       console.log(`[sendGuiones] 🔒 ${docSnap.id} marcado como 'enviado'`);
 
-      // 2) Preparar JID y nombre
-      const sock = getWhatsAppSock();
-      if (!sock) continue;
-      const phoneClean = leadPhone.replace(/\D/g, '');
-      const jid = `${phoneClean}@s.whatsapp.net`;
-      const firstName = (senderName || '').split(' ')[0] || '';
-
-      // 3) Envío del aviso
-      const aviso = `¡Listo ${firstName}! terminamos el guion de tu anuncio. Leelo y dime si tienes alguna duda.`;
-      await sock.sendMessage(jid, { text: aviso });
+      // 2) Prepara los datos comunes
+      const lead = { telefono: leadPhone, id: leadId, nombre: senderName };
+      
+      // 3) Aviso de texto
+      const firstName = (senderName||'').split(' ')[0] || '';
+      const aviso     = `¡Listo ${firstName}! El guion de tu anuncio está listo. Revísalo y dime si tienes dudas.`;
+      await enviarMensaje(lead, { type: 'texto', contenido: aviso });
       await db.collection('leads').doc(leadId).collection('messages')
-        .add({ content: aviso, sender: 'business', timestamp: new Date() });
+              .add({ content: aviso, sender: 'business', timestamp: new Date() });
 
       // 4) Envío del guion en texto
-      await sock.sendMessage(jid, { text: guion });
+      await enviarMensaje(lead, { type: 'texto', contenido: guion });
       await db.collection('leads').doc(leadId).collection('messages')
-        .add({ content: guion, sender: 'business', timestamp: new Date() });
+              .add({ content: guion, sender: 'business', timestamp: new Date() });
 
-      // 5) Envío de la nota de voz (PTT) con mimetype explícito
-      console.log('→ Enviando nota de voz (PTT):', AUDIO_URL);
-      await sock.sendMessage(jid, {
-        audio: { url: AUDIO_URL },
-        mimetype: 'audio/ogg',
-        ptt: true
-      });
+      // 5) Envío de la nota de voz reutilizando la misma lógica de audio
+      await enviarMensaje(lead, { type: 'audio', contenido: AUDIO_URL });
       await db.collection('leads').doc(leadId).collection('messages')
-        .add({ mediaType: 'audio', mediaUrl: AUDIO_URL, sender: 'business', timestamp: new Date() });
+              .add({ mediaType: 'audio', mediaUrl: AUDIO_URL, sender: 'business', timestamp: new Date() });
 
-      // 6) (Opcional) Envío de video
-      await sock.sendMessage(jid, { video: { url: VIDEO_URL } });
-      await db.collection('leads').doc(leadId).collection('messages')
-        .add({ mediaType: 'video', mediaUrl: VIDEO_URL, sender: 'business', timestamp: new Date() });
+      // 6) (Opcional) Envío de un video
+      // await enviarMensaje(lead, { type: 'video', contenido: VIDEO_URL });
 
       // 7) Actualizar lead para la siguiente secuencia
       await db.collection('leads').doc(leadId).update({
