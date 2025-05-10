@@ -223,6 +223,9 @@ async function generateGuiones() {
  * añade trigger 'GuionEnviado' al lead y marca status → 'enviado'.
  * Solo envía si han pasado al menos 15 minutos desde 'guionGeneratedAt'.
  */
+import { getWhatsAppSock } from './whatsappService.js';
+import { FieldValue } from 'firebase-admin/firestore';
+
 async function sendGuiones() {
   try {
     const now = Date.now();
@@ -231,7 +234,9 @@ async function sendGuiones() {
       .where('status', '==', 'enviarGuion')
       .get();
 
+    // URLs fijas de ejemplo (video y audio)
     const VIDEO_URL = 'https://cantalab.com/.../ejemplo-video.mp4';
+    const AUDIO_URL = 'https://storage.googleapis.com/.../tu-audio.ogg';  // <-- tu nota de voz < 60s
 
     for (const docSnap of snap.docs) {
       const data = docSnap.data();
@@ -241,35 +246,50 @@ async function sendGuiones() {
       const genTime = guionGeneratedAt.toDate().getTime();
       if (now - genTime < 15 * 60 * 1000) continue;
 
-      // 1) MARCAR como enviado
+      // 1) Marcar como enviado
       await docSnap.ref.update({ status: 'enviado' });
       console.log(`[sendGuiones] 🔒 ${docSnap.id} marcado como 'enviado'`);
 
-      // 2) Envío a WhatsApp
+      // 2) Preparar JID y nombre
       const sock = getWhatsAppSock();
       if (!sock) continue;
       const phoneClean = leadPhone.replace(/\D/g, '');
       const jid = `${phoneClean}@s.whatsapp.net`;
-      const firstName = (senderName||'').split(' ')[0] || '';
+      const firstName = (senderName || '').split(' ')[0] || '';
 
-      const aviso = `Hola ${firstName}, tu guion de video está listo. ¡Échale un vistazo!`;
+      // 3) Envío del aviso
+      const aviso = `¡Hola ${firstName}! Tu guion está listo. Échale un vistazo y dime si necesitas ajustes.`;
       await sock.sendMessage(jid, { text: aviso });
       await db.collection('leads').doc(leadId).collection('messages')
         .add({ content: aviso, sender: 'business', timestamp: new Date() });
 
+      // 4) Envío del guion en texto
       await sock.sendMessage(jid, { text: guion });
       await db.collection('leads').doc(leadId).collection('messages')
         .add({ content: guion, sender: 'business', timestamp: new Date() });
 
+      // 5) Envío de la nota de voz (PTT) con mimetype explícito
+      console.log('→ Enviando nota de voz (PTT):', AUDIO_URL);
+      await sock.sendMessage(jid, {
+        audio: { url: AUDIO_URL },
+        mimetype: 'audio/ogg',
+        ptt: true
+      });
+      await db.collection('leads').doc(leadId).collection('messages')
+        .add({ mediaType: 'audio', mediaUrl: AUDIO_URL, sender: 'business', timestamp: new Date() });
+
+      // 6) (Opcional) Envío de video
       await sock.sendMessage(jid, { video: { url: VIDEO_URL } });
       await db.collection('leads').doc(leadId).collection('messages')
-        .add({ mediaType:'video', mediaUrl: VIDEO_URL, sender:'business', timestamp: new Date() });
+        .add({ mediaType: 'video', mediaUrl: VIDEO_URL, sender: 'business', timestamp: new Date() });
 
-      // 3) Actualizar lead
+      // 7) Actualizar lead para la siguiente secuencia
       await db.collection('leads').doc(leadId).update({
         etiquetas: FieldValue.arrayUnion('GuionEnviado'),
         secuenciasActivas: FieldValue.arrayUnion({
-          trigger: 'GuionEnviado', startTime: new Date().toISOString(), index: 0
+          trigger: 'GuionEnviado',
+          startTime: new Date().toISOString(),
+          index: 0
         })
       });
 
@@ -279,6 +299,9 @@ async function sendGuiones() {
     console.error("❌ Error en sendGuiones:", err);
   }
 }
+
+export { sendGuiones };
+
 
 
 
