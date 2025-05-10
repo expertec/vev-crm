@@ -236,7 +236,7 @@ async function sendGuiones() {
 
     // URLs fijas de ejemplo (video y audio)
     const VIDEO_URL = 'https://cantalab.com/.../ejemplo-video.mp4';
-    const AUDIO_URL = 'https://storage.googleapis.com/.../tu-audio.ogg';  // <-- tu nota de voz < 60s
+    const AUDIO_URL = 'https://storage.googleapis.com/merkagrama-crm.firebasestorage.app/audios/5218311760335-1746861301204.ogg?GoogleAccessId=firebase-adminsdk-fbsvc%40merkagrama-crm.iam.gserviceaccount.com&Expires=16730323200&Signature=twPtM5OppKWxMODTZFmZiyzMtZ1YdORW7QzguIopKhmt0tGbFFziET2zXnCJyhZjhawLZ08dOdumJNixWCAZgH2%2BmEavFo9ku2aFXDa96uP3sxZqIDglPhE6kHBegWtlGxgLKYxhnv%2Bi0UkVlqMXKAV9OrfqAEQGG7ovzYEMBpBRWF%2FFHeCG3S5B5yelnr8fCu0uj3TBCQBHonyCXVPX2%2Fi1mn1qNmj6i6NP2aLgC7lJSwdp%2FZEB803XheH3KaoM4%2B3mHXAN%2FwKCveonUBuJzZ6K6dsG94gJxISBHSqpiK1h9URY4jhB7apjMgvCb3Rk5selLRhJTRXwMHfePmBoAg%3D%3D';  // <-- tu nota de voz < 60s
 
     for (const docSnap of snap.docs) {
       const data = docSnap.data();
@@ -258,7 +258,7 @@ async function sendGuiones() {
       const firstName = (senderName || '').split(' ')[0] || '';
 
       // 3) Envío del aviso
-      const aviso = `¡Listo ${firstName}! el guion de tu anuncio está listo. Leelo y dime si tienes alguna duda.`;
+      const aviso = `¡Listo ${firstName}! terminamos el guion de tu anuncio. Leelo y dime si tienes alguna duda.`;
       await sock.sendMessage(jid, { text: aviso });
       await db.collection('leads').doc(leadId).collection('messages')
         .add({ content: aviso, sender: 'business', timestamp: new Date() });
