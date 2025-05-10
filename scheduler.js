@@ -1,11 +1,9 @@
 // src/server/scheduler.js
-import { db } from './firebaseAdmin.js';
-import { getWhatsAppSock } from './whatsappService.js';
 import admin from 'firebase-admin';
+import { getWhatsAppSock } from './whatsappService.js';
+import { db } from './firebaseAdmin.js';
 import { Configuration, OpenAIApi } from 'openai';
-
 const { FieldValue } = admin.firestore;
-
 // Asegúrate de que la API key esté definida
 if (!process.env.OPENAI_API_KEY) {
   throw new Error("Falta la variable de entorno OPENAI_API_KEY");
@@ -31,6 +29,8 @@ function replacePlaceholders(template, leadData) {
     return value;
   });
 }
+
+
 
 /**
  * Envía un mensaje de WhatsApp según su tipo.
@@ -61,12 +61,15 @@ async function enviarMensaje(lead, mensaje) {
         if (text) await sock.sendMessage(jid, { text });
         break;
       }
-      case 'audio':
+      case 'audio': {
+        const audioUrl = replacePlaceholders(mensaje.contenido, lead);
+        console.log('→ Enviando PTT desde URL:', audioUrl);
         await sock.sendMessage(jid, {
-          audio: { url: replacePlaceholders(mensaje.contenido, lead) },
+          audio: { url: audioUrl },
           ptt: true
         });
         break;
+      }
       case 'imagen':
         await sock.sendMessage(jid, {
           image: { url: replacePlaceholders(mensaje.contenido, lead) }
