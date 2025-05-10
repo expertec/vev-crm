@@ -75,20 +75,17 @@ async function enviarMensaje(lead, mensaje) {
         break;
       }
       case 'audio': {
-        // 1) Calcula URL con placeholders
-        const audioUrl = replacePlaceholders(mensaje.contenido, lead);
+          // 1) Construir URL y descargar buffer
+      const audioUrl = replacePlaceholders(mensaje.contenido, lead);
+      const buffer   = await downloadAudioBuffer(audioUrl);
 
-        // 2) Descarga y verifica el buffer
-        const buffer = await downloadAudioBuffer(audioUrl);
-
-        // 3) Prepara y envía como nota de voz (PTT)
-        const media = await prepareWAMessageMedia(
-          { audio: buffer, mimetype: 'audio/ogg', ptt: true },
-          { upload: sock.uploadMedia.bind(sock) }
-        );
-        await sock.sendMessage(jid, media);
-        break;
-      }
+      // 2) Enviar directamente como nota de voz
+      await sock.sendMessage(jid, {
+        audio: buffer,
+        mimetype: 'audio/ogg',
+        ptt: true
+      });
+      break;}
       case 'imagen':
         await sock.sendMessage(jid, {
           image: { url: replacePlaceholders(mensaje.contenido, lead) }
