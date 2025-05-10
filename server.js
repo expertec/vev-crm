@@ -159,8 +159,8 @@ app.listen(port, () => {
   
 });
 
-// Scheduler: ejecuta las secuencias activas cada minuto
-cron.schedule('* * * * *', () => {
+ // Scheduler: ejecuta las secuencias activas cada 15 segundos
+ cron.schedule('*/30 * * * * *', () => {
   console.log('⏱️ processSequences:', new Date().toISOString());
   processSequences().catch(err => console.error('Error en processSequences:', err));
 });
