@@ -2,10 +2,6 @@
 import admin from 'firebase-admin';
 import { getWhatsAppSock } from './whatsappService.js';
 import { db } from './firebaseAdmin.js';
-import axios from 'axios';
-// Importamos todo el paquete CommonJS como “pkg” y luego extraemos lo que necesitamos:
-import pkgMessages from '@whiskeysockets/baileys/lib/Utils/messages-media.js';
-const { prepareWAMessageMedia } = pkgMessages;
 import { Configuration, OpenAIApi } from 'openai';
 const { FieldValue } = admin.firestore;
 // Asegúrate de que la API key esté definida
@@ -35,15 +31,6 @@ function replacePlaceholders(template, leadData) {
 }
 
 
-async function downloadAudioBuffer(url) {
-  const resp = await axios.get(url, { responseType: 'arraybuffer' });
-  console.log('Audio URL:', url);
-  console.log('  › Content-Length header:', resp.headers['content-length']);
-  const buffer = Buffer.from(resp.data);
-  console.log('  › Buffer length:', buffer.length);
-  if (!buffer.length) throw new Error('Buffer de audio vacío tras descarga');
-  return buffer;
-}
 
 /**
  * Envía un mensaje de WhatsApp según su tipo.
@@ -75,17 +62,15 @@ async function enviarMensaje(lead, mensaje) {
         break;
       }
       case 'audio': {
-          // 1) Construir URL y descargar buffer
-      const audioUrl = replacePlaceholders(mensaje.contenido, lead);
-      const buffer   = await downloadAudioBuffer(audioUrl);
-
-      // 2) Enviar directamente como nota de voz
-      await sock.sendMessage(jid, {
-        audio: buffer,
-        mimetype: 'audio/ogg',
-        ptt: true
-      });
-      break;}
+        const audioUrl = replacePlaceholders(mensaje.contenido, lead);
+        console.log('→ Enviando PTT desde URL:', audioUrl);
+        await sock.sendMessage(jid, {
+          audio: { url: audioUrl },
+          mimetype: 'audio/ogg',
+          ptt: true
+        });
+        break;
+      }
       case 'imagen':
         await sock.sendMessage(jid, {
           image: { url: replacePlaceholders(mensaje.contenido, lead) }
