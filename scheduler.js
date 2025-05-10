@@ -1,7 +1,12 @@
 // src/server/scheduler.js
-import { db } from './firebaseAdmin.js';
-import { getWhatsAppSock } from './whatsappService.js';
 import admin from 'firebase-admin';
+import { getWhatsAppSock } from './whatsappService.js';
+import { db } from './firebaseAdmin.js';
+import axios from 'axios';
+import { prepareWAMessageMedia } from '@whiskeysockets/baileys/lib/Utils/messages-media.js';
+
+
+
 import { Configuration, OpenAIApi } from 'openai';
 
 const { FieldValue } = admin.firestore;
@@ -30,6 +35,17 @@ function replacePlaceholders(template, leadData) {
     }
     return value;
   });
+}
+
+
+async function downloadAudioBuffer(url) {
+  const resp = await axios.get(url, { responseType: 'arraybuffer' });
+  console.log('Audio URL:', url);
+  console.log('  › Content-Length header:', resp.headers['content-length']);
+  const buffer = Buffer.from(resp.data);
+  console.log('  › Buffer length:', buffer.length);
+  if (!buffer.length) throw new Error('Buffer de audio vacío tras descarga');
+  return buffer;
 }
 
 /**
@@ -61,12 +77,21 @@ async function enviarMensaje(lead, mensaje) {
         if (text) await sock.sendMessage(jid, { text });
         break;
       }
-      case 'audio':
-        await sock.sendMessage(jid, {
-          audio: { url: replacePlaceholders(mensaje.contenido, lead) },
-          ptt: true
-        });
+      case 'audio': {
+        // 1) Calcula URL con placeholders
+        const audioUrl = replacePlaceholders(mensaje.contenido, lead);
+
+        // 2) Descarga y verifica el buffer
+        const buffer = await downloadAudioBuffer(audioUrl);
+
+        // 3) Prepara y envía como nota de voz (PTT)
+        const media = await prepareWAMessageMedia(
+          { audio: buffer, mimetype: 'audio/ogg', ptt: true },
+          { upload: sock.uploadMedia.bind(sock) }
+        );
+        await sock.sendMessage(jid, media);
         break;
+      }
       case 'imagen':
         await sock.sendMessage(jid, {
           image: { url: replacePlaceholders(mensaje.contenido, lead) }
