@@ -66,7 +66,7 @@ async function enviarMensaje(lead, mensaje) {
         console.log('→ Enviando PTT desde URL:', audioUrl);
         await sock.sendMessage(jid, {
           audio: { url: audioUrl },
-          ptt: true
+      
         });
         break;
       }
