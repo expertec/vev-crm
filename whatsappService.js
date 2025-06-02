@@ -86,7 +86,7 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (!jid || jid.endsWith('@g.us')) continue; // ignorar grupos
 
     // 1) Determinar número de teléfono y quién envía
-    const phone = jid.split('@')[0].replace(/^52/, ''); // quitamos prefijo 52 si existiera
+    const phone = jid.split('@')[0];
     const sender = msg.key.fromMe ? 'business' : 'lead';
 
     // 2) Inicializar variables para contenido y tipo de media
