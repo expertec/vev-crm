@@ -3,6 +3,7 @@ import admin from 'firebase-admin';
 import { getWhatsAppSock } from './whatsappService.js';
 import { db } from './firebaseAdmin.js';
 import { Configuration, OpenAIApi } from 'openai';
+import axios from 'axios';        
 const { FieldValue } = admin.firestore;
 // Asegúrate de que la API key esté definida
 if (!process.env.OPENAI_API_KEY) {
@@ -14,6 +15,7 @@ const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
 });
 const openai = new OpenAIApi(configuration);
+const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 
 /**
  * Reemplaza placeholders en plantillas de texto.
@@ -28,6 +30,65 @@ function replacePlaceholders(template, leadData) {
     }
     return value;
   });
+}
+
+async function generateSiteSchemas() {
+  console.log("▶️ generateSiteSchemas: inicio");
+  if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno");
+  const snap = await db.collection('sites')  // o 'sitios', según tu nombre
+                        .where('status', '==', 'Sin procesar')
+                        .get();
+
+  for (const doc of snap.docs) {
+    const data = doc.data();
+    try {
+      // 1. Generar schema con OpenAI
+      const prompt = `
+        Eres un asistente que construye un JSON de site schema.
+        Recibe estos datos: 
+        nombre: ${data.companyInfo},
+        giro: ${data.businessSector.join(', ')},
+        historia: ${data.businessStory},
+        items: ${JSON.stringify(data.keyItems)},
+        paleta: ${JSON.stringify(data.palette)},
+        redes: Instagram: ${data.socialInstagram}, Facebook: ${data.socialFacebook}.
+        Devuelve SOLO el JSON del schema completo, sin texto adicional.
+      `;
+      const aiRes = await openai.createChatCompletion({
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: 'Eres un generador de site schemas en JSON.' },
+          { role: 'user', content: prompt }
+        ]
+      });
+      const schema = JSON.parse(aiRes.data.choices[0].message.content.trim());
+
+      // 2. Buscar foto en Pexels
+      const query = data.businessSector.join(' ');
+      const px = await axios.get('https://api.pexels.com/v1/search', {
+        headers: { Authorization: PEXELS_API_KEY },
+        params: { query, per_page: 1 }
+      });
+      const photo = px.data.photos[0]?.src?.large || null;
+
+      if (photo) {
+        // Asigna la imagen de fondo del hero al schema
+        schema.hero = schema.hero || {};
+        schema.hero.backgroundImageUrl = photo;
+      }
+
+      // 3. Actualiza en Firestore
+      await doc.ref.update({
+        schema,
+        status: 'Procesado',
+        processedAt: FieldValue.serverTimestamp()
+      });
+      console.log(`✅ Site schema generado para ${doc.id}`);
+    } catch (err) {
+      console.error(`❌ Error en generateSiteSchemas para ${doc.id}:`, err);
+    }
+  }
+  console.log("▶️ generateSiteSchemas: finalizado");
 }
 
 
@@ -293,6 +354,7 @@ async function sendGuiones() {
 export {
   processSequences,
   generateGuiones,
-  sendGuiones
+  sendGuiones,
+  generateSiteSchemas
 };
 

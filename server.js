@@ -27,7 +27,7 @@ import {
   sendMessageToLead,
   getSessionPhone
 } from './whatsappService.js';
-import { processSequences, generateGuiones, sendGuiones } from './scheduler.js';
+import { processSequences, generateSiteSchemas   } from './scheduler.js';
 
 
 
@@ -165,14 +165,9 @@ app.listen(port, () => {
   processSequences().catch(err => console.error('Error en processSequences:', err));
 });
 
-// Genera guiones pendientes cada minuto
-cron.schedule('* * * * *', () => {
-  console.log('🖋️ generateGuiones:', new Date().toISOString());
-  generateGuiones().catch(err => console.error('Error en generateGuiones:', err));
-});
 
-// Envía guiones pendientes cada minuto
+// Cada 1 minutos busca nuevos sitios por procesar
 cron.schedule('* * * * *', () => {
-  console.log('📨 sendGuiones:', new Date().toISOString());
-  sendGuiones().catch(err => console.error('Error en sendGuiones:', err));
+  console.log('⏱️ generateSiteSchemas:', new Date().toISOString());
+  generateSiteSchemas().catch(err => console.error('Error en generateSiteSchemas:', err));
 });
