@@ -35,9 +35,11 @@ function replacePlaceholders(template, leadData) {
 async function generateSiteSchemas() {
   console.log("▶️ generateSiteSchemas: inicio");
   if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno");
-  const snap = await db.collection('Negocios')  // o 'sitios', según tu nombre
-                        .where('status', '==', 'Sin procesar')
-                        .get();
+
+  const snap = await db
+    .collection('Negocios')   // asegúrate de que sea tu colección correcta
+    .where('status', '==', 'Sin procesar')
+    .get();
 
   for (const doc of snap.docs) {
     const data = doc.data();
@@ -45,7 +47,7 @@ async function generateSiteSchemas() {
       // 1. Generar schema con OpenAI
       const prompt = `
         Eres un asistente que construye un JSON de site schema.
-        Recibe estos datos: 
+        Recibe estos datos:
         nombre: ${data.companyInfo},
         giro: ${data.businessSector.join(', ')},
         historia: ${data.businessStory},
@@ -61,7 +63,20 @@ async function generateSiteSchemas() {
           { role: 'user', content: prompt }
         ]
       });
-      const schema = JSON.parse(aiRes.data.choices[0].message.content.trim());
+
+      // --- Aquí extraemos el JSON limpio ---
+      const raw = aiRes.data.choices[0].message.content;
+      // Si viene entre ```json ... ```
+      const fenceMatch = raw.match(/```json\s*([\s\S]*?)```/i);
+      const jsonText = fenceMatch ? fenceMatch[1].trim() : raw.trim();
+
+      let schema;
+      try {
+        schema = JSON.parse(jsonText);
+      } catch (parseErr) {
+        console.error(`❌ No pude parsear el JSON generado para ${doc.id}:`, jsonText);
+        throw parseErr;
+      }
 
       // 2. Buscar foto en Pexels
       const query = data.businessSector.join(' ');
@@ -69,10 +84,8 @@ async function generateSiteSchemas() {
         headers: { Authorization: PEXELS_API_KEY },
         params: { query, per_page: 1 }
       });
-      const photo = px.data.photos[0]?.src?.large || null;
-
+      const photo = px.data.photos?.[0]?.src?.large || null;
       if (photo) {
-        // Asigna la imagen de fondo del hero al schema
         schema.hero = schema.hero || {};
         schema.hero.backgroundImageUrl = photo;
       }
@@ -80,7 +93,7 @@ async function generateSiteSchemas() {
       // 3. Actualiza en Firestore
       await doc.ref.update({
         schema,
-        status: 'Procesado',
+        status:    'Procesado',
         processedAt: FieldValue.serverTimestamp()
       });
       console.log(`✅ Site schema generado para ${doc.id}`);
@@ -88,8 +101,10 @@ async function generateSiteSchemas() {
       console.error(`❌ Error en generateSiteSchemas para ${doc.id}:`, err);
     }
   }
+
   console.log("▶️ generateSiteSchemas: finalizado");
 }
+
 
 
 
