@@ -35,7 +35,7 @@ function replacePlaceholders(template, leadData) {
 async function generateSiteSchemas() {
   console.log("▶️ generateSiteSchemas: inicio");
   if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno");
-  const snap = await db.collection('sites')  // o 'sitios', según tu nombre
+  const snap = await db.collection('Negocios')  // o 'sitios', según tu nombre
                         .where('status', '==', 'Sin procesar')
                         .get();
 
