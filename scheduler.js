@@ -10,7 +10,6 @@ if (!process.env.OPENAI_API_KEY) {
   throw new Error("Falta la variable de entorno OPENAI_API_KEY");
 }
 
-
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY
 if (!process.env.OPENAI_API_KEY) {
   throw new Error("Falta OPENAI_API_KEY en entorno")
@@ -38,18 +37,18 @@ function replacePlaceholders(template, leadData) {
   });
 }
 
-async function generateSiteSchemas() {
-  console.log("▶️ generateSiteSchemas: inicio");
-  if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno");
+export async function generateSiteSchemas() {
+  console.log("▶️ generateSiteSchemas: inicio")
+  if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno")
 
   // 1) Consulta todos los documentos pendientes
   const snap = await db
     .collection("Negocios")
     .where("status", "==", "Sin procesar")
-    .get();
+    .get()
 
   for (const doc of snap.docs) {
-    const data = doc.data();
+    const data = doc.data()
     try {
       // 2) Construye el prompt dividido en system + user
       const promptSystem = `
@@ -59,7 +58,7 @@ para sitios web de cualquier sector. Tu misión:
 2) Mantener un tono profesional y cercano.
 3) Devolver ÚNICAMENTE un JSON con la estructura exacta que se describe a continuación,
    sin explicaciones ni texto adicional.
-`.trim();
+`.trim()
 
       const promptUser = `
 Negocio de giro: "${data.businessSector.join(", ")}"
@@ -71,92 +70,129 @@ WhatsApp: ${data.contactWhatsapp}
 Instagram: ${data.socialInstagram}
 Facebook: ${data.socialFacebook}
 
-Genera exactamente este JSON:
+**IMPORTANTE:** Para cada elemento de la sección "features", analiza su "title" y su "text" y asigna **el icono de Ant Design** que mejor represente su contenido. Dispones de este set de iconos:
+
+  SafetyOutlined, BulbOutlined, UsergroupAddOutlined,
+  HeartOutlined, RocketOutlined, ExperimentOutlined
+
+Cada feature debe tener la forma:
+  {
+    "icon":    "<nombre del icono>",
+    "title":   "<título>",
+    "text":    "<texto descriptivo>"
+  }
+
+Devuelve únicamente el JSON con la forma exacta descrita a continuación, sin texto adicional:
+
 {
-  "slug": "<slug>",
+  "slug":    "<slug>",
   "logoUrl": "<URL del logo>",
-  "colors": { "primary":"<hex>", "secondary":"<hex>", "accent":"<hex>", "text":"<hex>" },
+  "colors": {
+    "primary":   "<hex>",
+    "secondary": "<hex>",
+    "accent":    "<hex>",
+    "text":      "<hex>"
+  },
   "hero": {
-    "title":"<Título>", "subtitle":"<Subtítulo>",
-    "ctaText":"<Texto CTA>", "ctaUrl":"<URL CTA>",
-    "backgroundImageUrl":"<URL fondo>"
+    "title":               "<Título>",
+    "subtitle":            "<Subtítulo>",
+    "ctaText":             "<Texto CTA>",
+    "ctaUrl":              "<URL CTA>",
+    "backgroundImageUrl":  "<URL fondo>"
   },
   "features": {
-    "title":"<Título sección items>",
-    "items":[ { "icon":null, "title":"<t1>", "text":"<d1>" }, … ]
+    "title": "¿Qué nos hace únicos?",
+    "items": [
+      { "icon":"<Icono1>","title":"<T1>","text":"<D1>" },
+      { "icon":"<Icono2>","title":"<T2>","text":"<D2>" },
+      …
+    ]
   },
   "products": {
     "title":"<Título sección productos>",
     "items":[
       {
-        "title":"<nombre>", "text":"<desc>",
-        "imageUrl":"<img>", "buttonText":"<botón>", "buttonUrl":"<url>"
-      }, …
+        "title":"<nombre>",
+        "text":"<desc>",
+        "imageUrl":"<img>",
+        "buttonText":"<botón>",
+        "buttonUrl":"<url>"
+      },
+      …
     ]
   },
-  "about": { "title":"<Título>", "text":"<Texto>" },
+  "about": {
+    "title":"<Título>",
+    "text":"<Texto>"
+  },
   "menu":[
     {"id":"services","label":"Servicios"},
     {"id":"about","label":"Nosotros"},
     {"id":"contact","label":"Contáctanos"}
   ],
   "contact": {
-    "whatsapp":"<teléfono>", "email":"<email>",
-    "facebook":"<url>", "instagram":"<url>", "youtube":"<url>"
+    "whatsapp":"<teléfono>",
+    "email":"<email>",
+    "facebook":"<url>",
+    "instagram":"<url>",
+    "youtube":"<url>"
   },
   "testimonials": {
     "title":"<Título testimonios>",
-    "items":[ { "text":"<t1>","author":"<a1>" }, … ]
+    "items":[
+      { "text":"<t1>","author":"<a1>" },
+      …
+    ]
   }
 }
-`.trim();
+`.trim()
 
-      // 3) Llamada a la API de OpenAI para generar el schema
+      // 3) Generar schema
       const aiRes = await openai.createChatCompletion({
-        model: "gpt-4o",
+        model:       "gpt-4o",
         messages: [
           { role: "system", content: promptSystem },
-          { role: "user",   content: promptUser }
+          { role: "user",   content: promptUser  }
         ],
         temperature: 0.7,
-        max_tokens: 800
-      });
+        max_tokens:  800
+      })
 
-      // 4) Extracción y parseo del JSON (sin code fences)
-      let raw = aiRes.data.choices[0].message.content.trim();
-      raw = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-      const schema = JSON.parse(raw);
+      // 4) Limpiar y parsear JSON
+      let raw = aiRes.data.choices[0].message.content.trim()
+      raw = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim()
+      const schema = JSON.parse(raw)
 
       // ────────────────────────────────────────────────────────
-      // 5) Traduce el giro al inglés para obtener mejores keywords
-      const sectorText = data.businessSector.join(", ");
+      // 5) Traduce giro a inglés para Pexels
+      const sectorText = data.businessSector.join(", ")
       const translateRes = await openai.createChatCompletion({
-        model: "gpt-4o",
+        model:       "gpt-4o",
         messages: [
           {
-            role: "system",
+            role:    "system",
             content: "Eres un asistente que convierte un sector de negocio en una frase de búsqueda en inglés para fotos de stock."
           },
           {
-            role: "user",
-            content: `Dame una frase corta en inglés para buscar imágenes en Pexels relacionadas con este giro de negocio: "${sectorText}".`
+            role:    "user",
+            content: `Dame una frase corta en inglés para buscar imágenes en Pexels relacionadas con este giro: "${sectorText}".`
           }
         ],
         temperature: 0.3,
-        max_tokens: 50
-      });
-      const englishQuery = translateRes.data.choices[0].message.content.trim();
+        max_tokens:  50
+      })
+      const englishQuery = translateRes.data.choices[0].message.content.trim()
       // ────────────────────────────────────────────────────────
 
-      // 6) Búsqueda de imagen en Pexels usando la consulta en inglés
+      // 6) Buscar fondo en Pexels
       const px = await axios.get("https://api.pexels.com/v1/search", {
         headers: { Authorization: PEXELS_API_KEY },
-        params: { query: englishQuery, per_page: 1 }
-      });
-      const photo = px.data.photos?.[0]?.src?.large;
+        params:  { query: englishQuery, per_page: 1 }
+      })
+      const photo = px.data.photos?.[0]?.src?.large
       if (photo) {
-        schema.hero = schema.hero || {};
-        schema.hero.backgroundImageUrl = photo;
+        schema.hero = schema.hero || {}
+        schema.hero.backgroundImageUrl = photo
       }
 
       // 7) Guardar en Firestore
@@ -164,15 +200,15 @@ Genera exactamente este JSON:
         schema,
         status:      "Procesado",
         processedAt: FieldValue.serverTimestamp()
-      });
+      })
 
-      console.log(`✅ Site schema generado para ${doc.id}`);
+      console.log(`✅ Site schema generado para ${doc.id}`)
     } catch (err) {
-      console.error(`❌ Error en generateSiteSchemas para ${doc.id}:`, err);
+      console.error(`❌ Error en generateSiteSchemas para ${doc.id}:`, err)
     }
   }
 
-  console.log("▶️ generateSiteSchemas: finalizado");
+  console.log("▶️ generateSiteSchemas: finalizado")
 }
 
 
