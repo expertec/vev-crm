@@ -2,7 +2,7 @@
 import admin from 'firebase-admin';
 import { getWhatsAppSock } from './whatsappService.js';
 import { db } from './firebaseAdmin.js';
-import { Configuration, OpenAIApi } from 'openai';
+import { Configuration, OpenAIApi } from 'openai'
 import axios from 'axios';        
 const { FieldValue } = admin.firestore;
 // Asegúrate de que la API key esté definida
@@ -10,12 +10,18 @@ if (!process.env.OPENAI_API_KEY) {
   throw new Error("Falta la variable de entorno OPENAI_API_KEY");
 }
 
-// Configuración de OpenAI
+
+const PEXELS_API_KEY = process.env.PEXELS_API_KEY
+if (!process.env.OPENAI_API_KEY) {
+  throw new Error("Falta OPENAI_API_KEY en entorno")
+}
+
+// 1) Inicializamos el cliente oficial v3/v4 compatible
 const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
-});
-const openai = new OpenAIApi(configuration);
-const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
+})
+const openai = new OpenAIApi(configuration)
+
 
 /**
  * Reemplaza placeholders en plantillas de texto.
@@ -36,7 +42,7 @@ async function generateSiteSchemas() {
   console.log("▶️ generateSiteSchemas: inicio")
   if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno")
 
-  // 1) Busca todos los negocios pendientes
+  // 2) Consulta todos los documentos pendientes
   const snap = await db
     .collection("Negocios")
     .where("status", "==", "Sin procesar")
@@ -45,10 +51,10 @@ async function generateSiteSchemas() {
   for (const doc of snap.docs) {
     const data = doc.data()
     try {
-      // 2) Prompt para copy persuasivo (igual que tu promptSystem + promptUser)
+      // 3) Construye el prompt dividido en system + user
       const promptSystem = `
-Eres un redactor publicitario SENIOR, experto en copywriting persuasivo 
-para sitios web de cualquier sector. Tu misión es:
+Eres un redactor publicitario SENIOR, experto en copywriting persuasivo
+para sitios web de cualquier sector. Tu misión:
 1) Proponer títulos, subtítulos y llamadas a la acción claros y orientados a la conversión.
 2) Mantener un tono profesional y cercano.
 3) Devolver ÚNICAMENTE un JSON con la estructura exacta que se describe a continuación,
@@ -56,61 +62,83 @@ para sitios web de cualquier sector. Tu misión es:
 `.trim()
 
       const promptUser = `
-Tengo un negocio de giro "${data.businessSector.join(", ")}" llamado "${data.companyInfo}".
-Breve historia: "${data.businessStory}".
-Colores disponibles: ${JSON.stringify(data.palette)}.
-Servicios/productos: ${JSON.stringify(data.keyItems)}.
-WhatsApp: ${data.contactWhatsapp}.
-Instagram: ${data.socialInstagram}, Facebook: ${data.socialFacebook}.
+Negocio de giro: "${data.businessSector.join(", ")}"
+Nombre: "${data.companyInfo}"
+Historia: "${data.businessStory}"
+Colores disponibles: ${JSON.stringify(data.palette)}
+Servicios/productos: ${JSON.stringify(data.keyItems)}
+WhatsApp: ${data.contactWhatsapp}
+Instagram: ${data.socialInstagram}
+Facebook: ${data.socialFacebook}
 
-Ahora, genera exactamente este JSON:
-{ /* ... estructura que ya tienes definida ... */ }
+Genera exactamente este JSON:
+{
+  "slug": "<slug>",
+  "logoUrl": "<URL del logo>",
+  "colors": { "primary":"<hex>", "secondary":"<hex>", "accent":"<hex>", "text":"<hex>" },
+  "hero": {
+    "title":"<Título>", "subtitle":"<Subtítulo>",
+    "ctaText":"<Texto CTA>", "ctaUrl":"<URL CTA>",
+    "backgroundImageUrl":"<URL fondo>"
+  },
+  "features": {
+    "title":"<Título sección items>",
+    "items":[ { "icon":null, "title":"<t1>", "text":"<d1>" }, … ]
+  },
+  "products": {
+    "title":"<Título sección productos>",
+    "items":[
+      {
+        "title":"<nombre>", "text":"<desc>",
+        "imageUrl":"<img>", "buttonText":"<botón>", "buttonUrl":"<url>"
+      }, …
+    ]
+  },
+  "about": { "title":"<Título>", "text":"<Texto>" },
+  "menu":[
+    {"id":"services","label":"Servicios"},
+    {"id":"about","label":"Nosotros"},
+    {"id":"contact","label":"Contáctanos"}
+  ],
+  "contact": {
+    "whatsapp":"<teléfono>", "email":"<email>",
+    "facebook":"<url>", "instagram":"<url>", "youtube":"<url>"
+  },
+  "testimonials": {
+    "title":"<Título testimonios>",
+    "items":[ { "text":"<t1>","author":"<a1>" }, … ]
+  }
+}
 `.trim()
 
-      // 3) Llamada a OpenAI
-      const aiRes = await openai.chat.completions.create({
+      // 4) Llamada a la API de OpenAI
+      const aiRes = await openai.createChatCompletion({
         model: "gpt-4o",
         messages: [
           { role: "system", content: promptSystem },
           { role: "user",   content: promptUser }
-        ]
+        ],
+        temperature: 0.7,
+        max_tokens: 800
       })
 
-      // 4) Limpieza de code fences y parse
-      let raw = aiRes.choices[0].message.content.trim()
-      raw = raw.replace(/^```json\s*/, "").replace(/```$/m, "").trim()
+      // 5) Extracción y parseo del JSON (sin code fences)
+      let raw = aiRes.data.choices[0].message.content.trim()
+      raw = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim()
       const schema = JSON.parse(raw)
 
-      // 5) ————— CORRECCIÓN AQUÍ —————
-      // Fetch a Pexels con orientation=landscape y extraer src.original
-      const pxRes = await axios.get("https://api.pexels.com/v1/search", {
-        headers: { Authorization: PEXELS_API_KEY },  // no "Bearer "
-        params: {
-          query:       data.businessSector.join(" "),
-          per_page:    1,
-          orientation: "landscape"
-        }
+      // 6) Búsqueda de imagen en Pexels
+      const px = await axios.get("https://api.pexels.com/v1/search", {
+        headers: { Authorization: PEXELS_API_KEY },
+        params: { query: data.businessSector.join(" "), per_page: 1 }
       })
-      console.log("Pexels response for", doc.id, "→", pxRes.data)
-
-      const photoSrc = pxRes.data.photos?.[0]?.src
-      const heroPhoto =
-        photoSrc?.original ||
-        photoSrc?.large2x   ||
-        photoSrc?.large     ||
-        photoSrc?.medium    ||
-        photoSrc?.small     ||
-        null
-
-      if (heroPhoto) {
+      const photo = px.data.photos?.[0]?.src?.large
+      if (photo) {
         schema.hero = schema.hero || {}
-        schema.hero.backgroundImageUrl = heroPhoto
-      } else {
-        console.warn("⚠️ No se encontró foto en Pexels para", doc.id)
+        schema.hero.backgroundImageUrl = photo
       }
-      // ——————————————————————————————
 
-      // 6) Guardar en Firestore
+      // 7) Guardar en Firestore
       await doc.ref.update({
         schema,
         status:      "Procesado",
