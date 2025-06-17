@@ -39,19 +39,19 @@ function replacePlaceholders(template, leadData) {
 }
 
 async function generateSiteSchemas() {
-  console.log("▶️ generateSiteSchemas: inicio")
-  if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno")
+  console.log("▶️ generateSiteSchemas: inicio");
+  if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno");
 
-  // 2) Consulta todos los documentos pendientes
+  // 1) Consulta todos los documentos pendientes
   const snap = await db
     .collection("Negocios")
     .where("status", "==", "Sin procesar")
-    .get()
+    .get();
 
   for (const doc of snap.docs) {
-    const data = doc.data()
+    const data = doc.data();
     try {
-      // 3) Construye el prompt dividido en system + user
+      // 2) Construye el prompt dividido en system + user
       const promptSystem = `
 Eres un redactor publicitario SENIOR, experto en copywriting persuasivo
 para sitios web de cualquier sector. Tu misión:
@@ -59,7 +59,7 @@ para sitios web de cualquier sector. Tu misión:
 2) Mantener un tono profesional y cercano.
 3) Devolver ÚNICAMENTE un JSON con la estructura exacta que se describe a continuación,
    sin explicaciones ni texto adicional.
-`.trim()
+`.trim();
 
       const promptUser = `
 Negocio de giro: "${data.businessSector.join(", ")}"
@@ -109,9 +109,9 @@ Genera exactamente este JSON:
     "items":[ { "text":"<t1>","author":"<a1>" }, … ]
   }
 }
-`.trim()
+`.trim();
 
-      // 4) Llamada a la API de OpenAI
+      // 3) Llamada a la API de OpenAI para generar el schema
       const aiRes = await openai.createChatCompletion({
         model: "gpt-4o",
         messages: [
@@ -120,22 +120,43 @@ Genera exactamente este JSON:
         ],
         temperature: 0.7,
         max_tokens: 800
-      })
+      });
 
-      // 5) Extracción y parseo del JSON (sin code fences)
-      let raw = aiRes.data.choices[0].message.content.trim()
-      raw = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim()
-      const schema = JSON.parse(raw)
+      // 4) Extracción y parseo del JSON (sin code fences)
+      let raw = aiRes.data.choices[0].message.content.trim();
+      raw = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
+      const schema = JSON.parse(raw);
 
-      // 6) Búsqueda de imagen en Pexels
+      // ────────────────────────────────────────────────────────
+      // 5) Traduce el giro al inglés para obtener mejores keywords
+      const sectorText = data.businessSector.join(", ");
+      const translateRes = await openai.createChatCompletion({
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "system",
+            content: "Eres un asistente que convierte un sector de negocio en una frase de búsqueda en inglés para fotos de stock."
+          },
+          {
+            role: "user",
+            content: `Dame una frase corta en inglés para buscar imágenes en Pexels relacionadas con este giro de negocio: "${sectorText}".`
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 50
+      });
+      const englishQuery = translateRes.data.choices[0].message.content.trim();
+      // ────────────────────────────────────────────────────────
+
+      // 6) Búsqueda de imagen en Pexels usando la consulta en inglés
       const px = await axios.get("https://api.pexels.com/v1/search", {
         headers: { Authorization: PEXELS_API_KEY },
-        params: { query: data.businessSector.join(" "), per_page: 1 }
-      })
-      const photo = px.data.photos?.[0]?.src?.large
+        params: { query: englishQuery, per_page: 1 }
+      });
+      const photo = px.data.photos?.[0]?.src?.large;
       if (photo) {
-        schema.hero = schema.hero || {}
-        schema.hero.backgroundImageUrl = photo
+        schema.hero = schema.hero || {};
+        schema.hero.backgroundImageUrl = photo;
       }
 
       // 7) Guardar en Firestore
@@ -143,15 +164,15 @@ Genera exactamente este JSON:
         schema,
         status:      "Procesado",
         processedAt: FieldValue.serverTimestamp()
-      })
+      });
 
-      console.log(`✅ Site schema generado para ${doc.id}`)
+      console.log(`✅ Site schema generado para ${doc.id}`);
     } catch (err) {
-      console.error(`❌ Error en generateSiteSchemas para ${doc.id}:`, err)
+      console.error(`❌ Error en generateSiteSchemas para ${doc.id}:`, err);
     }
   }
 
-  console.log("▶️ generateSiteSchemas: finalizado")
+  console.log("▶️ generateSiteSchemas: finalizado");
 }
 
 
