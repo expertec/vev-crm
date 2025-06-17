@@ -32,20 +32,20 @@ function replacePlaceholders(template, leadData) {
   });
 }
 
-async function generateSiteSchemas() {
-  console.log("▶️ generateSiteSchemas: inicio");
-  if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno");
+export async function generateSiteSchemas() {
+  console.log("▶️ generateSiteSchemas: inicio")
+  if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno")
 
   // 1) Busca todos los negocios pendientes
   const snap = await db
     .collection("Negocios")
     .where("status", "==", "Sin procesar")
-    .get();
+    .get()
 
   for (const doc of snap.docs) {
-    const data = doc.data();
+    const data = doc.data()
     try {
-      // 2) Prompt para copy persuasivo
+      // 2) Prompt para copy persuasivo (igual que tu promptSystem + promptUser)
       const promptSystem = `
 Eres un redactor publicitario SENIOR, experto en copywriting persuasivo 
 para sitios web de cualquier sector. Tu misión es:
@@ -53,7 +53,7 @@ para sitios web de cualquier sector. Tu misión es:
 2) Mantener un tono profesional y cercano.
 3) Devolver ÚNICAMENTE un JSON con la estructura exacta que se describe a continuación,
    sin explicaciones ni texto adicional.
-`.trim();
+`.trim()
 
       const promptUser = `
 Tengo un negocio de giro "${data.businessSector.join(", ")}" llamado "${data.companyInfo}".
@@ -64,109 +64,66 @@ WhatsApp: ${data.contactWhatsapp}.
 Instagram: ${data.socialInstagram}, Facebook: ${data.socialFacebook}.
 
 Ahora, genera exactamente este JSON:
-{
-  "slug": "<slug>",
-  "logoUrl": "<URL del logo>",
-  "colors": {
-    "primary": "<hex>",
-    "secondary": "<hex>",
-    "accent": "<hex>",
-    "text": "<hex>"
-  },
-  "hero": {
-    "title": "<Título del hero>",
-    "subtitle": "<Subtítulo del hero>",
-    "ctaText": "<Texto del botón CTA>",
-    "ctaUrl": "<URL del CTA>",
-    "backgroundImageUrl": "<URL de imagen de fondo>"
-  },
-  "features": {
-    "title": "<Título sección ¿Qué nos hace únicos?>",
-    "items": [
-      {"icon": null, "title": "<título>", "text": "<texto>"},
-      …
-    ]
-  },
-  "products": {
-    "title": "<Título sección Tratamientos Estrella>",
-    "items": [
-      {
-        "title": "<Nombre tratamiento>",
-        "text": "<Descripción corta>",
-        "imageUrl": "<URL imagen>",
-        "buttonText": "<Texto botón>",
-        "buttonUrl": "<URL botón>"
-      },
-      …
-    ]
-  },
-  "about": {
-    "title": "<Título sección Nuestra Filosofía>",
-    "text": "<Texto de la filosofía>"
-  },
-  "menu": [
-    {"id":"services","label":"Servicios"},
-    {"id":"about","label":"Nosotros"},
-    {"id":"contact","label":"Contáctanos"}
-  ],
-  "contact": {
-    "whatsapp": "<teléfono>",
-    "email": "<email>",
-    "facebook": "<URL Facebook>",
-    "instagram": "<URL Instagram>",
-    "youtube": "<URL YouTube>"
-  },
-  "testimonials": {
-    "title": "<Título sección Historias de Éxito>",
-    "items": [
-      {"text":"<texto>","author":"<autor>"},
-      …
-    ]
-  }
-}
-`.trim();
+{ /* ... estructura que ya tienes definida ... */ }
+`.trim()
 
       // 3) Llamada a OpenAI
-      const aiRes = await openai.createChatCompletion({
+      const aiRes = await openai.chat.completions.create({
         model: "gpt-4o",
         messages: [
           { role: "system", content: promptSystem },
           { role: "user",   content: promptUser }
         ]
-      });
+      })
 
       // 4) Limpieza de code fences y parse
-      let raw = aiRes.data.choices[0].message.content.trim();
-      // Elimina ```json y ``` si están presentes
-      raw = raw.replace(/^```json\s*/, "").replace(/```$/m, "").trim();
+      let raw = aiRes.choices[0].message.content.trim()
+      raw = raw.replace(/^```json\s*/, "").replace(/```$/m, "").trim()
+      const schema = JSON.parse(raw)
 
-      const schema = JSON.parse(raw);
+      // 5) ————— CORRECCIÓN AQUÍ —————
+      // Fetch a Pexels con orientation=landscape y extraer src.original
+      const pxRes = await axios.get("https://api.pexels.com/v1/search", {
+        headers: { Authorization: PEXELS_API_KEY },  // no "Bearer "
+        params: {
+          query:       data.businessSector.join(" "),
+          per_page:    1,
+          orientation: "landscape"
+        }
+      })
+      console.log("Pexels response for", doc.id, "→", pxRes.data)
 
-      // 5) Foto de Pexels
-      const px = await axios.get("https://api.pexels.com/v1/search", {
-        headers: { Authorization: PEXELS_API_KEY },
-        params: { query: data.businessSector.join(" "), per_page: 1 }
-      });
-      const photo = px.data.photos[0]?.src.large;
-      if (photo) {
-        schema.hero = schema.hero || {};
-        schema.hero.backgroundImageUrl = photo;
+      const photoSrc = pxRes.data.photos?.[0]?.src
+      const heroPhoto =
+        photoSrc?.original ||
+        photoSrc?.large2x   ||
+        photoSrc?.large     ||
+        photoSrc?.medium    ||
+        photoSrc?.small     ||
+        null
+
+      if (heroPhoto) {
+        schema.hero = schema.hero || {}
+        schema.hero.backgroundImageUrl = heroPhoto
+      } else {
+        console.warn("⚠️ No se encontró foto en Pexels para", doc.id)
       }
+      // ——————————————————————————————
 
       // 6) Guardar en Firestore
       await doc.ref.update({
         schema,
         status:      "Procesado",
         processedAt: FieldValue.serverTimestamp()
-      });
+      })
 
-      console.log(`✅ Site schema generado para ${doc.id}`);
+      console.log(`✅ Site schema generado para ${doc.id}`)
     } catch (err) {
-      console.error(`❌ Error en generateSiteSchemas para ${doc.id}:`, err);
+      console.error(`❌ Error en generateSiteSchemas para ${doc.id}:`, err)
     }
   }
 
-  console.log("▶️ generateSiteSchemas: finalizado");
+  console.log("▶️ generateSiteSchemas: finalizado")
 }
 
 
