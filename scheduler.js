@@ -32,7 +32,7 @@ function replacePlaceholders(template, leadData) {
   });
 }
 
-export async function generateSiteSchemas() {
+async function generateSiteSchemas() {
   console.log("▶️ generateSiteSchemas: inicio")
   if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno")
 
