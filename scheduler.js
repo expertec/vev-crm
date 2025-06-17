@@ -45,7 +45,7 @@ async function generateSiteSchemas() {
   for (const doc of snap.docs) {
     const data = doc.data();
     try {
-      // 2) Arma el prompt con enfoque de copy persuasivo
+      // 2) Prompt para copy persuasivo
       const promptSystem = `
 Eres un redactor publicitario SENIOR, experto en copywriting persuasivo 
 para sitios web de cualquier sector. Tu misión es:
@@ -126,19 +126,23 @@ Ahora, genera exactamente este JSON:
 }
 `.trim();
 
-      // 3) Llama a OpenAI
+      // 3) Llamada a OpenAI
       const aiRes = await openai.createChatCompletion({
         model: "gpt-4o",
         messages: [
           { role: "system", content: promptSystem },
-          { role: "user", content: promptUser }
+          { role: "user",   content: promptUser }
         ]
       });
 
-      // 4) Parseamos la respuesta estrictamente como JSON
-      const schema = JSON.parse(aiRes.data.choices[0].message.content.trim());
+      // 4) Limpieza de code fences y parse
+      let raw = aiRes.data.choices[0].message.content.trim();
+      // Elimina ```json y ``` si están presentes
+      raw = raw.replace(/^```json\s*/, "").replace(/```$/m, "").trim();
 
-      // 5) Obtenemos foto de Pexels para el hero
+      const schema = JSON.parse(raw);
+
+      // 5) Foto de Pexels
       const px = await axios.get("https://api.pexels.com/v1/search", {
         headers: { Authorization: PEXELS_API_KEY },
         params: { query: data.businessSector.join(" "), per_page: 1 }
@@ -149,7 +153,7 @@ Ahora, genera exactamente este JSON:
         schema.hero.backgroundImageUrl = photo;
       }
 
-      // 6) Guardamos el schema en Firestore
+      // 6) Guardar en Firestore
       await doc.ref.update({
         schema,
         status:      "Procesado",
@@ -164,6 +168,7 @@ Ahora, genera exactamente este JSON:
 
   console.log("▶️ generateSiteSchemas: finalizado");
 }
+
 
 
 
