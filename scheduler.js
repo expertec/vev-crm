@@ -36,66 +36,126 @@ async function generateSiteSchemas() {
   console.log("▶️ generateSiteSchemas: inicio");
   if (!PEXELS_API_KEY) throw new Error("Falta PEXELS_API_KEY en entorno");
 
+  // 1) Busca todos los negocios pendientes
   const snap = await db
-    .collection('Negocios')   // asegúrate de que sea tu colección correcta
-    .where('status', '==', 'Sin procesar')
+    .collection("Negocios")
+    .where("status", "==", "Sin procesar")
     .get();
 
   for (const doc of snap.docs) {
     const data = doc.data();
     try {
-      // 1. Generar schema con OpenAI
-      const prompt = `
-        Eres un asistente que construye un JSON de site schema.
-        Recibe estos datos:
-        nombre: ${data.companyInfo},
-        giro: ${data.businessSector.join(', ')},
-        historia: ${data.businessStory},
-        items: ${JSON.stringify(data.keyItems)},
-        paleta: ${JSON.stringify(data.palette)},
-        redes: Instagram: ${data.socialInstagram}, Facebook: ${data.socialFacebook}.
-        Devuelve SOLO el JSON del schema completo, sin texto adicional.
-      `;
+      // 2) Arma el prompt con enfoque de copy persuasivo
+      const promptSystem = `
+Eres un redactor publicitario SENIOR, experto en copywriting persuasivo 
+para sitios web de cualquier sector. Tu misión es:
+1) Proponer títulos, subtítulos y llamadas a la acción claros y orientados a la conversión.
+2) Mantener un tono profesional y cercano.
+3) Devolver ÚNICAMENTE un JSON con la estructura exacta que se describe a continuación,
+   sin explicaciones ni texto adicional.
+`.trim();
+
+      const promptUser = `
+Tengo un negocio de giro "${data.businessSector.join(", ")}" llamado "${data.companyInfo}".
+Breve historia: "${data.businessStory}".
+Colores disponibles: ${JSON.stringify(data.palette)}.
+Servicios/productos: ${JSON.stringify(data.keyItems)}.
+WhatsApp: ${data.contactWhatsapp}.
+Instagram: ${data.socialInstagram}, Facebook: ${data.socialFacebook}.
+
+Ahora, genera exactamente este JSON:
+{
+  "slug": "<slug>",
+  "logoUrl": "<URL del logo>",
+  "colors": {
+    "primary": "<hex>",
+    "secondary": "<hex>",
+    "accent": "<hex>",
+    "text": "<hex>"
+  },
+  "hero": {
+    "title": "<Título del hero>",
+    "subtitle": "<Subtítulo del hero>",
+    "ctaText": "<Texto del botón CTA>",
+    "ctaUrl": "<URL del CTA>",
+    "backgroundImageUrl": "<URL de imagen de fondo>"
+  },
+  "features": {
+    "title": "<Título sección ¿Qué nos hace únicos?>",
+    "items": [
+      {"icon": null, "title": "<título>", "text": "<texto>"},
+      …
+    ]
+  },
+  "products": {
+    "title": "<Título sección Tratamientos Estrella>",
+    "items": [
+      {
+        "title": "<Nombre tratamiento>",
+        "text": "<Descripción corta>",
+        "imageUrl": "<URL imagen>",
+        "buttonText": "<Texto botón>",
+        "buttonUrl": "<URL botón>"
+      },
+      …
+    ]
+  },
+  "about": {
+    "title": "<Título sección Nuestra Filosofía>",
+    "text": "<Texto de la filosofía>"
+  },
+  "menu": [
+    {"id":"services","label":"Servicios"},
+    {"id":"about","label":"Nosotros"},
+    {"id":"contact","label":"Contáctanos"}
+  ],
+  "contact": {
+    "whatsapp": "<teléfono>",
+    "email": "<email>",
+    "facebook": "<URL Facebook>",
+    "instagram": "<URL Instagram>",
+    "youtube": "<URL YouTube>"
+  },
+  "testimonials": {
+    "title": "<Título sección Historias de Éxito>",
+    "items": [
+      {"text":"<texto>","author":"<autor>"},
+      …
+    ]
+  }
+}
+`.trim();
+
+      // 3) Llama a OpenAI
       const aiRes = await openai.createChatCompletion({
-        model: 'gpt-4o',
+        model: "gpt-4o",
         messages: [
-          { role: 'system', content: 'Eres un generador de site schemas en JSON.' },
-          { role: 'user', content: prompt }
+          { role: "system", content: promptSystem },
+          { role: "user", content: promptUser }
         ]
       });
 
-      // --- Aquí extraemos el JSON limpio ---
-      const raw = aiRes.data.choices[0].message.content;
-      // Si viene entre ```json ... ```
-      const fenceMatch = raw.match(/```json\s*([\s\S]*?)```/i);
-      const jsonText = fenceMatch ? fenceMatch[1].trim() : raw.trim();
+      // 4) Parseamos la respuesta estrictamente como JSON
+      const schema = JSON.parse(aiRes.data.choices[0].message.content.trim());
 
-      let schema;
-      try {
-        schema = JSON.parse(jsonText);
-      } catch (parseErr) {
-        console.error(`❌ No pude parsear el JSON generado para ${doc.id}:`, jsonText);
-        throw parseErr;
-      }
-
-      // 2. Buscar foto en Pexels
-      const query = data.businessSector.join(' ');
-      const px = await axios.get('https://api.pexels.com/v1/search', {
+      // 5) Obtenemos foto de Pexels para el hero
+      const px = await axios.get("https://api.pexels.com/v1/search", {
         headers: { Authorization: PEXELS_API_KEY },
-        params: { query, per_page: 1 }
+        params: { query: data.businessSector.join(" "), per_page: 1 }
       });
-      const photo = px.data.photos?.[0]?.src?.large || null;
+      const photo = px.data.photos[0]?.src.large;
       if (photo) {
         schema.hero = schema.hero || {};
         schema.hero.backgroundImageUrl = photo;
       }
 
-      // 3. Actualiza en Firestore
+      // 6) Guardamos el schema en Firestore
       await doc.ref.update({
         schema,
-        status:    'Procesado',
+        status:      "Procesado",
         processedAt: FieldValue.serverTimestamp()
       });
+
       console.log(`✅ Site schema generado para ${doc.id}`);
     } catch (err) {
       console.error(`❌ Error en generateSiteSchemas para ${doc.id}:`, err);
@@ -104,7 +164,6 @@ async function generateSiteSchemas() {
 
   console.log("▶️ generateSiteSchemas: finalizado");
 }
-
 
 
 
