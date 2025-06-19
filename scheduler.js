@@ -274,19 +274,21 @@ async function enviarMensaje(lead, mensaje) {
 }
 
 
-
 export async function enviarSitioWebPorWhatsApp(negocio) {
   const slug = negocio.slug || negocio.schema?.slug;
   if (!negocio?.leadPhone || !slug) {
-    console.warn('Faltan datos para enviar el sitio web por WhatsApp');
+    console.warn('Faltan datos para enviar el sitio web por WhatsApp', {
+      leadPhone: negocio?.leadPhone,
+      slug: slug,
+      schema: negocio.schema
+    });
     return;
   }
-  // Normaliza el número a formato internacional para WhatsApp
   let num = String(negocio.leadPhone).replace(/\D/g, '');
-  if (num.length === 10) num = '521' + num; // México móvil
-
+  if (num.length === 10) num = '521' + num;
   const sitioUrl = `http://negociosweb.mx/site/${slug}`;
   try {
+    console.log(`[ENVIANDO WHATSAPP] A: ${num} | URL: ${sitioUrl}`);
     await enviarMensaje(
       { telefono: num, nombre: negocio.companyInfo || '' },
       {
@@ -294,9 +296,9 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
         contenido: `¡Tu sitio ya está listo! 🎉 Puedes verlo aquí: ${sitioUrl}`
       }
     );
-    console.log(`✅ WhatsApp enviado a ${num}: ${sitioUrl}`);
+    console.log(`[OK] WhatsApp enviado a ${num}: ${sitioUrl}`);
   } catch (err) {
-    console.error(`❌ Error enviando WhatsApp a ${num}:`, err);
+    console.error(`[ERROR] enviando WhatsApp a ${num}:`, err);
   }
 }
 
@@ -308,8 +310,17 @@ export async function enviarSitiosPendientes() {
     .where("siteSent", "in", [false, null])
     .get();
 
+  console.log(`[DEBUG] Encontrados: ${snap.size} negocios para enviar`);
+
   for (const doc of snap.docs) {
     const data = doc.data();
+    console.log(`[DEBUG] Procesando negocio: ${doc.id}`, {
+      leadPhone: data.leadPhone,
+      slug: data.slug,
+      schemaSlug: data.schema?.slug,
+      siteSent: data.siteSent,
+    });
+
     await enviarSitioWebPorWhatsApp({ ...data });
 
     // Marca como enviado para no volverlo a mandar
