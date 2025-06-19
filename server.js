@@ -9,6 +9,8 @@ import path from 'path';
 import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import { enviarSitiosPendientes } from './scheduler.js';
+
 
 // Dile a fluent-ffmpeg dónde está el binario
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
@@ -165,4 +167,9 @@ app.listen(port, () => {
 cron.schedule('* * * * *', () => {
   console.log('⏱️ generateSiteSchemas:', new Date().toISOString());
   generateSiteSchemas().catch(err => console.error('Error en generateSiteSchemas:', err));
+});
+
+cron.schedule('*/5 * * * *', () => {
+  console.log('⏱️ enviarSitiosPendientes:', new Date().toISOString());
+  enviarSitiosPendientes().catch(err => console.error('Error en enviarSitiosPendientes:', err));
 });
