@@ -59,8 +59,7 @@ para sitios web de cualquier sector. Tu misión:
 3) Devolver ÚNICAMENTE un JSON con la estructura exacta que se describe a continuación,
    sin explicaciones ni texto adicional.
 `.trim()
-
-      const promptUser = `
+const promptUser = `
 Negocio de giro: "${data.businessSector.join(", ")}"
 Nombre: "${data.companyInfo}"
 Historia: "${data.businessStory}"
@@ -145,7 +144,10 @@ Devuelve únicamente el JSON con la forma exacta descrita a continuación, sin t
     ]
   }
 }
+
+Devuelve SIEMPRE JSON válido, con comillas dobles en TODAS las propiedades. No uses comillas simples, ni formato de objeto JavaScript.
 `.trim()
+
 
       // 3) Generar schema
       const aiRes = await openai.createChatCompletion({
@@ -159,9 +161,22 @@ Devuelve únicamente el JSON con la forma exacta descrita a continuación, sin t
       })
 
       // 4) Limpiar y parsear JSON
-      let raw = aiRes.data.choices[0].message.content.trim()
-      raw = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim()
-      const schema = JSON.parse(raw)
+     let raw = aiRes.data.choices[0].message.content.trim();
+raw = raw.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
+
+let schema;
+try {
+  schema = JSON.parse(raw);
+} catch (err) {
+  try {
+    // Intenta reparar el JSON si hay error
+    schema = JSON.parse(jsonrepair(raw));
+    console.warn('[WARN][AI JSON reparado]', err);
+  } catch (err2) {
+    console.error('[ERROR][AI JSON irreparable]', err, raw);
+    continue; // Pasa al siguiente documento si no se puede arreglar
+  }
+}
 
       // ────────────────────────────────────────────────────────
       // 5) Traduce giro a inglés para Pexels
