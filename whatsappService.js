@@ -199,10 +199,10 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
       const cfgSnap = await db.collection('config').doc('appConfig').get();
       const cfg = cfgSnap.exists ? cfgSnap.data() : {};
 
-      // 4.2) Detectamos si el mensaje incluye "#webPro1490"
+      // 4.2) Detectamos si el mensaje incluye "#MiWebGratis"
       let trigger;
-      if (content.includes('#webPro1490')) {
-        trigger = 'LeadWeb1490';
+      if (content.includes('#MiWebGratis')) {
+        trigger = 'LeadWeb';
       } else {
         trigger = cfg.defaultTrigger || 'NuevoLead';
       }
@@ -235,10 +235,10 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
       const cfgSnap2 = await db.collection('config').doc('appConfig').get();
       const cfg2 = cfgSnap2.exists ? cfgSnap2.data() : {};
 
-      // 4.5) Volvemos a calcular el trigger en base a "#webPro1490"
+      // 4.5) Volvemos a calcular el trigger en base a "#MiWebGratis"
       let trigger;
-      if (content.includes('#webPro1490')) {
-        trigger = 'LeadWeb1490';
+      if (content.includes('#MiWebGratis')) {
+        trigger = 'LeadWeb';
       } else {
         trigger = cfg2.defaultTrigger || 'NuevoLead';
       }

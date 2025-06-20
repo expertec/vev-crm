@@ -286,7 +286,7 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
   }
   let num = String(negocio.leadPhone).replace(/\D/g, '');
   if (num.length === 10) num = '521' + num;
-  const sitioUrl = `http://negociosweb.mx/site/${slug}`;
+  const sitioUrl = `https://negociosweb.mx/site/${slug}`;
   try {
     console.log(`[ENVIANDO WHATSAPP] A: ${num} | URL: ${sitioUrl}`);
     await enviarMensaje(
@@ -311,23 +311,64 @@ export async function enviarSitiosPendientes() {
 
   console.log(`[DEBUG] Encontrados: ${snap.size} negocios para enviar`);
 
-  for (const doc of snap.docs) {
-    const data = doc.data();
-    console.log(`[DEBUG] Procesando negocio: ${doc.id}`, {
-      leadPhone: data.leadPhone,
-      slug: data.slug,
-      schemaSlug: data.schema?.slug,
-      status: data.status,
-    });
+ for (const doc of snap.docs) {
+  const data = doc.data();
+  console.log(`[DEBUG] Procesando negocio: ${doc.id}`, {
+    leadPhone: data.leadPhone,
+    slug: data.slug,
+    schemaSlug: data.schema?.slug,
+    status: data.status,
+  });
 
-    await enviarSitioWebPorWhatsApp({ ...data });
+  await enviarSitioWebPorWhatsApp({ ...data });
 
-    // Actualiza status para no volver a enviar
-    await doc.ref.update({
-      status: "Web enviada",
-      siteSentAt: FieldValue.serverTimestamp()
-    });
+  // 1. Actualiza status para no volver a enviar
+  await doc.ref.update({
+    status: "Web enviada",
+    siteSentAt: FieldValue.serverTimestamp()
+  });
+
+  // 2. Busca el lead y agrega la secuencia con trigger "WebEnviada"
+  try {
+    let num = String(data.leadPhone).replace(/\D/g, '');
+    if (num.length === 10) num = '521' + num;
+
+    const leadSnap = await db.collection('leads')
+      .where('telefono', '==', num)
+      .limit(1)
+      .get();
+
+    if (!leadSnap.empty) {
+      const leadId = leadSnap.docs[0].id;
+
+      // Carga el lead actual para ver si ya tiene secuencias
+      const leadDoc = await db.collection('leads').doc(leadId).get();
+      const leadData = leadDoc.data() || {};
+      const secuencias = Array.isArray(leadData.secuenciasActivas) ? leadData.secuenciasActivas : [];
+
+      // Verifica si ya existe la secuencia "WebEnviada" para no duplicar
+      const yaTieneSecuencia = secuencias.some(seq => seq.trigger === 'WebEnviada');
+      if (!yaTieneSecuencia) {
+        const secuencia = {
+          trigger: 'WebEnviada',
+          startTime: new Date().toISOString(),
+          index: 0
+        };
+        await db.collection('leads').doc(leadId).update({
+          secuenciasActivas: admin.firestore.FieldValue.arrayUnion(secuencia)
+        });
+        console.log(`[OK] Secuencia WebEnviada asignada a lead ${leadId}`);
+      } else {
+        console.log(`[INFO] Lead ${leadId} ya tiene secuencia WebEnviada`);
+      }
+    } else {
+      console.warn(`[WARN] No se encontró lead para telefono: ${num}`);
+    }
+  } catch (err) {
+    console.error(`[ERROR] No se pudo asignar secuencia WebEnviada:`, err);
   }
+}
+
 }
 
 
