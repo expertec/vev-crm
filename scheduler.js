@@ -157,7 +157,7 @@ Devuelve SIEMPRE JSON válido, con comillas dobles en TODAS las propiedades. No 
           { role: "user",   content: promptUser  }
         ],
         temperature: 0.7,
-        max_tokens:  800
+        max_tokens:  2000
       })
 
       // 4) Limpiar y parsear JSON
