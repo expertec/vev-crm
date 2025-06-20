@@ -307,7 +307,6 @@ export async function enviarSitiosPendientes() {
   const snap = await db
     .collection("Negocios")
     .where("status", "==", "Procesado")
-    .where("siteSent", "in", [false, null])
     .get();
 
   console.log(`[DEBUG] Encontrados: ${snap.size} negocios para enviar`);
@@ -318,18 +317,19 @@ export async function enviarSitiosPendientes() {
       leadPhone: data.leadPhone,
       slug: data.slug,
       schemaSlug: data.schema?.slug,
-      siteSent: data.siteSent,
+      status: data.status,
     });
 
     await enviarSitioWebPorWhatsApp({ ...data });
 
-    // Marca como enviado para no volverlo a mandar
+    // Actualiza status para no volver a enviar
     await doc.ref.update({
-      siteSent: true,
+      status: "Web enviada",
       siteSentAt: FieldValue.serverTimestamp()
     });
   }
 }
+
 
 
 
