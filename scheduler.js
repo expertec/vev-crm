@@ -60,7 +60,7 @@ para sitios web de cualquier sector. Tu misión:
    sin explicaciones ni texto adicional.
 `.trim()
 const promptUser = `
-Negocio de giro: "${data.businessSector.join(", ")}"
+Negocio de giro: "${data.businessSector}"
 Nombre: "${data.companyInfo}"
 Historia: "${data.businessStory}"
 Colores disponibles: ${JSON.stringify(data.palette)}
@@ -180,8 +180,11 @@ try {
 
       // ────────────────────────────────────────────────────────
       // 5) Traduce giro a inglés para Pexels
-      const sectorText = data.businessSector.join(", ")
-      const translateRes = await openai.createChatCompletion({
+     const sectorText = Array.isArray(data.businessSector)
+  ? data.businessSector.join(", ")
+  : (data.businessSector || '');
+
+const translateRes = await openai.createChatCompletion({
         model:       "gpt-4o",
         messages: [
           {
