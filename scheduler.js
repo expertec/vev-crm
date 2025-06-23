@@ -397,7 +397,7 @@ export async function archivarNegociosAntiguos() {
   const limite = ahora - 24 * 60 * 60 * 1000; // 24 horas en ms
   const limiteTimestamp = Timestamp.fromMillis(limite);
 
-  // 1. Buscar negocios creados hace más de 24h
+  // Buscar negocios creados hace más de 24h
   const snap = await db
     .collection('Negocios')
     .where('createdAt', '<', limiteTimestamp)
@@ -411,12 +411,15 @@ export async function archivarNegociosAntiguos() {
   for (const doc of snap.docs) {
     try {
       const data = doc.data();
-      // 2. Copiar a ArchivoNegocios (usando el mismo ID)
+      // Si tiene un campo 'plan' definido y no es vacío, lo omite
+      if (data.plan !== undefined && data.plan !== null && data.plan !== '') {
+        console.log(`Negocio ${doc.id} tiene plan (${data.plan}), no se archiva.`);
+        continue;
+      }
+      // Copiar a ArchivoNegocios (usando el mismo ID)
       await db.collection('ArchivoNegocios').doc(doc.id).set(data);
-
-      // 3. Eliminar de Negocios
+      // Eliminar de Negocios
       await doc.ref.delete();
-
       console.log(`Negocio ${doc.id} archivado correctamente.`);
     } catch (err) {
       console.error(`Error archivando negocio ${doc.id}:`, err);
