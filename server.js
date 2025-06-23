@@ -29,7 +29,7 @@ import {
   sendMessageToLead,
   getSessionPhone
 } from './whatsappService.js';
-import { processSequences, generateSiteSchemas   } from './scheduler.js';
+import { processSequences, generateSiteSchemas, archivarNegociosAntiguos   } from './scheduler.js';
 
 
 
@@ -172,4 +172,10 @@ cron.schedule('* * * * *', () => {
 cron.schedule('*/5 * * * *', () => {
   console.log('⏱️ enviarSitiosPendientes:', new Date().toISOString());
   enviarSitiosPendientes().catch(err => console.error('Error en enviarSitiosPendientes:', err));
+});
+
+// Ejecutar cada hora en el minuto 0 (ejemplo: 13:00, 14:00, etc)
+cron.schedule('0 * * * *', () => {
+  console.log('⏱️ archivarNegociosAntiguos:', new Date().toISOString());
+  archivarNegociosAntiguos().catch(err => console.error('Error en archivarNegociosAntiguos:', err));
 });

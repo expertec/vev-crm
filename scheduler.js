@@ -4,6 +4,7 @@ import { getWhatsAppSock } from './whatsappService.js';
 import { db } from './firebaseAdmin.js';
 import { Configuration, OpenAIApi } from 'openai'
 import axios from 'axios';        
+import { Timestamp } from 'firebase-admin/firestore';
 const { FieldValue } = admin.firestore;
 // Asegúrate de que la API key esté definida
 if (!process.env.OPENAI_API_KEY) {
@@ -391,7 +392,37 @@ export async function enviarSitiosPendientes() {
 
 
 
+export async function archivarNegociosAntiguos() {
+  const ahora = Date.now();
+  const limite = ahora - 24 * 60 * 60 * 1000; // 24 horas en ms
+  const limiteTimestamp = Timestamp.fromMillis(limite);
 
+  // 1. Buscar negocios creados hace más de 24h
+  const snap = await db
+    .collection('Negocios')
+    .where('createdAt', '<', limiteTimestamp)
+    .get();
+
+  if (snap.empty) {
+    console.log('No hay negocios antiguos para archivar.');
+    return;
+  }
+
+  for (const doc of snap.docs) {
+    try {
+      const data = doc.data();
+      // 2. Copiar a ArchivoNegocios (usando el mismo ID)
+      await db.collection('ArchivoNegocios').doc(doc.id).set(data);
+
+      // 3. Eliminar de Negocios
+      await doc.ref.delete();
+
+      console.log(`Negocio ${doc.id} archivado correctamente.`);
+    } catch (err) {
+      console.error(`Error archivando negocio ${doc.id}:`, err);
+    }
+  }
+}
 
 
 /**
