@@ -128,6 +128,21 @@ app.post(
   }
 );
 
+// Función para normalizar número de México (agrega 521 si falta)
+function normalizaTelefonoMX(telefono) {
+  let tel = String(telefono || '').replace(/\D/g, '');
+  // Si es de México y tiene 10 dígitos, agrega 521
+  if (tel.length === 10) {
+    tel = '521' + tel;
+  }
+  // Si ya tiene 52 pero no 521, corrige
+  else if (tel.length === 12 && tel.startsWith('52') && !tel.startsWith('521')) {
+    tel = '521' + tel.slice(2);
+  }
+  // Puedes agregar más validaciones para otros países aquí
+  return tel;
+}
+
 app.post('/api/crear-usuario', async (req, res) => {
   const { email, negocioId } = req.body;
   if (!email || !negocioId) {
@@ -155,18 +170,23 @@ app.post('/api/crear-usuario', async (req, res) => {
     // 4. Toma datos del negocio para el mensaje
     const negocioDoc = await db.collection('Negocios').doc(negocioId).get();
     const negocio = negocioDoc.data();
-    const telefono = negocio?.contactWhatsapp || negocio?.leadPhone;
+
+    // Usar SOLO leadPhone
+    let telefono = negocio?.leadPhone;
+    console.log('[CREAR USUARIO] leadPhone original:', telefono);
+
+    // Normaliza el teléfono
+    telefono = normalizaTelefonoMX(telefono);
+    console.log('[CREAR USUARIO] leadPhone normalizado:', telefono);
 
     // 5. Calcula la fecha de corte (planRenewalDate)
-    let fechaCorte = null;
+    let fechaCorte = '-';
     if (negocio.planRenewalDate?.toDate) {
       fechaCorte = dayjs(negocio.planRenewalDate.toDate()).format('DD/MM/YYYY');
     } else if (negocio.planRenewalDate instanceof Date) {
       fechaCorte = dayjs(negocio.planRenewalDate).format('DD/MM/YYYY');
     } else if (typeof negocio.planRenewalDate === 'string' || typeof negocio.planRenewalDate === 'number') {
       fechaCorte = dayjs(negocio.planRenewalDate).format('DD/MM/YYYY');
-    } else {
-      fechaCorte = '-';
     }
 
     // 6. Construye el mensaje de WhatsApp
@@ -189,9 +209,16 @@ app.post('/api/crear-usuario', async (req, res) => {
 Por seguridad, cambia tu contraseña después de ingresar.
 `;
 
-    // 7. Envía el mensaje por WhatsApp si hay teléfono
-    if (telefono) {
-      await sendMessageToLead(telefono, mensaje);
+    // 7. Envía el mensaje por WhatsApp si hay teléfono válido
+    if (telefono && telefono.length >= 12) {
+      try {
+        await sendMessageToLead(telefono, mensaje);
+        console.log('[CREAR USUARIO] WhatsApp enviado correctamente a', telefono);
+      } catch (waError) {
+        console.error('[CREAR USUARIO] Error al enviar WhatsApp:', waError);
+      }
+    } else {
+      console.log('[CREAR USUARIO] No se encontró leadPhone válido para enviar WhatsApp');
     }
 
     // 8. Si es usuario existente, puedes enviarle link de reset por correo
