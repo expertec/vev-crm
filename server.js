@@ -125,6 +125,84 @@ app.post(
   }
 );
 
+app.post('/api/crear-usuario', async (req, res) => {
+  const { email, negocioId } = req.body;
+  if (!email || !negocioId) {
+    return res.status(400).json({ error: 'Faltan email o negocioId' });
+  }
+  try {
+    // 1. Genera contraseña temporal segura
+    const tempPassword = Math.random().toString(36).slice(-8);
+
+    // 2. Intenta buscar el usuario, si no existe, lo crea
+    let userRecord, isNewUser = false;
+    try {
+      userRecord = await admin.auth().getUserByEmail(email);
+    } catch (err) {
+      userRecord = await admin.auth().createUser({ email, password: tempPassword });
+      isNewUser = true;
+    }
+
+    // 3. Actualiza el negocio con UID y email del owner
+    await db.collection('Negocios').doc(negocioId).update({
+      ownerUID: userRecord.uid,
+      ownerEmail: email
+    });
+
+    // 4. Toma datos del negocio para el mensaje
+    const negocioDoc = await db.collection('Negocios').doc(negocioId).get();
+    const negocio = negocioDoc.data();
+    const telefono = negocio?.contactWhatsapp || negocio?.leadPhone;
+
+    // 5. Calcula la fecha de corte (planRenewalDate)
+    let fechaCorte = null;
+    if (negocio.planRenewalDate?.toDate) {
+      fechaCorte = dayjs(negocio.planRenewalDate.toDate()).format('DD/MM/YYYY');
+    } else if (negocio.planRenewalDate instanceof Date) {
+      fechaCorte = dayjs(negocio.planRenewalDate).format('DD/MM/YYYY');
+    } else if (typeof negocio.planRenewalDate === 'string' || typeof negocio.planRenewalDate === 'number') {
+      fechaCorte = dayjs(negocio.planRenewalDate).format('DD/MM/YYYY');
+    } else {
+      fechaCorte = '-';
+    }
+
+    // 6. Construye el mensaje de WhatsApp
+    const urlAcceso = "https://negociosweb.mx/login"; // ← Cambia por tu URL real
+    let mensaje = `¡Bienvenido a tu panel de administración de tu página web! 👋
+
+🔗 Accede aquí: ${urlAcceso}
+📧 Usuario: ${email}
+`;
+
+    if (isNewUser) {
+      mensaje += `🔑 Contraseña temporal: ${tempPassword}\n`;
+    } else {
+      mensaje += `🔄 Si no recuerdas tu contraseña, usa el enlace "¿Olvidaste tu contraseña?"\n`;
+    }
+
+    mensaje += `
+🗓️ Tu plan termina el día: ${fechaCorte}
+
+Por seguridad, cambia tu contraseña después de ingresar.
+`;
+
+    // 7. Envía el mensaje por WhatsApp si hay teléfono
+    if (telefono) {
+      await sendMessageToLead(telefono, mensaje);
+    }
+
+    // 8. Si es usuario existente, puedes enviarle link de reset por correo
+    if (!isNewUser) {
+      await admin.auth().generatePasswordResetLink(email);
+    }
+
+    return res.json({ success: true, uid: userRecord.uid, email });
+  } catch (err) {
+    console.error('Error creando usuario:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 
 
 
