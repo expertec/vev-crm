@@ -10,6 +10,8 @@ import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import { enviarSitiosPendientes } from './scheduler.js';
+import dayjs from 'dayjs';
+
 
 
 // Dile a fluent-ffmpeg dónde está el binario
