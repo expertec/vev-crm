@@ -21,7 +21,8 @@ import { sendAudioMessage } from './whatsappService.js';  // ajusta ruta si es n
 
 dotenv.config();
 
-import { db } from './firebaseAdmin.js';
+
+import { admin, db } from './firebaseAdmin.js';
 import {
   connectToWhatsApp,
   getLatestQR,

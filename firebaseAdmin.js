@@ -3,6 +3,7 @@ import admin from 'firebase-admin';
 import fs from 'fs';
 import path from 'path';
 
+
 // Define la ruta del archivo secreto montado por Render
 const firebaseKeyPath = path.join('/etc/secrets', 'serviceAccountKey.json');
 
