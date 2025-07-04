@@ -201,7 +201,7 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
 
       // 4.2) Detectamos si el mensaje incluye "#MiWebGratis"
       let trigger;
-      if (content.includes('#MiWebGratis')) {
+      if (content.includes('#webPro990')) {
         trigger = 'LeadWeb';
       } else {
         trigger = cfg.defaultTrigger || 'NuevoLead';
@@ -237,7 +237,7 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
 
       // 4.5) Volvemos a calcular el trigger en base a "#MiWebGratis"
       let trigger;
-      if (content.includes('#MiWebGratis')) {
+      if (content.includes('#webPro990')) {
         trigger = 'LeadWeb';
       } else {
         trigger = cfg2.defaultTrigger || 'NuevoLead';

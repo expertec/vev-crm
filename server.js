@@ -235,7 +235,6 @@ Por seguridad, cambia tu contraseña después de ingresar.
 
 
 
-
 // (Opcional) Marcar todos los mensajes de un lead como leídos
 app.post('/api/whatsapp/mark-read', async (req, res) => {
   const { leadId } = req.body;
