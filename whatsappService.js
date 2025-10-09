@@ -361,30 +361,51 @@ export async function sendClipMessage(phone, clipUrl) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
+  // Normaliza MX (10 dígitos → 52 + 10). Si ya viene con 521… lo respeta.
   let num = String(phone).replace(/\D/g, '');
   if (num.length === 10) num = '52' + num;
   const jid = `${num}@s.whatsapp.net`;
 
+  // Detecta .ogg/.opus para PTT
   const isOgg = /\.(ogg|opus)(\?|#|$)/i.test(clipUrl);
-  const payload = isOgg
+  const urlPayload = isOgg
     ? { audio: { url: clipUrl }, mimetype: 'audio/ogg; codecs=opus', ptt: true }
     : { audio: { url: clipUrl }, mimetype: 'audio/mp4', ptt: false };
 
   const opts = { timeoutMs: 120_000, sendSeen: false };
 
-  for (let i = 1; i <= 3; i++) {
-    try {
-      await sock.sendMessage(jid, payload, opts);
-      console.log(`✅ clip enviado (intento ${i}) a ${jid}`);
-      return;
-    } catch (err) {
-      const isTO = err?.message?.includes('Timed Out');
-      console.warn(`⚠️ fallo envío clip intento ${i}${isTO ? ' (Timeout)' : ''}`);
-      if (!isTO || i === 3) throw err;
-      await new Promise(r => setTimeout(r, 2000 * i));
-    }
+  // 1) Primer intento: enviar por URL directa
+  try {
+    await sock.sendMessage(jid, urlPayload, opts);
+    console.log(`✅ clip enviado por URL a ${jid}`);
+    return;
+  } catch (err) {
+    console.warn(`⚠️ fallo envío por URL: ${err?.message || err}`);
+  }
+
+  // 2) Fallback: descargar y enviar como buffer (evita bloqueos de lectura remota)
+  try {
+    const res = await axios.get(clipUrl, { responseType: 'arraybuffer' });
+    const buf = Buffer.from(res.data);
+
+    // Detecta mimetype si no viene claro
+    const mime =
+      isOgg ? 'audio/ogg; codecs=opus' :
+      (res.headers['content-type']?.toLowerCase().startsWith('audio/')
+        ? res.headers['content-type']
+        : 'audio/mp4');
+
+    const payload = { audio: buf, mimetype: mime, ptt: isOgg };
+    await sock.sendMessage(jid, payload, opts);
+
+    console.log(`✅ clip enviado como buffer a ${jid} (mime=${mime})`);
+    return;
+  } catch (err2) {
+    console.error(`❌ envío de clip falló también con buffer: ${err2?.message || err2}`);
+    throw err2; // deja que la cola marque el job con error
   }
 }
+
 
 /**
  * Envía **nota de voz** (PTT) desde una URL (ogg/opus) o cualquiera compatible con WhatsApp.
