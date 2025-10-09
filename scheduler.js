@@ -7,9 +7,7 @@ import axios from 'axios';
 import { jsonrepair } from 'jsonrepair';
 import { Timestamp } from 'firebase-admin/firestore';
 
-// 👇 intenta usar tu processDueSequenceJobs; si no existe, usa processQueue
-import { processDueSequenceJobs as maybeProcessDueJobs, processQueue as maybeProcessQueue } from './queue.js';
-
+import * as Q from './queue.js';
 // OpenAI compat (v3/v4)
 import OpenAIImport from 'openai';
 
@@ -431,13 +429,16 @@ export async function archivarNegociosAntiguos() {
 
 // ========================= Proceso de secuencias =========================
 export async function processSequences() {
-  const fn = typeof maybeProcessDueJobs === 'function'
-    ? maybeProcessDueJobs
-    : (typeof maybeProcessQueue === 'function' ? maybeProcessQueue : null);
+  const fn =
+    typeof Q.processDueSequenceJobs === 'function'
+      ? Q.processDueSequenceJobs
+      : (typeof Q.processQueue === 'function' ? Q.processQueue : null);
 
   if (!fn) {
     console.warn('No hay función de proceso de cola exportada (processDueSequenceJobs / processQueue).');
     return 0;
   }
+  // tu processQueue acepta { batchSize, shard }
   return await fn({ batchSize: 200 });
 }
+
