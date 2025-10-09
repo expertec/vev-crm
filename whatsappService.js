@@ -14,7 +14,7 @@ import axios from 'axios';
 import admin from 'firebase-admin';
 import { db } from './firebaseAdmin.js';
 
-// Cola de secuencias (versión nueva en queue.js)
+// Cola de secuencias
 import { scheduleSequenceForLead, cancelSequences } from './queue.js';
 
 let latestQR = null;
@@ -27,9 +27,18 @@ const { FieldValue } = admin.firestore;
 const bucket = admin.storage().bucket();
 
 /* ------------------------------ helpers ------------------------------ */
+const STATIC_HASHTAG_MAP = {
+  // alias → trigger
+  '#promoweb990': 'LeadWeb',
+  '#webpro990':   'LeadWeb',
+  '#leadweb':     'LeadWeb',
+  '#nuevolead':   'NuevoLead',
+};
+
 function firstName(n = '') {
   return String(n).trim().split(/\s+/)[0] || '';
 }
+
 function tpl(str, lead) {
   return String(str || '').replace(/\{\{(\w+)\}\}/g, (_, f) => {
     if (f === 'nombre') return firstName(lead?.nombre || '');
@@ -37,8 +46,39 @@ function tpl(str, lead) {
     return lead?.[f] ?? '';
   });
 }
-function now() {
-  return new Date();
+function now() { return new Date(); }
+
+function extractHashtags(text = '') {
+  const found = String(text).toLowerCase().match(/#[\p{L}\p{N}_-]+/gu);
+  return found ? Array.from(new Set(found)) : [];
+}
+
+// Reglas dinámicas opcionales en Firestore
+// Collection: hashtagTriggers, doc: { code: 'promoweb990', trigger: 'LeadWeb', cancel: ['NuevoLead'] }
+async function resolveHashtagInDB(code) {
+  const snap = await db
+    .collection('hashtagTriggers')
+    .where('code', '==', code.replace(/^#/, '').toLowerCase())
+    .limit(1)
+    .get();
+  if (snap.empty) return null;
+  const row = snap.docs[0].data() || {};
+  return { trigger: row.trigger, cancel: row.cancel || [] };
+}
+
+async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb') {
+  const tags = extractHashtags(text);
+  if (tags.length === 0) return { trigger: defaultTrigger, cancel: [] };
+
+  for (const tag of tags) {
+    const dbRule = await resolveHashtagInDB(tag);
+    if (dbRule?.trigger) return dbRule;
+  }
+  for (const tag of tags) {
+    const trg = STATIC_HASHTAG_MAP[tag];
+    if (trg) return { trigger: trg, cancel: [] };
+  }
+  return { trigger: defaultTrigger, cancel: [] };
 }
 
 /* ---------------------------- conexión WA ---------------------------- */
@@ -55,7 +95,7 @@ export async function connectToWhatsApp() {
     const sock = makeWASocket({
       auth: state,
       logger: Pino({ level: 'info' }),
-      printQRInTerminal: true,
+      printQRInTerminal: true, // aviso deprecado: seguimos mostrando QR con nuestro listener abajo
       version,
     });
     whatsappSock = sock;
@@ -82,8 +122,9 @@ export async function connectToWhatsApp() {
           }
           sessionPhone = null;
         }
-        // reintento automático
-        connectToWhatsApp();
+        // reintento con pequeño backoff aleatorio
+        const delay = Math.floor(Math.random() * 4000) + 1000;
+        setTimeout(() => connectToWhatsApp().catch(() => {}), delay);
       }
     });
 
@@ -104,7 +145,6 @@ export async function connectToWhatsApp() {
 
           // Ignorar grupos/estados/newsletters
           if (rawJid.endsWith('@g.us') || rawJid === 'status@broadcast' || rawJid.endsWith('@newsletter')) {
-            console.log('[WA] JID no 1:1, skip:', rawJid);
             continue;
           }
 
@@ -112,50 +152,13 @@ export async function connectToWhatsApp() {
           const cleanUser = jidUser.split(':')[0].replace(/\s+/g, '');
           const jid = `${cleanUser}@${jidDomain}`;
 
-          if (jidDomain !== 's.whatsapp.net') {
-            console.log('[WA] JID distinto a s.whatsapp.net, skip:', rawJid, '→ normalizado:', jid);
-            continue;
-          }
+          if (jidDomain !== 's.whatsapp.net') continue;
 
           const phone = cleanUser;             // E164 sin '+'
-          const leadId = jid;
+          const leadId = jid;                  // usamos el JID como ID de lead
           const sender = msg.key.fromMe ? 'business' : 'lead';
 
-          // ------- crear/actualizar LEAD -------
-          const leadRef = db.collection('leads').doc(leadId);
-          const leadSnap = await leadRef.get();
-
-          // config global
-          const cfgSnap = await db.collection('config').doc('appConfig').get();
-          const cfg = cfgSnap.exists ? cfgSnap.data() : {};
-          let trigger = cfg.defaultTrigger || 'NuevoLead';
-
-          const baseLead = {
-            telefono: phone,
-            nombre: msg.pushName || '',
-            source: 'WhatsApp',
-          };
-
-          if (!leadSnap.exists) {
-            await leadRef.set({
-              ...baseLead,
-              fecha_creacion: now(),
-              estado: 'nuevo',
-              etiquetas: [trigger],
-              unreadCount: 0,
-              lastMessageAt: now(),
-            });
-
-            // programa secuencia inicial
-            await scheduleSequenceForLead(leadId, trigger);
-
-            console.log('[WA] Lead CREADO:', { leadId, phone, trigger, fromMe: sender === 'business' });
-          } else {
-            await leadRef.update({ lastMessageAt: now() });
-            console.log('[WA] Lead ACTUALIZADO:', { leadId, phone, fromMe: sender === 'business' });
-          }
-
-          // ------- parseo de tipos -------
+          // ------- parseo de tipos (para leer hashtags del texto) -------
           let content = '';
           let mediaType = null;
           let mediaUrl = null;
@@ -201,37 +204,51 @@ export async function connectToWhatsApp() {
             content = '';
           }
 
-          // ------- hashtags → triggers -------
-          if (mediaType === 'text' && content) {
-            if (/#webPro1490/i.test(content)) {
-              trigger = 'LeadWeb1490';
-            } else if (/#musicale(a)?d/i.test(content) || /#MusicaLead/.test(content)) {
-              trigger = 'MusicaLead';
-            } else if (/#nuevolead/i.test(content)) {
-              trigger = 'NuevoLead';
+          // ------- config global + resolver trigger (hashtags > DB > estático > default) -------
+          const cfgSnap = await db.collection('config').doc('appConfig').get();
+          const cfg = cfgSnap.exists ? cfgSnap.data() : {};
+          const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';
+          const rule = await resolveTriggerFromMessage(content, defaultTrigger);
+          const trigger = rule.trigger;
+
+          // ------- crear/actualizar LEAD -------
+          const leadRef = db.collection('leads').doc(leadId);
+          const leadSnap = await leadRef.get();
+
+          const baseLead = {
+            telefono: phone,         // solo dígitos con país
+            nombre: msg.pushName || '',
+            source: 'WhatsApp',
+          };
+
+          if (!leadSnap.exists) {
+            await leadRef.set({
+              ...baseLead,
+              fecha_creacion: now(),
+              estado: 'nuevo',
+              etiquetas: [trigger],
+              unreadCount: 0,
+              lastMessageAt: now(),
+            });
+
+            if (rule.cancel?.length) {
+              await cancelSequences(leadId, rule.cancel).catch(() => {});
             }
+            await scheduleSequenceForLead(leadId, trigger, now());
 
-            const cur = (await leadRef.get()).data() || {};
-            const hadTag = Array.isArray(cur.etiquetas) && cur.etiquetas.includes(trigger);
+            console.log('[WA] Lead CREADO:', { leadId, phone, trigger, fromMe: sender === 'business' });
+          } else {
+            await leadRef.update({ lastMessageAt: now() });
 
-            await leadRef.set(
-              { etiquetas: FieldValue.arrayUnion(trigger) },
-              { merge: true }
-            );
-
-            if (!hadTag) {
-              await scheduleSequenceForLead(leadId, trigger);
+            // aplica hashtag también en leads existentes
+            await leadRef.set({ etiquetas: FieldValue.arrayUnion(trigger) }, { merge: true });
+            if (rule.cancel?.length) {
+              await cancelSequences(leadId, rule.cancel).catch(() => {});
             }
+            await scheduleSequenceForLead(leadId, trigger, now());
 
-            if (trigger === 'MusicaLead' && !cur.nuevoLeadCancelled) {
-              const cancelled = await cancelSequences(leadId, ['NuevoLead']);
-              if (cancelled) {
-                await leadRef.set({ nuevoLeadCancelled: true }, { merge: true });
-              }
-            }
+            console.log('[WA] Lead ACTUALIZADO:', { leadId, phone, trigger, fromMe: sender === 'business' });
           }
-
-          console.log('[WA] Guardando mensaje →', leadId, { mediaType, hasText: !!content, hasMedia: !!mediaUrl });
 
           // ------- guardar mensaje -------
           const msgData = {
@@ -247,6 +264,8 @@ export async function connectToWhatsApp() {
           const upd = { lastMessageAt: msgData.timestamp };
           if (sender === 'lead') upd.unreadCount = FieldValue.increment(1);
           await leadRef.update(upd);
+
+          console.log('[WA] Guardado mensaje →', leadId, { mediaType, hasText: !!content, hasMedia: !!mediaUrl });
         } catch (err) {
           console.error('messages.upsert error:', err);
         }
@@ -261,18 +280,10 @@ export async function connectToWhatsApp() {
 }
 
 /* ----------------------------- helpers envío ---------------------------- */
-export function getLatestQR() {
-  return latestQR;
-}
-export function getConnectionStatus() {
-  return connectionStatus;
-}
-export function getWhatsAppSock() {
-  return whatsappSock;
-}
-export function getSessionPhone() {
-  return sessionPhone;
-}
+export function getLatestQR() { return latestQR; }
+export function getConnectionStatus() { return connectionStatus; }
+export function getWhatsAppSock() { return whatsappSock; }
+export function getSessionPhone() { return sessionPhone; }
 
 export async function sendMessageToLead(phone, messageContent) {
   if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
@@ -354,7 +365,6 @@ export async function sendClipMessage(phone, clipUrl) {
   if (num.length === 10) num = '52' + num;
   const jid = `${num}@s.whatsapp.net`;
 
-  // Detecta .ogg/.opus para forzar PTT
   const isOgg = /\.(ogg|opus)(\?|#|$)/i.test(clipUrl);
   const payload = isOgg
     ? { audio: { url: clipUrl }, mimetype: 'audio/ogg; codecs=opus', ptt: true }
@@ -398,7 +408,6 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
 
   await sock.sendMessage(jid, msg, { timeoutMs: 120_000 });
 
-  // Persistir en Firestore
   const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
   if (!q.empty) {
     const leadId = q.docs[0].id;
@@ -432,7 +441,6 @@ export async function sendVideoNote(phone, videoUrlOrPath) {
 
   await sock.sendMessage(jid, content, { timeoutMs: 120_000 });
 
-  // Persistir en Firestore
   const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
   if (!q.empty) {
     const leadId = q.docs[0].id;
