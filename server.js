@@ -43,7 +43,9 @@ try {
   const q = await import('./queue.js');
   cancelSequences = q.cancelSequences || null;
   scheduleSequenceForLead = q.scheduleSequenceForLead || null;
-} catch { /* continúa sin romper */ }
+} catch {
+  /* continúa sin romper */
+}
 
 // ================ OpenAI compat (para mensaje empático) ================
 import OpenAIImport from 'openai';
@@ -83,7 +85,9 @@ function extractText(resp, mode) {
       return parts.join(' ').trim();
     }
     return resp?.data?.choices?.[0]?.message?.content?.trim() || '';
-  } catch { return ''; }
+  } catch {
+    return '';
+  }
 }
 async function chatCompletionCompat({ model, messages, max_tokens = 120, temperature = 0.35 }) {
   const { client, mode } = await getOpenAI();
@@ -108,9 +112,17 @@ function toE164(num, defaultCountry = 'MX') {
   if (p && p.isValid()) return p.number; // +521...
   if (/^\d{10}$/.test(raw)) return `+52${raw}`;
   if (/^\d{11,15}$/.test(raw) && raw.startsWith('521')) return `+${raw}`;
-  if (/^\d{11,15}$/.test(raw) && raw.startsWith('52'))  return `+${raw}`;
+  if (/^\d{11,15}$/.test(raw) && raw.startsWith('52')) return `+${raw}`;
   return `+${raw}`;
 }
+function e164ToLeadId(e164) {
+  const digits = String(e164 || '').replace(/\D/g, '');
+  // WA espera sin el "+" y con 52/521
+  return `${digits}@s.whatsapp.net`;
+}
+
+// ================ Configuración de secuencia del formulario ================
+const FORM_SEQUENCE_ID = 'FormularioWeb'; // <-- cambia si tu secuencia se llama distinto
 
 // ================ App base ================
 const app = express();
@@ -241,44 +253,86 @@ app.post('/api/whatsapp/mark-read', async (req, res) => {
   }
 });
 
-// ============== NUEVO: after-form (web) ==============
+// ============== after-form (web) ==============
+// Acepta { leadId, leadPhone, summary, negocioId? }
 app.post('/api/web/after-form', async (req, res) => {
   try {
-    const { leadId, summary } = req.body; // summary: { companyName, email, businessType, primaryColor }
-    if (!leadId || !summary) return res.status(400).json({ error: 'leadId y summary son requeridos' });
-
-    // 1) Lead y teléfono
-    const leadSnap = await db.collection('leads').doc(leadId).get();
-    if (!leadSnap.exists) return res.status(404).json({ error: 'Lead no encontrado' });
-
-    const lead = leadSnap.data() || {};
-    const e164 = toE164(lead.telefono);
-    if (!e164) return res.status(400).json({ error: 'Lead sin teléfono' });
-
-    // 2) Cancelar secuencia inicial (si tu motor lo soporta)
-    try {
-      if (cancelSequences) {
-        await cancelSequences(leadId, ['NuevoLeadWeb']);
-        await db.collection('leads').doc(leadId).set({ nuevoLeadWebCancelled: true }, { merge: true });
-      }
-    } catch (e) {
-      console.warn('cancelSequences no disponible o falló:', e?.message);
+    const { leadId, leadPhone, summary, negocioId } = req.body || {};
+    if (!leadId && !leadPhone) {
+      return res.status(400).json({ error: 'Faltan leadId o leadPhone' });
+    }
+    if (!summary) {
+      return res.status(400).json({ error: 'Falta summary' });
     }
 
-    // 3) Crear/actualizar doc en Negocios para pipeline web
-    const negocioRef = await db.collection('Negocios').add({
-      leadId,
-      leadPhone: e164,
-      companyInfo: summary.companyName || '',
-      contactEmail: summary.email || '',
-      businessSector: summary.businessType || '',
-      palette: { primary: summary.primaryColor || '#1890ff' },
-      status: 'Sin procesar',
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    // 1) Resolver e164 y leadId
+    const e164 = toE164(leadPhone || (leadId || '').split('@')[0]);
+    const finalLeadId = leadId || e164ToLeadId(e164);
 
-    // 4) Mensaje empático diferido (60–120s)
-    const first = String(lead.nombre || '').split(/\s+/)[0] || '';
+    // 2) Verificar lead existe
+    const leadSnap = await db.collection('leads').doc(finalLeadId).get();
+    if (!leadSnap.exists) return res.status(404).json({ error: 'Lead no encontrado' });
+    const lead = leadSnap.data() || {};
+
+    // 3) Guardar brief y etiqueta
+    await db.collection('leads').doc(finalLeadId).set({
+      briefWeb: summary || {},
+      etiquetas: admin.firestore.FieldValue.arrayUnion('FormularioCompletado'),
+      lastMessageAt: new Date(),
+    }, { merge: true });
+
+    // 4) Crear/actualizar doc en Negocios (si no viene negocioId, crea uno)
+    let negocioDocId = negocioId;
+    if (!negocioDocId) {
+      // evita duplicados "Sin procesar" por leadPhone
+      const q = await db.collection('Negocios')
+        .where('leadPhone', '==', e164.replace('+', ''))
+        .where('status', '==', 'Sin procesar')
+        .limit(1).get();
+
+      if (!q.empty) {
+        negocioDocId = q.docs[0].id;
+      } else {
+        const ref = await db.collection('Negocios').add({
+          leadId: finalLeadId,
+          leadPhone: e164.replace('+', ''), // guardado sin "+"
+          status: 'Sin procesar',
+          companyInfo: summary.companyInfo || '',
+          businessSector: summary.businessSector || '',
+          palette: summary.palette || (summary.primaryColor ? [summary.primaryColor] : []),
+          keyItems: summary.keyItems || [],
+          contactWhatsapp: summary.contactWhatsapp || '',
+          contactEmail: summary.contactEmail || '',
+          socialFacebook: summary.socialFacebook || '',
+          socialInstagram: summary.socialInstagram || '',
+          logoURL: summary.logoURL || '',
+          slug: summary.slug || '',
+          createdAt: new Date()
+        });
+        negocioDocId = ref.id;
+      }
+    }
+
+    // 5) TRANSICIÓN: cancelar bienvenida y activar secuencia del formulario
+    try {
+      if (cancelSequences) {
+        await cancelSequences(finalLeadId, ['NuevoLead', 'NuevoLeadWeb', 'LeadWeb']);
+        await db.collection('leads').doc(finalLeadId).set(
+          { nuevoLeadWebCancelled: true },
+          { merge: true }
+        );
+      }
+      if (scheduleSequenceForLead) {
+        await scheduleSequenceForLead(finalLeadId, FORM_SEQUENCE_ID, new Date());
+      } else {
+        console.warn('[after-form] scheduleSequenceForLead no disponible.');
+      }
+    } catch (e) {
+      console.warn('[after-form] transición de secuencias falló:', e?.message);
+    }
+
+    // 6) Mensaje empático diferido (60–120s)
+    const first = String(lead.nombre || '').trim().split(/\s+/)[0] || '';
     const reglas = `
 Escribe un solo mensaje breve de WhatsApp, cálido y profesional.
 Contexto: vamos a crear una demo de sitio web exprés.
@@ -287,14 +341,13 @@ Requisitos:
 - 1 sola frase natural (sin ":").
 - Menciona que trabajarás con lo que compartió (empresa/tipo/color).
 - Sin comillas, sin emojis, 18–35 palabras.
-No incluyas cierre fijo; lo agregaré yo.
 `.trim();
     const contexto = `
 Datos:
 - Nombre: ${first || '(no)'}
-- Empresa: ${summary.companyName || '(no)'}
-- Tipo: ${summary.businessType || '(no)'}
-- Color: ${summary.primaryColor || '(no)'}
+- Empresa: ${summary.companyInfo || '(no)'}
+- Tipo: ${summary.businessSector || '(no)'}
+- Color: ${Array.isArray(summary.palette) ? summary.palette[0] : (summary.primaryColor || '(no)')}
 `.trim();
 
     let principal = '';
@@ -321,7 +374,7 @@ Datos:
       sendMessageToLead(e164, mensaje).catch(err => console.error('Empatía web diferida error:', err));
     }, delayMs);
 
-    return res.json({ ok: true, negocioId: negocioRef.id });
+    return res.json({ ok: true, negocioId: negocioDocId });
   } catch (e) {
     console.error('/api/web/after-form error:', e);
     return res.status(500).json({ error: String(e?.message || e) });
