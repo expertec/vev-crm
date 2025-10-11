@@ -4,7 +4,7 @@ import cors from 'cors';
 import bodyParser from 'body-parser';
 import dotenv from 'dotenv';
 import cron from 'node-cron';
-import multer from 'multer';
+import multer from 'multer';              // ← solo aquí
 import path from 'path';
 import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
@@ -123,7 +123,6 @@ function firstName(n = '') {
 const FORM_SEQUENCE_ID = 'FormularioWeb'; // adapta al nombre real de tu secuencia
 
 // ================ App base ================
-import multer from 'multer';
 const app = express();
 const port = process.env.PORT || 3001;
 const upload = multer({ dest: path.resolve('./uploads') });
@@ -254,16 +253,12 @@ app.post('/api/whatsapp/mark-read', async (req, res) => {
 
 // ============== after-form (web) ==============
 // Acepta { leadId, leadPhone, summary, negocioId? }
-// Si el lead no existe, lo crea con el número y etiqueta "FormularioCompletado".
+// Si el lead no existe, lo crea y programa el mensaje empático (60–120s).
 app.post('/api/web/after-form', async (req, res) => {
   try {
     const { leadId, leadPhone, summary, negocioId } = req.body || {};
-    if (!leadId && !leadPhone) {
-      return res.status(400).json({ error: 'Faltan leadId o leadPhone' });
-    }
-    if (!summary) {
-      return res.status(400).json({ error: 'Falta summary' });
-    }
+    if (!leadId && !leadPhone) return res.status(400).json({ error: 'Faltan leadId o leadPhone' });
+    if (!summary)              return res.status(400).json({ error: 'Falta summary' });
 
     // 1) Resolver e164 y leadId
     const e164 = toE164(leadPhone || (leadId || '').split('@')[0]);
@@ -274,7 +269,7 @@ app.post('/api/web/after-form', async (req, res) => {
     const leadSnap = await leadRef.get();
     if (!leadSnap.exists) {
       await leadRef.set({
-        telefono: e164.replace(/\D/g, ''), // sólo dígitos (sendMessageToLead normaliza a 521 internamente)
+        telefono: e164.replace(/\D/g, ''),
         nombre: '',
         source: 'Web',
         fecha_creacion: new Date(),
@@ -284,7 +279,6 @@ app.post('/api/web/after-form', async (req, res) => {
         lastMessageAt: new Date(),
       }, { merge: true });
     }
-
     const leadData = (await leadRef.get()).data() || {};
 
     // 3) Guardar brief en el lead
@@ -297,7 +291,6 @@ app.post('/api/web/after-form', async (req, res) => {
     // 4) Crear/actualizar Negocios (si no vino negocioId)
     let negocioDocId = negocioId;
     if (!negocioDocId) {
-      // evita duplicados "Sin procesar" por leadPhone
       const q = await db.collection('Negocios')
         .where('leadPhone', '==', e164.replace('+', ''))
         .where('status', '==', 'Sin procesar')
@@ -308,7 +301,7 @@ app.post('/api/web/after-form', async (req, res) => {
       } else {
         const ref = await db.collection('Negocios').add({
           leadId: finalLeadId,
-          leadPhone: e164.replace('+', ''), // sin "+"
+          leadPhone: e164.replace('+', ''),
           status: 'Sin procesar',
           companyInfo: summary.companyName || '',
           businessSector: summary.businessType || '',
@@ -387,7 +380,6 @@ Datos del lead:
 
     const delayMs = 60_000 + Math.floor(Math.random() * 60_000);
     setTimeout(() => {
-      // pasamos e164; sendMessageToLead lo normaliza a 521 internamente (sin link-preview)
       sendMessageToLead(e164, mensaje).catch(err => console.error('Empatía web diferida error:', err));
     }, delayMs);
 
