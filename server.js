@@ -10,7 +10,6 @@ import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import dayjs from 'dayjs';
-import axios from 'axios';
 
 dotenv.config();
 
@@ -48,6 +47,7 @@ try {
 // ================ OpenAI compat (para mensaje empático) ================
 import OpenAIImport from 'openai';
 const OpenAICtor = OpenAIImport?.OpenAI || OpenAIImport;
+
 function assertOpenAIKey() {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error('Falta la variable de entorno OPENAI_API_KEY');
@@ -58,9 +58,9 @@ async function getOpenAI() {
   try {
     const client = new OpenAICtor({ apiKey: process.env.OPENAI_API_KEY });
     const hasChatCompletions = !!client?.chat?.completions?.create;
-    const hasResponses = !!client?.responses?.create;
+    const hasResponses        = !!client?.responses?.create;
     if (hasChatCompletions) return { client, mode: 'v4-chat' };
-    if (hasResponses) return { client, mode: 'v4-resp' };
+    if (hasResponses)       return { client, mode: 'v4-resp'  };
   } catch {}
   const { Configuration, OpenAIApi } = await import('openai');
   const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY });
@@ -83,11 +83,9 @@ function extractText(resp, mode) {
       return parts.join(' ').trim();
     }
     return resp?.data?.choices?.[0]?.message?.content?.trim() || '';
-  } catch {
-    return '';
-  }
+  } catch { return ''; }
 }
-async function chatCompletionCompat({ model, messages, max_tokens = 120, temperature = 0.35 }) {
+async function chatCompletionCompat({ model, messages, max_tokens = 140, temperature = 0.4 }) {
   const { client, mode } = await getOpenAI();
   if (mode === 'v4-chat') {
     const resp = await client.chat.completions.create({ model, messages, max_tokens, temperature });
@@ -102,7 +100,7 @@ async function chatCompletionCompat({ model, messages, max_tokens = 120, tempera
   return extractText(resp, 'v3');
 }
 
-// ================ Teléfonos (E.164 → JID) ================
+// ================ Teléfonos helpers ================
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 function toE164(num, defaultCountry = 'MX') {
   const raw = String(num || '').replace(/\D/g, '');
@@ -110,28 +108,22 @@ function toE164(num, defaultCountry = 'MX') {
   if (p && p.isValid()) return p.number; // +521...
   if (/^\d{10}$/.test(raw)) return `+52${raw}`;
   if (/^\d{11,15}$/.test(raw) && raw.startsWith('521')) return `+${raw}`;
-  if (/^\d{11,15}$/.test(raw) && raw.startsWith('52')) return `+${raw}`;
+  if (/^\d{11,15}$/.test(raw) && raw.startsWith('52'))  return `+${raw}`;
   return `+${raw}`;
 }
 function e164ToLeadId(e164) {
   const digits = String(e164 || '').replace(/\D/g, '');
   return `${digits}@s.whatsapp.net`;
 }
-
-// ⭐ NEW: normaliza 52→521 para Baileys (MX móviles)
-function normalizeMXForWA(num) {
-  let digits = String(num || '').replace(/\D/g, '');
-  if (digits.length === 12 && digits.startsWith('52') && !digits.startsWith('521')) {
-    return '521' + digits.slice(2);
-  }
-  if (digits.length === 10) return '521' + digits;
-  return digits;
+function firstName(n = '') {
+  return String(n).trim().split(/\s+/)[0] || '';
 }
 
 // ================ Configuración de secuencia del formulario ================
-const FORM_SEQUENCE_ID = 'FormularioWeb'; // <-- cambia si tu secuencia se llama distinto
+const FORM_SEQUENCE_ID = 'FormularioWeb'; // adapta al nombre real de tu secuencia
 
 // ================ App base ================
+import multer from 'multer';
 const app = express();
 const port = process.env.PORT || 3001;
 const upload = multer({ dest: path.resolve('./uploads') });
@@ -159,12 +151,7 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
     if (!leadDoc.exists) return res.status(404).json({ error: 'Lead no encontrado' });
     const { telefono } = leadDoc.data() || {};
     if (!telefono) return res.status(400).json({ error: 'Lead sin teléfono' });
-
-    // ⭐ NEW: fuerza 521 antes de enviar
-    const raw = String(telefono).replace(/\D/g, '');
-    const normalized = normalizeMXForWA(raw);
-
-    const result = await sendMessageToLead(normalized, message);
+    const result = await sendMessageToLead(telefono, message);
     return res.json(result);
   } catch (error) {
     console.error('Error enviando WhatsApp:', error);
@@ -222,8 +209,7 @@ app.post('/api/crear-usuario', async (req, res) => {
 
     const negocioDoc = await db.collection('Negocios').doc(negocioId).get();
     const negocio = negocioDoc.data() || {};
-    let telefono = toE164(negocio?.leadPhone); // robusto
-
+    let telefono = toE164(negocio?.leadPhone);
     const urlAcceso = 'https://negociosweb.mx/login';
 
     let mensaje = `¡Bienvenido a tu panel de administración de tu página web! 👋
@@ -240,10 +226,8 @@ app.post('/api/crear-usuario', async (req, res) => {
     else if (typeof d === 'string' || typeof d === 'number') fechaCorte = dayjs(d).format('DD/MM/YYYY');
     mensaje += `\n🗓️ Tu plan termina el día: ${fechaCorte}\n\nPor seguridad, cambia tu contraseña después de ingresar.\n`;
 
-    if (telefono) {
-      // ⭐ NEW: normaliza a 521 para Baileys antes de enviar
-      const normalized = normalizeMXForWA(telefono);
-      try { await sendMessageToLead(normalized, mensaje); }
+    if (telefono && telefono.length >= 12) {
+      try { await sendMessageToLead(telefono, mensaje); }
       catch (waError) { console.error('[CREAR USUARIO] Error WA:', waError); }
     }
 
@@ -270,6 +254,7 @@ app.post('/api/whatsapp/mark-read', async (req, res) => {
 
 // ============== after-form (web) ==============
 // Acepta { leadId, leadPhone, summary, negocioId? }
+// Si el lead no existe, lo crea con el número y etiqueta "FormularioCompletado".
 app.post('/api/web/after-form', async (req, res) => {
   try {
     const { leadId, leadPhone, summary, negocioId } = req.body || {};
@@ -284,19 +269,32 @@ app.post('/api/web/after-form', async (req, res) => {
     const e164 = toE164(leadPhone || (leadId || '').split('@')[0]);
     const finalLeadId = leadId || e164ToLeadId(e164);
 
-    // 2) Verificar lead existe
-    const leadSnap = await db.collection('leads').doc(finalLeadId).get();
-    if (!leadSnap.exists) return res.status(404).json({ error: 'Lead no encontrado' });
-    const lead = leadSnap.data() || {};
+    // 2) Verificar/crear lead
+    const leadRef  = db.collection('leads').doc(finalLeadId);
+    const leadSnap = await leadRef.get();
+    if (!leadSnap.exists) {
+      await leadRef.set({
+        telefono: e164.replace(/\D/g, ''), // sólo dígitos (sendMessageToLead normaliza a 521 internamente)
+        nombre: '',
+        source: 'Web',
+        fecha_creacion: new Date(),
+        estado: 'nuevo',
+        etiquetas: ['FormularioCompletado'],
+        unreadCount: 0,
+        lastMessageAt: new Date(),
+      }, { merge: true });
+    }
 
-    // 3) Guardar brief y etiqueta
-    await db.collection('leads').doc(finalLeadId).set({
+    const leadData = (await leadRef.get()).data() || {};
+
+    // 3) Guardar brief en el lead
+    await leadRef.set({
       briefWeb: summary || {},
       etiquetas: admin.firestore.FieldValue.arrayUnion('FormularioCompletado'),
       lastMessageAt: new Date(),
     }, { merge: true });
 
-    // 4) Crear/actualizar doc en Negocios (si no viene negocioId, crea uno)
+    // 4) Crear/actualizar Negocios (si no vino negocioId)
     let negocioDocId = negocioId;
     if (!negocioDocId) {
       // evita duplicados "Sin procesar" por leadPhone
@@ -310,14 +308,14 @@ app.post('/api/web/after-form', async (req, res) => {
       } else {
         const ref = await db.collection('Negocios').add({
           leadId: finalLeadId,
-          leadPhone: e164.replace('+', ''), // guardado sin "+"
+          leadPhone: e164.replace('+', ''), // sin "+"
           status: 'Sin procesar',
-          companyInfo: summary.companyInfo || '',
-          businessSector: summary.businessSector || '',
+          companyInfo: summary.companyName || '',
+          businessSector: summary.businessType || '',
           palette: summary.palette || (summary.primaryColor ? [summary.primaryColor] : []),
           keyItems: summary.keyItems || [],
           contactWhatsapp: summary.contactWhatsapp || '',
-          contactEmail: summary.contactEmail || '',
+          contactEmail: summary.email || '',
           socialFacebook: summary.socialFacebook || '',
           socialInstagram: summary.socialInstagram || '',
           logoURL: summary.logoURL || '',
@@ -328,41 +326,42 @@ app.post('/api/web/after-form', async (req, res) => {
       }
     }
 
-    // 5) TRANSICIÓN: cancelar bienvenida y activar secuencia del formulario
+    // 5) Transición de secuencias
     try {
       if (cancelSequences) {
         await cancelSequences(finalLeadId, ['NuevoLead', 'NuevoLeadWeb', 'LeadWeb']);
-        await db.collection('leads').doc(finalLeadId).set(
-          { nuevoLeadWebCancelled: true },
-          { merge: true }
-        );
+        await leadRef.set({ nuevoLeadWebCancelled: true }, { merge: true });
       }
-      if (scheduleSequenceForLead) {
+      if (scheduleSequenceForLead && FORM_SEQUENCE_ID) {
         await scheduleSequenceForLead(finalLeadId, FORM_SEQUENCE_ID, new Date());
-      } else {
-        console.warn('[after-form] scheduleSequenceForLead no disponible.');
       }
     } catch (e) {
       console.warn('[after-form] transición de secuencias falló:', e?.message);
     }
 
-    // 6) Mensaje empático diferido (60–120s)
-    const first = String(lead.nombre || '').trim().split(/\s+/)[0] || '';
+    // 6) Mensaje empático diferido (60–120s), usando datos del negocio
+    const nombre  = firstName(leadData?.nombre || '');
+    const sector  = summary.businessType || '';
+    const empresa = summary.companyName || '';
+    const color   = Array.isArray(summary.palette) ? summary.palette[0] : (summary.primaryColor || '');
+
     const reglas = `
-Escribe un solo mensaje breve de WhatsApp, cálido y profesional.
-Contexto: vamos a crear una demo de sitio web exprés.
+Escribe un solo mensaje breve de WhatsApp, cálido y profesional (sin emojis).
+Objetivo: confirmar que recibimos su brief y anticipar utilidad concreta del sitio.
 Requisitos:
-- Saluda por el primer nombre si existe.
-- 1 sola frase natural (sin ":").
-- Menciona que trabajarás con lo que compartió (empresa/tipo/color).
-- Sin comillas, sin emojis, 18–35 palabras.
+- Trato por primer nombre si existe.
+- 1 sola frase natural (sin dos puntos ":"), 20–40 palabras.
+- Menciona el tipo de negocio y una utilidad clara (p. ej., captar clientes, catálogo, reputación/branding, presencia profesional, reservas o pedidos).
+- Evita promesas absolutas o tecnicismos.
+NO agregues despedidas, ni comillas.
 `.trim();
+
     const contexto = `
-Datos:
-- Nombre: ${first || '(no)'}
-- Empresa: ${summary.companyInfo || '(no)'}
-- Tipo: ${summary.businessSector || '(no)'}
-- Color: ${Array.isArray(summary.palette) ? summary.palette[0] : (summary.primaryColor || '(no)')}
+Datos del lead:
+- Nombre: ${nombre || '(no)'}
+- Empresa: ${empresa || '(no)'}
+- Giro: ${sector || '(no)'}
+- Color clave: ${color || '(no)'}
 `.trim();
 
     let principal = '';
@@ -370,26 +369,26 @@ Datos:
       const text = await chatCompletionCompat({
         model: 'gpt-4o-mini',
         messages: [
-          { role: 'system', content: 'Eres conciso, cálido y profesional.' },
-          { role: 'user', content: `${reglas}\n\n${contexto}\n\nRedacta SOLO la frase principal.` },
+          { role: 'system', content: 'Eres conciso, cálido y orientado a negocio.' },
+          { role: 'user', content: `${reglas}\n\n${contexto}\n\nDevuélveme SOLO una frase.` },
         ],
-        max_tokens: 120,
-        temperature: 0.35,
+        max_tokens: 140,
+        temperature: 0.4,
       });
       principal = String(text || '').replace(/[“”"']/g, '').replace(/\s+/g, ' ').trim();
       principal = principal.split(/(?<=[.!?])\s+/)[0] || principal;
     } catch {
-      principal = 'Gracias por la información; me gusta el enfoque que buscas para tu sitio.';
+      principal = `Recibí la información de tu negocio y para ${sector || 'tu giro'} un sitio puede ayudarte a captar clientes y proyectar presencia profesional; mi equipo ya trabaja en tu muestra y te la comparto en breve.`;
     }
-    const CIERRE = 'Voy a poner todo de mí para construir tu demo; enseguida te la comparto.';
-    const mensaje = `${first ? first + ', ' : ''}${principal} ${CIERRE}`;
+
+    const saludo = nombre ? `${nombre}, ` : '';
+    const cierre = 'Mi equipo ya está trabajando en tu muestra; en unos minutos te la envío.';
+    const mensaje = `${saludo}${principal} ${cierre}`;
 
     const delayMs = 60_000 + Math.floor(Math.random() * 60_000);
-
-    // ⭐ NEW: normaliza 521 ANTES de enviar el mensaje empático
-    const normalized = normalizeMXForWA(e164);
     setTimeout(() => {
-      sendMessageToLead(normalized, mensaje).catch(err => console.error('Empatía web diferida error:', err));
+      // pasamos e164; sendMessageToLead lo normaliza a 521 internamente (sin link-preview)
+      sendMessageToLead(e164, mensaje).catch(err => console.error('Empatía web diferida error:', err));
     }, delayMs);
 
     return res.json({ ok: true, negocioId: negocioDocId });
