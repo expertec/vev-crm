@@ -27,12 +27,17 @@ const { FieldValue } = admin.firestore;
 const bucket = admin.storage().bucket();
 
 /* ------------------------------ helpers ------------------------------ */
+// alias → trigger (en minúsculas)
 const STATIC_HASHTAG_MAP = {
-  // alias → trigger
   '#promoweb990': 'LeadWeb',
   '#webpro990':   'LeadWeb',
   '#leadweb':     'LeadWeb',
-  '#nuevolead':   'NuevoLead',
+  '#nuevolead':   'NuevoLeadWeb',
+};
+
+// Si el trigger es LeadWeb, cancela estas (evita duplicidad)
+const STATIC_CANCEL_BY_TRIGGER = {
+  'LeadWeb': ['NuevoLeadWeb', 'NuevoLead'],
 };
 
 function firstName(n = '') {
@@ -53,8 +58,21 @@ function extractHashtags(text = '') {
   return found ? Array.from(new Set(found)) : [];
 }
 
+// Normaliza a formato que WhatsApp acepta para MX:
+// - 10 dígitos → 521 + 10
+// - 52XXXXXXXXXX (12 dígitos) → 521XXXXXXXXX
+// - 521XXXXXXXXX → se mantiene
+function normalizePhoneForWA(phone) {
+  let num = String(phone || '').replace(/\D/g, '');
+  if (num.length === 10) return '521' + num; // MX móvil clásico
+  if (num.length === 12 && num.startsWith('52') && !num.startsWith('521')) {
+    return '521' + num.slice(2);
+  }
+  return num;
+}
+
 // Reglas dinámicas opcionales en Firestore
-// Collection: hashtagTriggers, doc: { code: 'promoweb990', trigger: 'LeadWeb', cancel: ['NuevoLead'] }
+// Collection: hashtagTriggers, doc fields: { code: 'promoweb990', trigger: 'LeadWeb', cancel: ['NuevoLead'] }
 async function resolveHashtagInDB(code) {
   const snap = await db
     .collection('hashtagTriggers')
@@ -70,14 +88,22 @@ async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb') 
   const tags = extractHashtags(text);
   if (tags.length === 0) return { trigger: defaultTrigger, cancel: [] };
 
+  // 1) Firestore (dinámico)
   for (const tag of tags) {
     const dbRule = await resolveHashtagInDB(tag);
     if (dbRule?.trigger) return dbRule;
   }
+
+  // 2) Estático
   for (const tag of tags) {
     const trg = STATIC_HASHTAG_MAP[tag];
-    if (trg) return { trigger: trg, cancel: [] };
+    if (trg) {
+      const cancel = STATIC_CANCEL_BY_TRIGGER[trg] || [];
+      return { trigger: trg, cancel };
+    }
   }
+
+  // 3) Default
   return { trigger: defaultTrigger, cancel: [] };
 }
 
@@ -95,7 +121,7 @@ export async function connectToWhatsApp() {
     const sock = makeWASocket({
       auth: state,
       logger: Pino({ level: 'info' }),
-      printQRInTerminal: true, // aviso deprecado: seguimos mostrando QR con nuestro listener abajo
+      printQRInTerminal: true, // seguirá saliendo con el listener de abajo
       version,
     });
     whatsappSock = sock;
@@ -151,12 +177,13 @@ export async function connectToWhatsApp() {
           const [jidUser, jidDomain] = rawJid.split('@');
           const cleanUser = jidUser.split(':')[0].replace(/\s+/g, '');
           const jid = `${cleanUser}@${jidDomain}`;
-
           if (jidDomain !== 's.whatsapp.net') continue;
 
-          const phone = cleanUser;             // E164 sin '+'
-          const leadId = jid;                  // usamos el JID como ID de lead
-          const sender = msg.key.fromMe ? 'business' : 'lead';
+          // Número como viene de WA y normalizado a 521 si aplica
+          const waNumber = cleanUser;               // típico: 521XXXXXXXXXX (a veces 52XXXXXXXXXX)
+          const normNum  = normalizePhoneForWA(waNumber);
+          const leadId   = `${normNum}@s.whatsapp.net`; // usamos SIEMPRE normalizado como ID
+          const sender   = msg.key.fromMe ? 'business' : 'lead';
 
           // ------- parseo de tipos (para leer hashtags del texto) -------
           let content = '';
@@ -166,21 +193,21 @@ export async function connectToWhatsApp() {
           if (msg.message?.videoMessage) {
             mediaType = 'video';
             const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
-            const fileRef = bucket.file(`videos/${phone}-${Date.now()}.mp4`);
+            const fileRef = bucket.file(`videos/${normNum}-${Date.now()}.mp4`);
             await fileRef.save(buffer, { contentType: 'video/mp4' });
             const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
             mediaUrl = url;
           } else if (msg.message?.imageMessage) {
             mediaType = 'image';
             const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
-            const fileRef = bucket.file(`images/${phone}-${Date.now()}.jpg`);
+            const fileRef = bucket.file(`images/${normNum}-${Date.now()}.jpg`);
             await fileRef.save(buffer, { contentType: 'image/jpeg' });
             const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
             mediaUrl = url;
           } else if (msg.message?.audioMessage) {
             mediaType = 'audio';
             const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
-            const fileRef = bucket.file(`audios/${phone}-${Date.now()}.ogg`);
+            const fileRef = bucket.file(`audios/${normNum}-${Date.now()}.ogg`);
             await fileRef.save(buffer, { contentType: 'audio/ogg' });
             const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
             mediaUrl = url;
@@ -189,7 +216,7 @@ export async function connectToWhatsApp() {
             const { mimetype, fileName: origName } = msg.message.documentMessage;
             const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
             const ext = path.extname(origName || '') || '';
-            const fileRef = bucket.file(`docs/${phone}-${Date.now()}${ext}`);
+            const fileRef = bucket.file(`docs/${normNum}-${Date.now()}${ext}`);
             await fileRef.save(buffer, { contentType: mimetype || 'application/octet-stream' });
             const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
             mediaUrl = url;
@@ -210,13 +237,14 @@ export async function connectToWhatsApp() {
           const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';
           const rule = await resolveTriggerFromMessage(content, defaultTrigger);
           const trigger = rule.trigger;
+          const toCancel = rule.cancel || [];
 
-          // ------- crear/actualizar LEAD -------
+          // ------- crear/actualizar LEAD (siempre con número normalizado) -------
           const leadRef = db.collection('leads').doc(leadId);
           const leadSnap = await leadRef.get();
 
           const baseLead = {
-            telefono: phone,         // solo dígitos con país
+            telefono: normNum,        // SIEMPRE normalizado
             nombre: msg.pushName || '',
             source: 'WhatsApp',
           };
@@ -231,23 +259,18 @@ export async function connectToWhatsApp() {
               lastMessageAt: now(),
             });
 
-            if (rule.cancel?.length) {
-              await cancelSequences(leadId, rule.cancel).catch(() => {});
-            }
+            if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
             await scheduleSequenceForLead(leadId, trigger, now());
 
-            console.log('[WA] Lead CREADO:', { leadId, phone, trigger, fromMe: sender === 'business' });
+            console.log('[WA] Lead CREADO:', { leadId, phone: normNum, trigger, fromMe: sender === 'business' });
           } else {
             await leadRef.update({ lastMessageAt: now() });
-
             // aplica hashtag también en leads existentes
             await leadRef.set({ etiquetas: FieldValue.arrayUnion(trigger) }, { merge: true });
-            if (rule.cancel?.length) {
-              await cancelSequences(leadId, rule.cancel).catch(() => {});
-            }
+            if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
             await scheduleSequenceForLead(leadId, trigger, now());
 
-            console.log('[WA] Lead ACTUALIZADO:', { leadId, phone, trigger, fromMe: sender === 'business' });
+            console.log('[WA] Lead ACTUALIZADO:', { leadId, phone: normNum, trigger, fromMe: sender === 'business' });
           }
 
           // ------- guardar mensaje -------
@@ -287,13 +310,12 @@ export function getSessionPhone() { return sessionPhone; }
 
 export async function sendMessageToLead(phone, messageContent) {
   if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
-  let num = String(phone).replace(/\D/g, '');
-  if (num.length === 10) num = '52' + num; // normaliza MX
+  const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
 
   await whatsappSock.sendMessage(
     jid,
-    { text: messageContent, linkPreview: false },
+    { text: messageContent, linkPreview: false }, // evita dependency de link-preview-js
     { timeoutMs: 60_000 }
   );
 
@@ -312,8 +334,7 @@ export async function sendFullAudioAsDocument(phone, fileUrl) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
-  let num = String(phone).replace(/\D/g, '');
-  if (num.length === 10) num = '52' + num;
+  const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
 
   const res = await axios.get(fileUrl, { responseType: 'arraybuffer' });
@@ -332,8 +353,7 @@ export async function sendAudioMessage(phone, filePath) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
-  let num = String(phone).replace(/\D/g, '');
-  if (num.length === 10) num = '52' + num;
+  const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
 
   const audioBuffer = fs.readFileSync(filePath);
@@ -361,9 +381,7 @@ export async function sendClipMessage(phone, clipUrl) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
-  // Normaliza MX (10 dígitos → 52 + 10). Si ya viene con 521… lo respeta.
-  let num = String(phone).replace(/\D/g, '');
-  if (num.length === 10) num = '52' + num;
+  const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
 
   // Detecta .ogg/.opus para PTT
@@ -406,7 +424,6 @@ export async function sendClipMessage(phone, clipUrl) {
   }
 }
 
-
 /**
  * Envía **nota de voz** (PTT) desde una URL (ogg/opus) o cualquiera compatible con WhatsApp.
  */
@@ -414,8 +431,7 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
-  let num = String(phone).replace(/\D/g, '');
-  if (num.length === 10) num = '52' + num;
+  const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
 
   const msg = {
@@ -451,12 +467,11 @@ export async function sendVideoNote(phone, videoUrlOrPath) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
-  let num = String(phone).replace(/\D/g, '');
-  if (num.length === 10) num = '52' + num; // normaliza MX si aplica
+  const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
 
   const content =
-    videoUrlOrPath.startsWith('http')
+    String(videoUrlOrPath).startsWith('http')
       ? { video: { url: videoUrlOrPath }, ptv: true }
       : { video: fs.readFileSync(videoUrlOrPath), ptv: true };
 
@@ -468,7 +483,7 @@ export async function sendVideoNote(phone, videoUrlOrPath) {
     const msgData = {
       content: '',
       mediaType: 'video_note',
-      mediaUrl: videoUrlOrPath.startsWith('http') ? videoUrlOrPath : null,
+      mediaUrl: String(videoUrlOrPath).startsWith('http') ? videoUrlOrPath : null,
       sender: 'business',
       timestamp: new Date()
     };

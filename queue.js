@@ -1,7 +1,6 @@
 // queue.js
 import { db, admin } from './firebaseAdmin.js';
 import {
-  sendMessageToLead,
   sendClipMessage,
   getWhatsAppSock,
   sendVideoNote
@@ -27,14 +26,47 @@ function replacePlaceholders(template, lead) {
   });
 }
 
-/* -------------------- programar / cancelar secuencias ------------------- */
+// --- helpers de teléfono/JID (MX requiere 521 para móviles con Baileys) ---
+function toE164(num) {
+  const raw = String(num || '').replace(/\D/g, '');
+  if (/^\d{10}$/.test(raw)) return `+52${raw}`;
+  if (/^52\d{10}$/.test(raw)) return `+${raw}`;
+  if (/^521\d{10}$/.test(raw)) return `+${raw}`;
+  return `+${raw}`;
+}
+function normalizePhoneForWA(phone) {
+  let num = String(phone || '').replace(/\D/g, '');
+  // 52 + 10 → forzar 521 + 10
+  if (num.length === 12 && num.startsWith('52') && !num.startsWith('521')) {
+    return '521' + num.slice(2);
+  }
+  // 10 → 521 + 10
+  if (num.length === 10) return '521' + num;
+  // si ya viene 521…, dejarlo
+  return num;
+}
+function e164ToJid(e164) {
+  const digits = String(e164 || '').replace(/\D/g, '');
+  return `${normalizePhoneForWA(digits)}@s.whatsapp.net`;
+}
 
-/**
- * Programa todos los mensajes de la secuencia "trigger" para un lead.
- * - Limpia previamente jobs pendientes del mismo trigger (idempotencia).
- * - Conserva el orden del front mediante el índice `idx`.
- * - Añade un jitter de idx*250ms a dueAt para romper empates del mismo minuto.
- */
+// persistencia uniforme en Firestore para salientes (business)
+async function persistOutgoing(leadId, { content = '', mediaType = 'text', mediaUrl = null }) {
+  const now = new Date();
+  await db.collection('leads').doc(leadId).collection('messages').add({
+    content,
+    mediaType,
+    mediaUrl,
+    sender: 'business',
+    timestamp: now
+  });
+  await db.collection('leads').doc(leadId).set(
+    { lastMessageAt: now },
+    { merge: true }
+  );
+}
+
+/* -------------------- programar / cancelar secuencias ------------------- */
 export async function scheduleSequenceForLead(leadId, trigger, startAt = new Date()) {
   // 0) limpiar pendientes del mismo trigger para este lead
   const oldSnap = await db.collection('sequenceQueue')
@@ -83,7 +115,7 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
     batch.set(ref, {
       leadId,
       trigger,
-      idx, // ← orden dado por el front
+      idx,
       payload: {
         type: m.type || 'texto',
         contenido: m.contenido || ''
@@ -97,7 +129,6 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
 
   await batch.commit();
 
-  // pista en el lead (opcional)
   await db.collection('leads').doc(leadId).set({
     hasActiveSequences: true
   }, { merge: true });
@@ -105,9 +136,6 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
   return messages.length;
 }
 
-/**
- * Cancela (borra) tareas pendientes de ciertos triggers para un lead.
- */
 export async function cancelSequences(leadId, triggers = []) {
   if (!leadId || !Array.isArray(triggers) || triggers.length === 0) return 0;
 
@@ -138,53 +166,61 @@ async function deliverPayload(leadId, payload) {
   if (!leadSnap.exists) throw new Error(`Lead no existe: ${leadId}`);
 
   const lead = { id: leadSnap.id, ...leadSnap.data() };
-  const phone = String(lead.telefono || '').replace(/\D/g, '');
-  if (!phone) throw new Error(`Lead sin telefono: ${leadId}`);
+
+  // Construye JID normalizado 521… para Baileys
+  const e164 = toE164(lead.telefono);
+  const jid  = e164ToJid(e164);
 
   const type = (payload?.type || 'texto').toLowerCase();
   const contenido = payload?.contenido || '';
 
-  // acceso al socket por si mandamos multimedia
   const sock = getWhatsAppSock();
+  if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
   switch (type) {
     case 'texto': {
       const text = replacePlaceholders(contenido, lead).trim();
-      if (text) await sendMessageToLead(phone, text);
+      if (text) {
+        await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 60_000 });
+        await persistOutgoing(leadId, { content: text, mediaType: 'text' });
+      }
       break;
     }
 
     case 'formulario': {
       const text = replacePlaceholders(contenido, lead).trim();
-      if (text) await sendMessageToLead(phone, text);
+      if (text) {
+        await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 60_000 });
+        await persistOutgoing(leadId, { content: text, mediaType: 'text' });
+      }
       break;
     }
 
     case 'audio':
     case 'clip': {
       const url = replacePlaceholders(contenido, lead).trim();
-      if (url) await sendClipMessage(phone, url);
+      if (url) {
+        // usa helper robusto con fallback URL→buffer y reintentos
+        await sendClipMessage(e164, url).catch(err => { throw err; });
+        await persistOutgoing(leadId, { content: '', mediaType: 'audio', mediaUrl: url });
+      }
       break;
     }
 
     case 'imagen': {
       const url = replacePlaceholders(contenido, lead).trim();
-      if (url && sock) {
-        const jid = `${phone}@s.whatsapp.net`;
-        await sock.sendMessage(jid, { image: { url } });
-      } else if (url) {
-        await sendMessageToLead(phone, url);
+      if (url) {
+        await sock.sendMessage(jid, { image: { url } }, { timeoutMs: 120_000 });
+        await persistOutgoing(leadId, { content: '', mediaType: 'image', mediaUrl: url });
       }
       break;
     }
 
     case 'video': {
       const url = replacePlaceholders(contenido, lead).trim();
-      if (url && sock) {
-        const jid = `${phone}@s.whatsapp.net`;
-        await sock.sendMessage(jid, { video: { url } });
-      } else if (url) {
-        await sendMessageToLead(phone, url);
+      if (url) {
+        await sock.sendMessage(jid, { video: { url } }, { timeoutMs: 120_000 });
+        await persistOutgoing(leadId, { content: '', mediaType: 'video', mediaUrl: url });
       }
       break;
     }
@@ -193,23 +229,28 @@ async function deliverPayload(leadId, payload) {
     case 'video_note':
     case 'video-note': {
       const url = replacePlaceholders(contenido, lead).trim();
-      if (url) await sendVideoNote(phone, url);
+      if (url) {
+        await sendVideoNote(e164, url);
+        await persistOutgoing(leadId, { content: '', mediaType: 'video_note', mediaUrl: url });
+      }
       break;
     }
 
     default: {
       const text = replacePlaceholders(contenido, lead).trim();
-      if (text) await sendMessageToLead(phone, text);
+      if (text) {
+        await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 60_000 });
+        await persistOutgoing(leadId, { content: text, mediaType: 'text' });
+      }
     }
   }
 }
 
 /* ----------------------------- procesar cola ---------------------------- */
-
 /**
  * Procesa jobs pendientes cuya dueAt <= ahora.
  * Orden total: dueAt ASC, idx ASC, createdAt ASC.
- * ENVÍO SECUENCIAL (no paralelo) para preservar orden exacto.
+ * ENVÍO SECUENCIAL para preservar orden exacto.
  */
 export async function processQueue({ batchSize = 100, shard = null } = {}) {
   const now = new Date();
@@ -233,13 +274,11 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
       const dbt = b.dueAt?.toMillis?.() ?? +new Date(b.dueAt);
       if (da !== dbt) return da - dbt;
       if ((a.idx ?? 0) !== (b.idx ?? 0)) return (a.idx ?? 0) - (b.idx ?? 0);
-      // createdAt puede ser Timestamp; si no existe, queda al final
       const ca = a.createdAt?.toMillis?.() ?? Number.MAX_SAFE_INTEGER;
       const cb = b.createdAt?.toMillis?.() ?? Number.MAX_SAFE_INTEGER;
       return ca - cb;
     });
 
-  // Envío SECUENCIAL para mantener orden exacto
   for (const job of jobs) {
     try {
       await deliverPayload(job.leadId, job.payload);
@@ -253,7 +292,6 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
         lastMessageAt: FieldValue.serverTimestamp()
       }, { merge: true });
 
-      // Pequeño respiro entre mensajes para que WA no reordene
       await sleep(350);
     } catch (err) {
       await job.ref.update({

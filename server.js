@@ -43,9 +43,7 @@ try {
   const q = await import('./queue.js');
   cancelSequences = q.cancelSequences || null;
   scheduleSequenceForLead = q.scheduleSequenceForLead || null;
-} catch {
-  /* continúa sin romper */
-}
+} catch { /* continúa sin romper */ }
 
 // ================ OpenAI compat (para mensaje empático) ================
 import OpenAIImport from 'openai';
@@ -117,8 +115,17 @@ function toE164(num, defaultCountry = 'MX') {
 }
 function e164ToLeadId(e164) {
   const digits = String(e164 || '').replace(/\D/g, '');
-  // WA espera sin el "+" y con 52/521
   return `${digits}@s.whatsapp.net`;
+}
+
+// ⭐ NEW: normaliza 52→521 para Baileys (MX móviles)
+function normalizeMXForWA(num) {
+  let digits = String(num || '').replace(/\D/g, '');
+  if (digits.length === 12 && digits.startsWith('52') && !digits.startsWith('521')) {
+    return '521' + digits.slice(2);
+  }
+  if (digits.length === 10) return '521' + digits;
+  return digits;
 }
 
 // ================ Configuración de secuencia del formulario ================
@@ -152,7 +159,12 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
     if (!leadDoc.exists) return res.status(404).json({ error: 'Lead no encontrado' });
     const { telefono } = leadDoc.data() || {};
     if (!telefono) return res.status(400).json({ error: 'Lead sin teléfono' });
-    const result = await sendMessageToLead(telefono, message);
+
+    // ⭐ NEW: fuerza 521 antes de enviar
+    const raw = String(telefono).replace(/\D/g, '');
+    const normalized = normalizeMXForWA(raw);
+
+    const result = await sendMessageToLead(normalized, message);
     return res.json(result);
   } catch (error) {
     console.error('Error enviando WhatsApp:', error);
@@ -211,6 +223,7 @@ app.post('/api/crear-usuario', async (req, res) => {
     const negocioDoc = await db.collection('Negocios').doc(negocioId).get();
     const negocio = negocioDoc.data() || {};
     let telefono = toE164(negocio?.leadPhone); // robusto
+
     const urlAcceso = 'https://negociosweb.mx/login';
 
     let mensaje = `¡Bienvenido a tu panel de administración de tu página web! 👋
@@ -227,8 +240,10 @@ app.post('/api/crear-usuario', async (req, res) => {
     else if (typeof d === 'string' || typeof d === 'number') fechaCorte = dayjs(d).format('DD/MM/YYYY');
     mensaje += `\n🗓️ Tu plan termina el día: ${fechaCorte}\n\nPor seguridad, cambia tu contraseña después de ingresar.\n`;
 
-    if (telefono && telefono.length >= 12) {
-      try { await sendMessageToLead(telefono, mensaje); }
+    if (telefono) {
+      // ⭐ NEW: normaliza a 521 para Baileys antes de enviar
+      const normalized = normalizeMXForWA(telefono);
+      try { await sendMessageToLead(normalized, mensaje); }
       catch (waError) { console.error('[CREAR USUARIO] Error WA:', waError); }
     }
 
@@ -370,8 +385,11 @@ Datos:
     const mensaje = `${first ? first + ', ' : ''}${principal} ${CIERRE}`;
 
     const delayMs = 60_000 + Math.floor(Math.random() * 60_000);
+
+    // ⭐ NEW: normaliza 521 ANTES de enviar el mensaje empático
+    const normalized = normalizeMXForWA(e164);
     setTimeout(() => {
-      sendMessageToLead(e164, mensaje).catch(err => console.error('Empatía web diferida error:', err));
+      sendMessageToLead(normalized, mensaje).catch(err => console.error('Empatía web diferida error:', err));
     }, delayMs);
 
     return res.json({ ok: true, negocioId: negocioDocId });

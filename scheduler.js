@@ -1,4 +1,4 @@
-// src/server/scheduler.js
+// scheduler.js
 import admin from 'firebase-admin';
 import { db } from './firebaseAdmin.js';
 import { getWhatsAppSock } from './whatsappService.js';
@@ -18,12 +18,12 @@ if (!process.env.OPENAI_API_KEY) {
   throw new Error('Falta OPENAI_API_KEY en entorno');
 }
 
-// ======================== OpenAI compat wrapper ===========================
+/* ======================== OpenAI compat wrapper ======================== */
 function assertOpenAIKey() {
   if (!process.env.OPENAI_API_KEY) throw new Error('Falta OPENAI_API_KEY');
 }
-
 const OpenAICtor = OpenAIImport?.OpenAI || OpenAIImport; // v4 ó default
+
 async function getOpenAI() {
   assertOpenAIKey();
   try {
@@ -32,9 +32,7 @@ async function getOpenAI() {
     const hasResponses = !!client?.responses?.create;
     if (hasChatCompletions) return { client, mode: 'v4-chat' };
     if (hasResponses) return { client, mode: 'v4-resp' };
-  } catch {
-    // cae a v3 dinámicamente
-  }
+  } catch { /* cae a v3 dinámicamente */ }
   const { Configuration, OpenAIApi } = await import('openai');
   const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY });
   const client = new OpenAIApi(configuration);
@@ -81,24 +79,35 @@ async function chatCompletionCompat({ model, messages, temperature = 0.7, max_to
   return extractText(resp, 'v3');
 }
 
-// ============================ Utils comunes ==============================
+/* ============================= Utils comunes =========================== */
 import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 function toE164(num, defaultCountry = 'MX') {
   const raw = String(num || '').replace(/\D/g, '');
   const p = parsePhoneNumberFromString(raw, defaultCountry);
   if (p && p.isValid()) return p.number; // +521... formato E.164
-  // fallback MX: si 10 dígitos, anteponer +52
+  // fallback MX
   if (/^\d{10}$/.test(raw)) return `+52${raw}`;
   if (/^\d{11,15}$/.test(raw) && raw.startsWith('521')) return `+${raw}`;
-  if (/^\d{11,15}$/.test(raw) && raw.startsWith('52')) return `+${raw}`;
+  if (/^\d{11,15}$/.test(raw) && raw.startsWith('52'))  return `+${raw}`;
   return `+${raw}`;
 }
 
+// ⚠️ WhatsApp JID correcto para MX móvil: **521**XXXXXXXXX
+function normalizePhoneForWA(phone) {
+  let num = String(phone || '').replace(/\D/g, '');
+  // si viene como 52XXXXXXXXXX (12), convertir a 521 + 10
+  if (num.length === 12 && num.startsWith('52') && !num.startsWith('521')) {
+    return '521' + num.slice(2);
+  }
+  // si 10 dígitos (nacional) => 521 + 10
+  if (num.length === 10) return '521' + num;
+  // si ya viene con 521… mantener
+  return num;
+}
 function e164ToJid(e164) {
-  // Baileys espera NNN@s.whatsapp.net, sin '+'
   const digits = String(e164 || '').replace(/\D/g, '');
-  return `${digits}@s.whatsapp.net`;
+  return `${normalizePhoneForWA(digits)}@s.whatsapp.net`;
 }
 
 function firstName(n = '') {
@@ -114,28 +123,24 @@ function replacePlaceholders(template, leadData) {
   });
 }
 
-// ============= Locks simples para evitar dobles ejecuciones ==============
+/* ============= Locks simples para evitar dobles ejecuciones ============ */
 async function withTaskLock(taskKey, ttlSeconds, fn) {
   const ref = db.collection('_locks').doc(taskKey);
   const now = Date.now();
   const snap = await ref.get();
   const expireAt = snap.exists ? (snap.data().expireAt || 0) : 0;
 
-  if (expireAt && expireAt > now) {
-    // lock activo
-    return { locked: true };
-  }
+  if (expireAt && expireAt > now) return { locked: true };
   await ref.set({ expireAt: now + ttlSeconds * 1000 }, { merge: true });
   try {
     const result = await fn();
     return { locked: false, result };
   } finally {
-    // suelta lock
     await ref.delete().catch(() => {});
   }
 }
 
-// ======================= Generación del site schema ======================
+/* ====================== Generación del site schema ===================== */
 export async function generateSiteSchemas() {
   if (!PEXELS_API_KEY) throw new Error('Falta PEXELS_API_KEY en entorno');
 
@@ -233,7 +238,7 @@ Estructura EXACTA a devolver (JSON):
         let schema;
         try {
           schema = JSON.parse(raw);
-        } catch (e) {
+        } catch {
           schema = JSON.parse(jsonrepair(raw));
           console.warn('[WARN] JSON reparado para', doc.id);
         }
@@ -287,19 +292,20 @@ Estructura EXACTA a devolver (JSON):
   });
 }
 
-// =================== Envío por WhatsApp (texto / links) ==================
+/* ================= Envío por WhatsApp (texto / links / media) ========== */
 export async function enviarMensaje(lead, mensaje) {
   try {
     const sock = getWhatsAppSock();
     if (!sock) return;
 
+    // lead.telefono puede venir en e164 (+52...), en 52..., 521..., o 10 dígitos
     const e164 = toE164(lead.telefono);
-    const jid = e164ToJid(e164);
+    const jid = e164ToJid(e164); // asegura 521…@s.whatsapp.net
 
     switch ((mensaje?.type || 'texto').toLowerCase()) {
       case 'texto': {
         const text = replacePlaceholders(mensaje.contenido, lead).trim();
-        if (text) await sock.sendMessage(jid, { text });
+        if (text) await sock.sendMessage(jid, { text, linkPreview: false });
         break;
       }
       case 'formulario': {
@@ -309,7 +315,7 @@ export async function enviarMensaje(lead, mensaje) {
           .replace('{{nombre}}', encodeURIComponent(lead.nombre || ''))
           .replace(/\r?\n/g, ' ')
           .trim();
-        if (text) await sock.sendMessage(jid, { text });
+        if (text) await sock.sendMessage(jid, { text, linkPreview: false });
         break;
       }
       case 'audio': {
@@ -337,6 +343,7 @@ export async function enviarMensaje(lead, mensaje) {
   }
 }
 
+/* =========== Enviar sitio, activar secuencia y cancelar otras ========== */
 export async function enviarSitioWebPorWhatsApp(negocio) {
   const slug = negocio?.slug || negocio?.schema?.slug;
   const phoneRaw = negocio?.leadPhone;
@@ -350,6 +357,7 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
   }
 
   const e164 = toE164(phoneRaw);
+  const jid = e164ToJid(e164); // normalizado 521…@s.whatsapp.net
   const sitioUrl = `https://negociosweb.mx/site/${slug}`;
 
   try {
@@ -359,11 +367,31 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
       { type: 'texto', contenido: `¡Tu sitio ya está listo! Puedes verlo aquí: ${sitioUrl}` }
     );
     console.log(`[OK] WhatsApp enviado a ${e164}: ${sitioUrl}`);
+
+    // === activar secuencia WebEnviada y cancelar las anteriores ===
+    try {
+      const leadId = jid; // nuestro ID de lead en WhatsApp es el JID
+      if (typeof Q.cancelSequences === 'function') {
+        await Q.cancelSequences(leadId, ['NuevoLeadWeb', 'LeadWeb']).catch(() => {});
+      }
+      if (typeof Q.scheduleSequenceForLead === 'function') {
+        await Q.scheduleSequenceForLead(leadId, 'WebEnviada', new Date()).catch(() => {});
+      }
+      // etiqueta y bandera en el lead (si existe)
+      const leadRef = db.collection('leads').doc(leadId);
+      await leadRef.set(
+        { etiquetas: FieldValue.arrayUnion('WebEnviada') },
+        { merge: true }
+      ).catch(() => {});
+    } catch (seqErr) {
+      console.warn('[enviarSitioWebPorWhatsApp] No se pudo activar/cancelar secuencias:', seqErr?.message);
+    }
   } catch (err) {
     console.error(`[ERROR] enviando WhatsApp a ${e164}:`, err);
   }
 }
 
+/* ============== Buscar “Procesado” y enviar + marcar enviado =========== */
 export async function enviarSitiosPendientes() {
   return withTaskLock('enviarSitiosPendientes', 30, async () => {
     console.log('⏳ Buscando negocios procesados para enviar sitio web...');
@@ -381,22 +409,17 @@ export async function enviarSitiosPendientes() {
 
       await enviarSitioWebPorWhatsApp(data);
 
-      // Marca como enviado
       await doc.ref.update({
         status: 'Web enviada',
         siteSentAt: FieldValue.serverTimestamp(),
       });
-
-      // (Opcional) Aquí podrías encolar una secuencia tipo "WebEnviada"
-      // usando tu motor de secuencias, en lugar de escribir arrays a mano.
-      // Ejemplo (si tienes scheduleSequenceForLead):
-      // await scheduleSequenceForLead(leadId, 'WebEnviada');
     }
 
     return snap.size;
   });
 }
 
+/* ====================== Archivar >24h sin plan ========================= */
 export async function archivarNegociosAntiguos() {
   const ahora = Date.now();
   const limite = ahora - 24 * 60 * 60 * 1000;
@@ -427,7 +450,7 @@ export async function archivarNegociosAntiguos() {
   return n;
 }
 
-// ========================= Proceso de secuencias =========================
+/* ======================= Proceso de secuencias ========================= */
 export async function processSequences() {
   const fn =
     typeof Q.processDueSequenceJobs === 'function'
@@ -441,4 +464,3 @@ export async function processSequences() {
   // tu processQueue acepta { batchSize, shard }
   return await fn({ batchSize: 200 });
 }
-
