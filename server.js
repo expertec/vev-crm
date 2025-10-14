@@ -10,6 +10,7 @@ import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import dayjs from 'dayjs';
+import slugify from 'slugify';
 
 dotenv.config();
 
@@ -489,6 +490,77 @@ app.post('/api/web/after-form', async (req, res) => {
   }
 });
 
+// ============== sample-create (nuevo, para el formulario turbo) ==============
+// Acepta { leadPhone, summary: { companyName, businessStory, slug } }
+app.post('/api/web/sample-create', async (req, res) => {
+  try {
+    const { leadPhone, summary } = req.body || {};
+    if (!leadPhone) return res.status(400).json({ error: 'Falta leadPhone' });
+    if (!summary?.companyName || !summary?.businessStory || !summary?.slug) {
+      return res.status(400).json({ error: 'Faltan companyName, businessStory o slug' });
+    }
+
+    // Normaliza e164 y leadId
+    const e164 = toE164(leadPhone || '');
+    const finalLeadId = e164ToLeadId(e164);
+
+    // Asegura slug único en servidor (independiente del flujo viejo)
+    const finalSlug = await ensureUniqueSlug(summary.slug || summary.companyName);
+
+    // Crea/asegura el lead (aislado del after-form)
+    const leadRef = db.collection('leads').doc(finalLeadId);
+    const leadSnap = await leadRef.get();
+    if (!leadSnap.exists) {
+      await leadRef.set({
+        telefono: e164.replace(/\D/g, ''),
+        nombre: '',
+        source: 'WebTurbo',
+        fecha_creacion: new Date(),
+        estado: 'nuevo',
+        etiquetas: ['FormularioTurbo'],
+        unreadCount: 0,
+        lastMessageAt: new Date(),
+      }, { merge: true });
+    }
+
+    // Crea el Negocio con el MISMO shape que tu scheduler procesa
+    const ref = await db.collection('Negocios').add({
+      leadId: finalLeadId,
+      leadPhone: e164.replace('+', ''),
+      status: 'Sin procesar',
+      companyInfo:     summary.companyName,
+      businessSector:  '',
+      businessStory:   summary.businessStory,   // clave para el generador
+      palette:         [],
+      keyItems:        [],
+      contactWhatsapp: '',
+      contactEmail:    '',
+      socialFacebook:  '',
+      socialInstagram: '',
+      logoURL:         '',
+      slug:            finalSlug,
+      createdAt:       new Date()
+    });
+
+    // (Opcional) guardar brief
+    await leadRef.set({
+      briefWeb: {
+        companyName: summary.companyName,
+        businessStory: summary.businessStory,
+        slug: finalSlug,
+        turbo: true
+      },
+      etiquetas: admin.firestore.FieldValue.arrayUnion('FormularioTurbo'),
+      lastMessageAt: new Date(),
+    }, { merge: true });
+
+    return res.json({ ok: true, negocioId: ref.id, slug: finalSlug });
+  } catch (e) {
+    console.error('/api/web/sample-create error:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
 // ============== Arranque servidor + WA ==============
 app.listen(port, () => {
   console.log(`Servidor corriendo en el puerto ${port}`);
@@ -519,3 +591,17 @@ cron.schedule('0 * * * *', () => {
   console.log('⏱️ archivarNegociosAntiguos:', new Date().toISOString());
   archivarNegociosAntiguos().catch(err => console.error('Error en archivarNegociosAntiguos:', err));
 });
+
+/* ---------------- Helpers NUEVOS (al final para orden) ---------------- */
+async function ensureUniqueSlug(input) {
+  const base = slugify(String(input || ''), { lower: true, strict: true }).slice(0, 30) || 'sitio';
+  let slug = base;
+  let i = 2;
+  while (true) {
+    const snap = await db.collection('Negocios').where('slug', '==', slug).limit(1).get();
+    if (snap.empty) return slug;
+    slug = `${base}-${String(i).padStart(2, '0')}`;
+    i++;
+    if (i > 99) throw new Error('No fue posible generar un slug único');
+  }
+}

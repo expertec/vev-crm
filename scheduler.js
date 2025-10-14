@@ -243,10 +243,40 @@ Estructura EXACTA a devolver (JSON):
           console.warn('[WARN] JSON reparado para', doc.id);
         }
 
+        // 1.1 Normalizaciones mínimas: slug y estructura base
+        schema = schema && typeof schema === 'object' ? schema : {};
+        schema.slug = schema.slug || data.slug || String(doc.id).slice(0, 8);
+
+        // 1.2 Forzar CTA de WhatsApp si hay leadPhone
+        const phoneDigits = String(data.leadPhone || '').replace(/\D/g, '');
+        const waUrl = phoneDigits ? `https://wa.me/${phoneDigits}` : '';
+
+        if (!schema.hero) schema.hero = {};
+        if (waUrl) {
+          schema.hero.ctaUrl = waUrl;
+          if (!schema.hero.ctaText) schema.hero.ctaText = 'Escríbenos por WhatsApp';
+        }
+
+        // 1.3 Contacto → whatsapp URL (no solo número)
+        if (!schema.contact) schema.contact = {};
+        if (waUrl) {
+          schema.contact.whatsapp = waUrl;
+        }
+
+        // 1.4 Completar buttonUrl de productos con WhatsApp si falta
+        if (schema.products && Array.isArray(schema.products.items)) {
+          schema.products.items = schema.products.items.map(it => {
+            if (waUrl && !it?.buttonUrl) {
+              return { ...it, buttonUrl: waUrl, buttonText: it?.buttonText || 'Pedir por WhatsApp' };
+            }
+            return it;
+          });
+        }
+
         // 2) traducir giro a inglés para query Pexels
         const sectorText = Array.isArray(data.businessSector)
           ? data.businessSector.join(', ')
-          : (data.businessSector || '');
+          : (data.businessSector || data.companyInfo || '');
 
         const englishQuery = await chatCompletionCompat({
           model: 'gpt-4o-mini',
@@ -262,12 +292,12 @@ Estructura EXACTA a devolver (JSON):
         try {
           const px = await axios.get('https://api.pexels.com/v1/search', {
             headers: { Authorization: PEXELS_API_KEY },
-            params: { query: englishQuery, per_page: 1 },
+            params: { query: englishQuery || 'business website', per_page: 1 },
           });
           const photo = px.data?.photos?.[0]?.src?.large;
           if (photo) {
             schema.hero = schema.hero || {};
-            schema.hero.backgroundImageUrl = photo;
+            schema.hero.backgroundImageUrl = schema.hero.backgroundImageUrl || photo;
           }
         } catch (e) {
           console.warn('[PEXELS] fallo búsqueda:', e?.message);
