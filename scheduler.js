@@ -123,6 +123,66 @@ function replacePlaceholders(template, leadData) {
   });
 }
 
+/* ======================= Helpers de color / paletas ==================== */
+const SECTOR_PALETTES = [
+  {
+    keys: ['auto', 'automotriz', 'taller', 'mecánico', 'mecanico', 'refacciones', 'servicio automotriz'],
+    colors: { primary: '#0F172A', secondary: '#334155', accent: '#EF4444', text: '#FFFFFF' }
+  },
+  {
+    keys: ['restaurante', 'comida', 'cafetería', 'bar', 'panadería', 'cocina', 'food'],
+    colors: { primary: '#1F2937', secondary: '#6B7280', accent: '#F59E0B', text: '#FFFFFF' }
+  },
+  {
+    keys: ['salud', 'bienestar', 'spa', 'estética', 'belleza', 'wellness'],
+    colors: { primary: '#064E3B', secondary: '#0F766E', accent: '#10B981', text: '#FFFFFF' }
+  },
+  {
+    keys: ['tecnología', 'software', 'ti', 'hosting', 'saas', 'app', 'código', 'code'],
+    colors: { primary: '#0B1020', secondary: '#1F2937', accent: '#60A5FA', text: '#FFFFFF' }
+  },
+  {
+    keys: ['educación', 'capacitaci', 'curso', 'academ', 'colegio'],
+    colors: { primary: '#1D3557', secondary: '#457B9D', accent: '#E63946', text: '#FFFFFF' }
+  },
+  {
+    keys: ['construcción', 'obra', 'remodelación', 'albañil', 'arquitect', 'ingenier'],
+    colors: { primary: '#111827', secondary: '#374151', accent: '#F59E0B', text: '#FFFFFF' }
+  },
+  {
+    keys: ['finanzas', 'banca', 'conta', 'impuestos', 'crédito', 'seguro'],
+    colors: { primary: '#0B3D2E', secondary: '#14532D', accent: '#22C55E', text: '#FFFFFF' }
+  }
+];
+
+function looksTooPink(hex = '') {
+  const h = String(hex || '').replace('#', '');
+  if (h.length !== 6) return false;
+  const r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+  return (r > 180 && b > 120 && g < 140) || (r > 200 && g < 120);
+}
+
+function pickPaletteForBusiness({ sector = '', story = '', name = '' }) {
+  const hay = (txt) => String(txt || '').toLowerCase();
+  const blob = `${hay(sector)} ${hay(story)} ${hay(name)}`;
+  for (const p of SECTOR_PALETTES) {
+    if (p.keys.some(k => blob.includes(k))) return p.colors;
+  }
+  return { primary: '#111827', secondary: '#374151', accent: '#F97316', text: '#FFFFFF' }; // neutral
+}
+
+function normalizeColors(schemaColors, forced) {
+  const c = schemaColors || {};
+  const badPrimary = !c.primary || looksTooPink(c.primary);
+  const badAccent  = !c.accent  || looksTooPink(c.accent);
+  return {
+    primary: badPrimary ? forced.primary : c.primary,
+    secondary: !c.secondary ? forced.secondary : c.secondary,
+    accent: badAccent ? forced.accent : c.accent,
+    text: !c.text ? forced.text : c.text,
+  };
+}
+
 /* ======================= Helpers de imágenes/avatares =================== */
 async function fetchPexelsImage(query, { perPage = 1 } = {}) {
   if (!PEXELS_API_KEY) return null;
@@ -155,6 +215,31 @@ function avatarFor(seed, size = 300) {
   return `https://i.pravatar.cc/${size}?u=${encodeURIComponent(seed)}`;
 }
 
+// Detecta URLs vacías o de ejemplo
+function isPlaceholderUrl(u = '') {
+  const s = String(u || '').trim().toLowerCase();
+  if (!s) return true;
+  if (s === '#' || s.startsWith('javascript:')) return true;
+  try {
+    const url = new URL(s);
+    if (['example.com', 'placehold.co', 'placeholder.com'].includes(url.hostname)) return true;
+  } catch {
+    return true; // no es URL válida
+  }
+  return false;
+}
+
+function ensureWhatsAppButton(it = {}, waUrl = '') {
+  const out = { ...it };
+  if (waUrl) {
+    if (isPlaceholderUrl(out.buttonUrl) || !/^https?:\/\//i.test(out.buttonUrl || '')) {
+      out.buttonUrl = waUrl;
+      out.buttonText = out.buttonText || 'Pedir por WhatsApp';
+    }
+  }
+  return out;
+}
+
 /* ============= Locks simples para evitar dobles ejecuciones ============ */
 async function withTaskLock(taskKey, ttlSeconds, fn) {
   const ref = db.collection('_locks').doc(taskKey);
@@ -174,7 +259,6 @@ async function withTaskLock(taskKey, ttlSeconds, fn) {
 
 /* ====================== Generación del site schema ===================== */
 export async function generateSiteSchemas() {
-  // No arrojamos error si falta PEXELS_API_KEY; tendremos fallbacks
   if (!PEXELS_API_KEY) {
     console.warn('⚠️ PEXELS_API_KEY no configurada: se usarán imágenes de Unsplash Source como fallback.');
   }
@@ -278,17 +362,25 @@ Estructura EXACTA a devolver (JSON):
           console.warn('[WARN] JSON reparado para', doc.id);
         }
 
-        // 1.1 Normalizaciones mínimas: slug y estructura base
+        // 1.1 Normalizaciones mínimas
         schema = schema && typeof schema === 'object' ? schema : {};
         schema.slug = schema.slug || data.slug || String(doc.id).slice(0, 8);
 
-        // 1.1.1 Logo por defecto si falta
-        if (!schema.logoUrl) {
+        // 1.1.1 Paleta por giro/descripcion (evita rosas fuera de contexto)
+        const forcedPalette = pickPaletteForBusiness({
+          sector: data.businessSector,
+          story: data.businessStory,
+          name: data.companyInfo
+        });
+        schema.colors = normalizeColors(schema.colors, forcedPalette);
+
+        // 1.1.2 Logo por defecto o si es placeholder
+        if (!schema.logoUrl || isPlaceholderUrl(schema.logoUrl)) {
           const seed = data.companyInfo || schema.slug || 'brand';
           schema.logoUrl = `https://api.dicebear.com/8.x/initials/svg?seed=${encodeURIComponent(seed)}&radius=8`;
         }
 
-        // 1.2 Forzar CTA de WhatsApp si hay leadPhone
+        // 1.2 CTA / Contacto con WhatsApp
         const phoneDigits = String(data.leadPhone || '').replace(/\D/g, '');
         const waUrl = phoneDigits ? `https://wa.me/${phoneDigits}` : '';
 
@@ -296,50 +388,42 @@ Estructura EXACTA a devolver (JSON):
         if (waUrl) {
           schema.hero.ctaUrl = waUrl;
           if (!schema.hero.ctaText) schema.hero.ctaText = 'Escríbenos por WhatsApp';
+          schema.hero.ctaColor = schema.colors?.accent || '#F97316';
         }
 
-        // 1.3 Contacto → whatsapp URL (no solo número)
         if (!schema.contact) schema.contact = {};
-        if (waUrl) {
-          schema.contact.whatsapp = waUrl;
-        }
+        if (waUrl) schema.contact.whatsapp = waUrl;
 
-        // 1.4 Completar buttonUrl de productos con WhatsApp si falta
         if (schema.products && Array.isArray(schema.products.items)) {
-          schema.products.items = schema.products.items.map(it => {
-            if (waUrl && !it?.buttonUrl) {
-              return { ...it, buttonUrl: waUrl, buttonText: it?.buttonText || 'Pedir por WhatsApp' };
-            }
-            return it;
-          });
+          schema.products.items = schema.products.items.map(it => ensureWhatsAppButton(it, waUrl));
         }
 
-        // 2) traducir giro a inglés para query stock
-        const sectorText = Array.isArray(data.businessSector)
+        // 2) Query para imágenes (usa businessStory si no hay sector)
+        const sectorOrStory = Array.isArray(data.businessSector)
           ? data.businessSector.join(', ')
-          : (data.businessSector || data.companyInfo || '');
+          : (data.businessSector || data.businessStory || data.companyInfo || '');
 
         const englishQuery = await chatCompletionCompat({
           model: 'gpt-4o-mini',
           messages: [
-            { role: 'system', content: 'Convierte el giro a una frase corta de búsqueda en inglés para fotos de stock.' },
-            { role: 'user', content: `Giro: "${sectorText}". Dame una frase corta (sin comillas).` },
+            { role: 'system', content: 'Convierte el giro o descripción a una frase corta de búsqueda en inglés para fotos de stock.' },
+            { role: 'user', content: `Texto: "${sectorOrStory}". Frase breve (2-4 palabras), sin comillas.` },
           ],
           temperature: 0.2,
           max_tokens: 40,
         }).then(s => (s || 'business'));
 
-        // 3) Imágenes: hero + productos + avatares (con fallbacks)
+        // 3) Imágenes + reemplazo de placeholders
         try {
           const searchQuery =
             (englishQuery && englishQuery.trim()) ||
-            data.businessSector ||
+            sectorOrStory ||
             data.companyInfo ||
             'business';
 
           // --- HERO ---
           if (!schema.hero) schema.hero = {};
-          if (!schema.hero.backgroundImageUrl) {
+          if (!schema.hero.backgroundImageUrl || isPlaceholderUrl(schema.hero.backgroundImageUrl)) {
             schema.hero.backgroundImageUrl = await getStockImage(`${searchQuery} website banner`, {
               width: 1600, height: 900
             });
@@ -350,24 +434,24 @@ Estructura EXACTA a devolver (JSON):
             const limit = Math.min(4, schema.products.items.length);
             for (let i = 0; i < limit; i++) {
               const it = schema.products.items[i] || {};
-              if (!it.imageUrl) {
+              if (!it.imageUrl || isPlaceholderUrl(it.imageUrl)) {
                 const q = `${searchQuery} ${it.title || 'product'}`;
                 it.imageUrl = await getStockImage(q, { width: 1200, height: 800 });
-                schema.products.items[i] = it;
               }
+              schema.products.items[i] = ensureWhatsAppButton(it, waUrl);
             }
           }
 
           // --- TESTIMONIALS / TEAM ---
           if (schema.testimonials?.items && Array.isArray(schema.testimonials.items)) {
             schema.testimonials.items = schema.testimonials.items.map((t, idx) => {
-              if (!t.avatarUrl) t.avatarUrl = avatarFor(`${schema.slug}-test-${idx}`);
+              if (!t.avatarUrl || isPlaceholderUrl(t.avatarUrl)) t.avatarUrl = avatarFor(`${schema.slug}-test-${idx}`);
               return t;
             });
           }
           if (schema.team && Array.isArray(schema.team)) {
             schema.team = schema.team.map((m, idx) => {
-              if (!m.imageUrl) m.imageUrl = avatarFor(`${schema.slug}-team-${idx}`);
+              if (!m.imageUrl || isPlaceholderUrl(m.imageUrl)) m.imageUrl = avatarFor(`${schema.slug}-team-${idx}`);
               return m;
             });
           }
