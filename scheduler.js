@@ -123,6 +123,38 @@ function replacePlaceholders(template, leadData) {
   });
 }
 
+/* ======================= Helpers de imágenes/avatares =================== */
+async function fetchPexelsImage(query, { perPage = 1 } = {}) {
+  if (!PEXELS_API_KEY) return null;
+  try {
+    const resp = await axios.get('https://api.pexels.com/v1/search', {
+      headers: { Authorization: PEXELS_API_KEY },
+      params: { query, per_page: perPage },
+    });
+    const p = resp?.data?.photos?.[0];
+    return p?.src?.large || p?.src?.medium || null;
+  } catch {
+    return null;
+  }
+}
+
+// Sin API key: fuente pública (no-auth) de Unsplash
+function unsplashFallback(query, w = 1600, h = 900) {
+  const q = encodeURIComponent(query || 'business');
+  return `https://source.unsplash.com/${w}x${h}/?${q}`;
+}
+
+async function getStockImage(query, { width = 1600, height = 900, perPage = 1 } = {}) {
+  const fromPexels = await fetchPexelsImage(query, { perPage });
+  if (fromPexels) return fromPexels;
+  return unsplashFallback(query, width, height);
+}
+
+// Avatares determinísticos (pravatar)
+function avatarFor(seed, size = 300) {
+  return `https://i.pravatar.cc/${size}?u=${encodeURIComponent(seed)}`;
+}
+
 /* ============= Locks simples para evitar dobles ejecuciones ============ */
 async function withTaskLock(taskKey, ttlSeconds, fn) {
   const ref = db.collection('_locks').doc(taskKey);
@@ -142,7 +174,10 @@ async function withTaskLock(taskKey, ttlSeconds, fn) {
 
 /* ====================== Generación del site schema ===================== */
 export async function generateSiteSchemas() {
-  if (!PEXELS_API_KEY) throw new Error('Falta PEXELS_API_KEY en entorno');
+  // No arrojamos error si falta PEXELS_API_KEY; tendremos fallbacks
+  if (!PEXELS_API_KEY) {
+    console.warn('⚠️ PEXELS_API_KEY no configurada: se usarán imágenes de Unsplash Source como fallback.');
+  }
 
   return withTaskLock('generateSiteSchemas', 45, async () => {
     console.log('▶️ generateSiteSchemas: inicio');
@@ -247,6 +282,12 @@ Estructura EXACTA a devolver (JSON):
         schema = schema && typeof schema === 'object' ? schema : {};
         schema.slug = schema.slug || data.slug || String(doc.id).slice(0, 8);
 
+        // 1.1.1 Logo por defecto si falta
+        if (!schema.logoUrl) {
+          const seed = data.companyInfo || schema.slug || 'brand';
+          schema.logoUrl = `https://api.dicebear.com/8.x/initials/svg?seed=${encodeURIComponent(seed)}&radius=8`;
+        }
+
         // 1.2 Forzar CTA de WhatsApp si hay leadPhone
         const phoneDigits = String(data.leadPhone || '').replace(/\D/g, '');
         const waUrl = phoneDigits ? `https://wa.me/${phoneDigits}` : '';
@@ -273,7 +314,7 @@ Estructura EXACTA a devolver (JSON):
           });
         }
 
-        // 2) traducir giro a inglés para query Pexels
+        // 2) traducir giro a inglés para query stock
         const sectorText = Array.isArray(data.businessSector)
           ? data.businessSector.join(', ')
           : (data.businessSector || data.companyInfo || '');
@@ -286,21 +327,52 @@ Estructura EXACTA a devolver (JSON):
           ],
           temperature: 0.2,
           max_tokens: 40,
-        });
+        }).then(s => (s || 'business'));
 
-        // 3) Pexels search
+        // 3) Imágenes: hero + productos + avatares (con fallbacks)
         try {
-          const px = await axios.get('https://api.pexels.com/v1/search', {
-            headers: { Authorization: PEXELS_API_KEY },
-            params: { query: englishQuery || 'business website', per_page: 1 },
-          });
-          const photo = px.data?.photos?.[0]?.src?.large;
-          if (photo) {
-            schema.hero = schema.hero || {};
-            schema.hero.backgroundImageUrl = schema.hero.backgroundImageUrl || photo;
+          const searchQuery =
+            (englishQuery && englishQuery.trim()) ||
+            data.businessSector ||
+            data.companyInfo ||
+            'business';
+
+          // --- HERO ---
+          if (!schema.hero) schema.hero = {};
+          if (!schema.hero.backgroundImageUrl) {
+            schema.hero.backgroundImageUrl = await getStockImage(`${searchQuery} website banner`, {
+              width: 1600, height: 900
+            });
+          }
+
+          // --- PRODUCTS ---
+          if (schema.products && Array.isArray(schema.products.items) && schema.products.items.length) {
+            const limit = Math.min(4, schema.products.items.length);
+            for (let i = 0; i < limit; i++) {
+              const it = schema.products.items[i] || {};
+              if (!it.imageUrl) {
+                const q = `${searchQuery} ${it.title || 'product'}`;
+                it.imageUrl = await getStockImage(q, { width: 1200, height: 800 });
+                schema.products.items[i] = it;
+              }
+            }
+          }
+
+          // --- TESTIMONIALS / TEAM ---
+          if (schema.testimonials?.items && Array.isArray(schema.testimonials.items)) {
+            schema.testimonials.items = schema.testimonials.items.map((t, idx) => {
+              if (!t.avatarUrl) t.avatarUrl = avatarFor(`${schema.slug}-test-${idx}`);
+              return t;
+            });
+          }
+          if (schema.team && Array.isArray(schema.team)) {
+            schema.team = schema.team.map((m, idx) => {
+              if (!m.imageUrl) m.imageUrl = avatarFor(`${schema.slug}-team-${idx}`);
+              return m;
+            });
           }
         } catch (e) {
-          console.warn('[PEXELS] fallo búsqueda:', e?.message);
+          console.warn('[IMAGES] error general:', e?.message);
         }
 
         // 4) guardar
