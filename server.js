@@ -36,7 +36,7 @@ import {
   enviarSitiosPendientes,
 } from './scheduler.js';
 
-// (opcional) si tu queue exporta estas funciones, las usamos para cancelar/encolar
+// (opcional) queue helpers
 let cancelSequences = null;
 let scheduleSequenceForLead = null;
 try {
@@ -397,8 +397,7 @@ app.post('/api/web/after-form', async (req, res) => {
       lastMessageAt: new Date(),
     }, { merge: true });
 
-    // 4) Crear/actualizar Negocios
-    //    🔒 Evita duplicados por WhatsApp: si YA existe cualquiera, responde 409
+    // 4) Crear/actualizar Negocios — BLOQUEA duplicado por WhatsApp
     let negocioDocId = negocioId;
     if (!negocioDocId) {
       const existSnap = await db.collection('Negocios')
