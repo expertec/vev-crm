@@ -4,7 +4,7 @@ import cors from 'cors';
 import bodyParser from 'body-parser';
 import dotenv from 'dotenv';
 import cron from 'node-cron';
-import multer from 'multer'; // ← solo aquí
+import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
@@ -229,7 +229,7 @@ ${contexto}
 }
 
 // ================ Config de secuencia del formulario ================
-const FORM_SEQUENCE_ID = 'FormularioWeb'; // adapta al nombre real de tu secuencia
+const FORM_SEQUENCE_ID = 'FormularioWeb';
 
 // ================ App base ================
 const app = express();
@@ -371,13 +371,14 @@ app.post('/api/web/after-form', async (req, res) => {
     // 1) Resolver e164 y leadId
     const e164 = toE164(leadPhone || (leadId || '').split('@')[0]);
     const finalLeadId = leadId || e164ToLeadId(e164);
+    const leadPhoneDigits = e164.replace('+', '');
 
     // 2) Verificar/crear lead
     const leadRef  = db.collection('leads').doc(finalLeadId);
     const leadSnap = await leadRef.get();
     if (!leadSnap.exists) {
       await leadRef.set({
-        telefono: e164.replace(/\D/g, ''),
+        telefono: leadPhoneDigits,
         nombre: '',
         source: 'Web',
         fecha_creacion: new Date(),
@@ -396,35 +397,42 @@ app.post('/api/web/after-form', async (req, res) => {
       lastMessageAt: new Date(),
     }, { merge: true });
 
-    // 4) Crear/actualizar Negocios (si no vino negocioId)
+    // 4) Crear/actualizar Negocios
+    //    🔒 Evita duplicados por WhatsApp: si YA existe cualquiera, responde 409
     let negocioDocId = negocioId;
     if (!negocioDocId) {
-      const q = await db.collection('Negocios')
-        .where('leadPhone', '==', e164.replace('+', ''))
-        .where('status', '==', 'Sin procesar')
-        .limit(1).get();
+      const existSnap = await db.collection('Negocios')
+        .where('leadPhone', '==', leadPhoneDigits)
+        .limit(1)
+        .get();
 
-      if (!q.empty) {
-        negocioDocId = q.docs[0].id;
-      } else {
-        const ref = await db.collection('Negocios').add({
-          leadId: finalLeadId,
-          leadPhone: e164.replace('+', ''),
-          status: 'Sin procesar',
-          companyInfo:     summary.companyName || '',
-          businessSector:  summary.businessType || '',
-          palette:         summary.palette || (summary.primaryColor ? [summary.primaryColor] : []),
-          keyItems:        summary.keyItems || [],
-          contactWhatsapp: summary.contactWhatsapp || '',
-          contactEmail:    summary.email || '',
-          socialFacebook:  summary.socialFacebook || '',
-          socialInstagram: summary.socialInstagram || '',
-          logoURL:         summary.logoURL || '',
-          slug:            summary.slug || '',
-          createdAt:       new Date()
+      if (!existSnap.empty) {
+        const exist = existSnap.docs[0];
+        const existData = exist.data() || {};
+        return res.status(409).json({
+          error: 'Ya existe un negocio con ese WhatsApp.',
+          negocioId: exist.id,
+          slug: existData.slug || existData?.schema?.slug || ''
         });
-        negocioDocId = ref.id;
       }
+
+      const ref = await db.collection('Negocios').add({
+        leadId: finalLeadId,
+        leadPhone: leadPhoneDigits,
+        status: 'Sin procesar',
+        companyInfo:     summary.companyName || '',
+        businessSector:  summary.businessType || '',
+        palette:         summary.palette || (summary.primaryColor ? [summary.primaryColor] : []),
+        keyItems:        summary.keyItems || [],
+        contactWhatsapp: summary.contactWhatsapp || '',
+        contactEmail:    summary.email || '',
+        socialFacebook:  summary.socialFacebook || '',
+        socialInstagram: summary.socialInstagram || '',
+        logoURL:         summary.logoURL || '',
+        slug:            summary.slug || '',
+        createdAt:       new Date()
+      });
+      negocioDocId = ref.id;
     }
 
     // 5) Transición de secuencias
@@ -440,7 +448,7 @@ app.post('/api/web/after-form', async (req, res) => {
       console.warn('[after-form] transición de secuencias falló:', e?.message);
     }
 
-    // 6) MENSAJES DE VALOR (1/2 y 2/2) → GPT + envío escalonado con de-dupe
+    // 6) MENSAJES DE VALOR (1/2 y 2/2)
     if (leadData.empathyScheduledAt || leadData.empathySentAt) {
       console.log('[after-form] empatía ya programada/enviada; se omite duplicado');
     } else {
@@ -461,8 +469,8 @@ app.post('/api/web/after-form', async (req, res) => {
         msg2 = `Mientras esperas, 3 ideas:\n– Optimiza Google Perfil con fotos y horarios.\n– Publica top 3 productos/servicios fijados en redes.\n– Agrega botón de WhatsApp y un CTA claro en la web.`;
       }
 
-      const delay1 = 10_000 + Math.floor(Math.random() * 5_000);   // 10–15s
-      const delay2 = 70_000 + Math.floor(Math.random() * 20_000);  // 70–90s
+      const delay1 = 10_000 + Math.floor(Math.random() * 5_000);
+      const delay2 = 70_000 + Math.floor(Math.random() * 20_000);
 
       console.log('[after-form] empatía programada:', { e164, delay1, delay2 });
 
@@ -503,16 +511,33 @@ app.post('/api/web/sample-create', async (req, res) => {
     // Normaliza e164 y leadId
     const e164 = toE164(leadPhone || '');
     const finalLeadId = e164ToLeadId(e164);
+    const leadPhoneDigits = e164.replace('+', '');
 
-    // Asegura slug único en servidor (independiente del flujo viejo)
+    // 🔒 Duplicado por WhatsApp
+    const existSnap = await db.collection('Negocios')
+      .where('leadPhone', '==', leadPhoneDigits)
+      .limit(1)
+      .get();
+
+    if (!existSnap.empty) {
+      const exist = existSnap.docs[0];
+      const existData = exist.data() || {};
+      return res.status(409).json({
+        error: 'Ya existe un negocio con ese WhatsApp.',
+        negocioId: exist.id,
+        slug: existData.slug || existData?.schema?.slug || ''
+      });
+    }
+
+    // Asegura slug único en servidor
     const finalSlug = await ensureUniqueSlug(summary.slug || summary.companyName);
 
-    // Crea/asegura el lead (aislado del after-form)
+    // Crea/asegura el lead
     const leadRef = db.collection('leads').doc(finalLeadId);
     const leadSnap = await leadRef.get();
     if (!leadSnap.exists) {
       await leadRef.set({
-        telefono: e164.replace(/\D/g, ''),
+        telefono: leadPhoneDigits,
         nombre: '',
         source: 'WebTurbo',
         fecha_creacion: new Date(),
@@ -523,14 +548,14 @@ app.post('/api/web/sample-create', async (req, res) => {
       }, { merge: true });
     }
 
-    // Crea el Negocio con el MISMO shape que tu scheduler procesa
+    // Crea el Negocio
     const ref = await db.collection('Negocios').add({
       leadId: finalLeadId,
-      leadPhone: e164.replace('+', ''),
+      leadPhone: leadPhoneDigits,
       status: 'Sin procesar',
       companyInfo:     summary.companyName,
       businessSector:  '',
-      businessStory:   summary.businessStory,   // clave para el generador
+      businessStory:   summary.businessStory,
       palette:         [],
       keyItems:        [],
       contactWhatsapp: '',
@@ -568,25 +593,21 @@ app.listen(port, () => {
 });
 
 // ============== CRON JOBS ==============
-// Secuencias (cada 30s)
 cron.schedule('*/30 * * * * *', () => {
   console.log('⏱️ processSequences:', new Date().toISOString());
   processSequences().catch(err => console.error('Error en processSequences:', err));
 });
 
-// Generar schemas (cada 1 min)
 cron.schedule('* * * * *', () => {
   console.log('⏱️ generateSiteSchemas:', new Date().toISOString());
   generateSiteSchemas().catch(err => console.error('Error en generateSiteSchemas:', err));
 });
 
-// Enviar sitios procesados (cada 5 min)
 cron.schedule('*/5 * * * *', () => {
   console.log('⏱️ enviarSitiosPendientes:', new Date().toISOString());
   enviarSitiosPendientes().catch(err => console.error('Error en enviarSitiosPendientes:', err));
 });
 
-// Archivar >24h sin plan (cada hora)
 cron.schedule('0 * * * *', () => {
   console.log('⏱️ archivarNegociosAntiguos:', new Date().toISOString());
   archivarNegociosAntiguos().catch(err => console.error('Error en archivarNegociosAntiguos:', err));
