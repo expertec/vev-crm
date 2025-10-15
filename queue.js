@@ -187,7 +187,7 @@ export async function cancelSequences(leadId, triggers = []) {
   return n;
 }
 
-// 🔹 NUEVO: cancelar TODO lo pendiente de un lead
+// 🔹 Cancelar TODO lo pendiente de un lead
 export async function cancelAllSequences(leadId) {
   if (!leadId) return 0;
 
@@ -208,6 +208,18 @@ export async function cancelAllSequences(leadId) {
   }, { merge: true });
 
   return n;
+}
+
+// 🔹 Pausar / reanudar por lead (manual o por UI)
+export async function pauseSequences(leadId) {
+  if (!leadId) return false;
+  await db.collection('leads').doc(leadId).set({ seqPaused: true }, { merge: true });
+  return true;
+}
+export async function resumeSequences(leadId) {
+  if (!leadId) return false;
+  await db.collection('leads').doc(leadId).set({ seqPaused: false }, { merge: true });
+  return true;
 }
 
 /* -------------------------- entrega de mensajes ------------------------- */
@@ -301,7 +313,9 @@ async function deliverPayload(leadId, payload) {
 /**
  * Procesa jobs pendientes cuya dueAt <= ahora.
  * Orden total: dueAt ASC, idx ASC, createdAt ASC.
- * ENVÍO SECUENCIAL para preservar orden exacto.
+ * Respeta:
+ *  - Pausa por lead (seqPaused)
+ *  - Paro duro por etiqueta (Compro / DetenerSecuencia / StopSequences)
  */
 export async function processQueue({ batchSize = 100, shard = null } = {}) {
   const now = new Date();
@@ -317,8 +331,9 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
   const snap = await q.get();
   if (snap.empty) return 0;
 
-  // cache para evitar pedir el lead muchas veces
-  const pausedCache = new Map(); // leadId -> boolean
+  // caches para no golpear Firestore por job
+  const leadCache = new Map();   // leadId -> leadData
+  const stopCache = new Map();   // leadId -> 'paused' | 'stopped' | null
 
   // Orden determinista adicional por idx y createdAt
   const jobs = snap.docs
@@ -335,14 +350,40 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
 
   for (const job of jobs) {
     try {
-      // ⏸️ respetar pausa por lead (seqPaused)
-      let isPaused = pausedCache.get(job.leadId);
-      if (isPaused === undefined) {
-        const l = await _getLead(job.leadId);
-        isPaused = !!l?.seqPaused;
-        pausedCache.set(job.leadId, isPaused);
+      // obtener estado del lead (cacheado)
+      let lead = leadCache.get(job.leadId);
+      if (!lead) {
+        lead = await _getLead(job.leadId);
+        leadCache.set(job.leadId, lead);
       }
-      if (isPaused) {
+      if (!lead) {
+        // si el lead no existe, marca error y sigue
+        await job.ref.update({
+          status: 'error',
+          processedAt: FieldValue.serverTimestamp(),
+          error: 'Lead no existe'
+        });
+        continue;
+      }
+
+      // ¿pausado o parado?
+      let stopState = stopCache.get(job.leadId);
+      if (!stopState) {
+        const etiquetas = Array.isArray(lead.etiquetas) ? lead.etiquetas : [];
+        const hasHardStop =
+          etiquetas.includes('Compro') ||
+          etiquetas.includes('DetenerSecuencia') ||
+          etiquetas.includes('StopSequences') ||
+          lead.stopSequences === true;
+
+        if (hasHardStop) stopState = 'stopped';
+        else if (lead.seqPaused) stopState = 'paused';
+        else stopState = null;
+
+        stopCache.set(job.leadId, stopState);
+      }
+
+      if (stopState === 'paused') {
         await job.ref.update({
           status: 'paused',
           processedAt: FieldValue.serverTimestamp()
@@ -350,6 +391,23 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
         continue;
       }
 
+      if (stopState === 'stopped') {
+        // marca este job como cancelado y borra el resto pendientes del lead
+        await job.ref.update({
+          status: 'canceled',
+          processedAt: FieldValue.serverTimestamp(),
+          error: 'Lead con stop flag/etiqueta'
+        });
+        // cancelar todo lo demás una sola vez por lead
+        if (!lead._allCanceledOnce) {
+          await cancelAllSequences(job.leadId).catch(() => {});
+          lead._allCanceledOnce = true;
+          leadCache.set(job.leadId, lead);
+        }
+        continue;
+      }
+
+      // entrega normal
       await deliverPayload(job.leadId, job.payload);
 
       await job.ref.update({
@@ -373,3 +431,6 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
 
   return jobs.length;
 }
+
+// alias opcional usado por scheduler
+export const processDueSequenceJobs = processQueue;

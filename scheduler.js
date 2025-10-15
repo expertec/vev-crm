@@ -578,15 +578,45 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
 }
 
 /* ============== Buscar “Procesado” y enviar + marcar enviado =========== */
+/** 
+ * Ahora con **retraso realista**:
+ * - Si el negocio está "Procesado" y NO tiene siteReadyAt, se agenda a +15–25 min y se deja para otra corrida.
+ * - Si ya tiene siteReadyAt en el futuro: skip.
+ * - Si siteReadyAt <= ahora: se envía el link, se marca "Web enviada".
+ */
 export async function enviarSitiosPendientes() {
   return withTaskLock('enviarSitiosPendientes', 30, async () => {
     console.log('⏳ Buscando negocios procesados para enviar sitio web...');
     const snap = await db.collection('Negocios').where('status', '==', 'Procesado').get();
     console.log(`[DEBUG] Encontrados: ${snap.size} negocios para enviar`);
 
+    const nowMs = Date.now();
+
     for (const doc of snap.docs) {
       const data = doc.data();
-      console.log(`[DEBUG] Procesando negocio: ${doc.id}`, {
+      const hasReady = !!data.siteReadyAt;
+      const readyMs = data.siteReadyAt?.toMillis?.() ?? null;
+
+      // 1) Si NO tiene 'siteReadyAt', programarlo a +15–25 min y continuar
+      if (!hasReady) {
+        const jitter = Math.floor(Math.random() * (10 * 60 * 1000)); // 0–10 min
+        const target = nowMs + (15 * 60 * 1000) + jitter;           // 15–25 min
+        await doc.ref.update({
+          siteReadyAt: Timestamp.fromMillis(target),
+          siteScheduleSetAt: FieldValue.serverTimestamp(),
+        });
+        console.log(`[DEBUG] Programado siteReadyAt para ${doc.id} en ${new Date(target).toISOString()}`);
+        continue;
+      }
+
+      // 2) Si tiene 'siteReadyAt' pero aún no llega, omitir
+      if (readyMs && readyMs > nowMs) {
+        console.log(`[DEBUG] ${doc.id} aún no alcanza siteReadyAt (${new Date(readyMs).toISOString()})`);
+        continue;
+      }
+
+      // 3) Ya es hora: enviar
+      console.log(`[DEBUG] Enviando sitio para negocio: ${doc.id}`, {
         leadPhone: data.leadPhone,
         slug: data.slug,
         schemaSlug: data.schema?.slug,
@@ -595,6 +625,7 @@ export async function enviarSitiosPendientes() {
 
       await enviarSitioWebPorWhatsApp(data);
 
+      // 4) Marcar como enviado
       await doc.ref.update({
         status: 'Web enviada',
         siteSentAt: FieldValue.serverTimestamp(),

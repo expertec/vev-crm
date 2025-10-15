@@ -29,10 +29,10 @@ const bucket = admin.storage().bucket();
 /* ------------------------------ helpers ------------------------------ */
 // alias → trigger (en minúsculas)
 const STATIC_HASHTAG_MAP = {
-  '#promoweb990': 'LeadWeb',
-  '#webpro990':   'LeadWeb',
-  '#leadweb':     'LeadWeb',
-  '#nuevolead':   'NuevoLeadWeb',
+  '#promoweb990':  'LeadWeb',
+  '#miwebgratis':  'LeadWeb',   // ← reemplazo de #webpro990
+  '#leadweb':      'LeadWeb',
+  '#nuevolead':    'NuevoLeadWeb',
 };
 
 // Si el trigger es LeadWeb, cancela estas (evita duplicidad)
@@ -72,7 +72,7 @@ function normalizePhoneForWA(phone) {
 }
 
 // Reglas dinámicas opcionales en Firestore
-// Collection: hashtagTriggers, doc fields: { code: 'promoweb990', trigger: 'LeadWeb', cancel: ['NuevoLead'] }
+// Collection: hashtagTriggers, doc fields: { code: 'miwebgratis', trigger: 'LeadWeb', cancel: ['NuevoLead'] }
 async function resolveHashtagInDB(code) {
   const snap = await db
     .collection('hashtagTriggers')
@@ -113,7 +113,7 @@ async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb') 
 
 /** Determina si debemos BLOQUEAR programación de secuencias para este lead. */
 function shouldBlockSequences(leadData, nextTrigger) {
-  const etiquetas = leadData?.etiquetas || [];
+  const etiquetas = Array.isArray(leadData?.etiquetas) ? leadData.etiquetas : [];
   const etapa = leadData?.etapa || '';
   const estado = (leadData?.estado || '').toLowerCase();
 
@@ -146,7 +146,6 @@ export async function connectToWhatsApp() {
       logger: Pino({ level: 'info' }),
       printQRInTerminal: true,
       version,
-      // Puedes activar markOnlineOnConnect: false si quieres
     });
     whatsappSock = sock;
 
@@ -312,7 +311,6 @@ export async function connectToWhatsApp() {
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
 
             // Programa aunque sea "default" (es el primer contacto)
-            // Pero respeta bloqueos si el lead trae flags por algún estado previo (poco probable en CREADO)
             const canSchedule = !shouldBlockSequences({}, trigger);
             if (canSchedule) {
               await scheduleSequenceForLead(leadId, trigger, now());

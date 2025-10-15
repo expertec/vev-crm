@@ -158,36 +158,36 @@ function humanizeGiro(code = '') {
 function pickOpportunityTriplet(giroHumano = '') {
   const base = giroHumano.toLowerCase();
   const common = [
-    'CTA claro arriba del pliegue',
-    'Prueba social visible (reseñas/testimonios)',
-    'WhatsApp/botón sticky con texto pensado para convertir',
+    'Que el botón principal invite a escribir por WhatsApp',
+    'Contar historias de clientes reales con resultados',
+    'Pocos pasos para contactar, nada complicado',
   ];
   if (/(restaurante|cafeter|bar)/.test(base)) {
     return [
-      'Menú actualizado con fotos y precios',
-      'Reserva/ordenar en 1 clic por WhatsApp',
-      'Google Perfil optimizado con horarios y ubicación',
+      'Muestra menú sencillo con fotos y precios claros',
+      'Facilita reservar o pedir por WhatsApp en un paso',
+      'En Google, mantén horarios y ubicación bien visibles',
     ];
   }
   if (/(tienda|retail|ecommerce)/.test(base)) {
     return [
-      'Catálogo con categorías y filtros claros',
-      'Checkout o contacto rápido por WhatsApp',
-      'Sellos de confianza y políticas visibles',
+      'Ordena productos por categorías fáciles de entender',
+      'Permite comprar o preguntar por WhatsApp rápidamente',
+      'Aclara cambios, envíos y formas de pago desde el inicio',
     ];
   }
   if (/(servicio|consultor|profesional|legal|médic|clínic)/.test(base)) {
     return [
-      'Agenda/consultas en 1 clic por WhatsApp',
-      'Casos de éxito y testimonios en home',
-      'Sección de servicios con beneficios y precios guía',
+      'Agendar cita o consulta en un paso por WhatsApp',
+      'Muestra casos de éxito con fotos o datos simples',
+      'Explica cada servicio con beneficios y precio de referencia',
     ];
   }
   if (/(belleza|salón|barber|estética)/.test(base)) {
     return [
-      'Portafolio antes/después en galería',
-      'Reservaciones rápidas por WhatsApp',
-      'Mapa y horarios visibles en la home',
+      'Galería antes y después para generar confianza',
+      'Reservación rápida por WhatsApp sin registro',
+      'Ubicación y horarios visibles en la página principal',
     ];
   }
   return common;
@@ -396,36 +396,46 @@ app.post('/api/web/after-form', async (req, res) => {
       negocioDocId = ref.id;
     }
 
-    // 5) Transición de secuencias: cancelar captación y activar WebEnviada
+    // 5) Transición de secuencias: SOLO cancelar captación (NO activar WebEnviada aquí)
     try {
       if (cancelSequences) {
         await cancelSequences(finalLeadId, ['NuevoLead', 'NuevoLeadWeb', 'LeadWeb']);
         await leadRef.set({ nuevoLeadWebCancelled: true }, { merge: true });
       }
-      // ⚠️ Ya no intentamos FORM_SEQUENCE_ID (FormularioWeb). Activamos WebEnviada directamente.
-      if (scheduleSequenceForLead) {
-        await scheduleSequenceForLead(finalLeadId, 'WebEnviada', new Date());
-      }
     } catch (e) {
-      console.warn('[after-form] transición de secuencias falló:', e?.message);
+      console.warn('[after-form] cancelación de secuencias falló:', e?.message);
     }
 
-    // 6) Empatía personalizada (un solo mensaje inmediato, iniciando con “tres áreas de oportunidad”)
+    // 6) Empatía en DOS mensajes con delay realista (no técnico)
     const nombreCorto = firstName(leadData?.nombre || summary?.contactName || '');
     const giroHumano  = humanizeGiro(summary?.businessType || summary?.businessSector || '');
     const [op1, op2, op3] = pickOpportunityTriplet(giroHumano);
 
-    const empatiaMsg =
-      `${nombreCorto ? nombreCorto + ', ' : ''}ya recibí tu formulario 🙌\n` +
-      `Te dejo **tres áreas de oportunidad** para sacarle más provecho a tu web:\n` +
-      `1) **${op1}**\n` +
-      `2) **${op2}**\n` +
-      `3) **${op3}**\n` +
-      `Si te late, las implemento en tu demo y te la envío enseguida. ¿Le damos?`;
+    const msg1 =
+      `${nombreCorto ? nombreCorto + ', ' : ''}ya recibí tu formulario. ` +
+      `Mi equipo y yo ya estamos trabajando en tu muestra para que quede clara y útil.`;
 
-    try { await sendMessageToLead(leadPhoneDigits, empatiaMsg); } catch (e) {
-      console.warn('[after-form] empatía WA error:', e?.message);
-    }
+    const msg2 =
+      `Platicando con mi equipo, identificamos tres áreas para que tu ${giroHumano} aproveche mejor su web:\n` +
+      `1) ${op1}\n` +
+      `2) ${op2}\n` +
+      `3) ${op3}\n` +
+      `Si te late, las integramos en tu demo y te la comparto.`;
+
+    const d1 = 60_000 + Math.floor(Math.random() * 30_000);  // 60–90s
+    const d2 = 115_000 + Math.floor(Math.random() * 65_000); // 115–180s
+
+    setTimeout(() => {
+      sendMessageToLead(leadPhoneDigits, msg1)
+        .then(() => leadRef.set({ empathyMsg1At: new Date() }, { merge: true }))
+        .catch(err => console.error('[after-form] empatía msg1 error:', err));
+    }, d1);
+
+    setTimeout(() => {
+      sendMessageToLead(leadPhoneDigits, msg2)
+        .then(() => leadRef.set({ empathyMsg2At: new Date() }, { merge: true }))
+        .catch(err => console.error('[after-form] empatía msg2 error:', err));
+    }, d2);
 
     // 7) Marcar estado/etiqueta
     await leadRef.set({
@@ -436,6 +446,35 @@ app.post('/api/web/after-form', async (req, res) => {
     return res.json({ ok: true, negocioId: negocioDocId });
   } catch (e) {
     console.error('/api/web/after-form error:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// ============== Activar WebEnviada tras mandar link ==============
+// Acepta { leadId?, leadPhone?, link? } — activa 'WebEnviada' 15 min después
+app.post('/api/web/sample-sent', async (req, res) => {
+  try {
+    const { leadId, leadPhone } = req.body || {};
+    if (!leadId && !leadPhone) return res.status(400).json({ error: 'Faltan leadId o leadPhone' });
+
+    const e164 = toE164(leadPhone || (leadId || '').split('@')[0]);
+    const finalLeadId = leadId || e164ToLeadId(e164);
+
+    if (!scheduleSequenceForLead) {
+      return res.status(500).json({ error: 'scheduleSequenceForLead no disponible' });
+    }
+
+    const startAt = new Date(Date.now() + 15 * 60 * 1000); // +15 min
+    await scheduleSequenceForLead(finalLeadId, 'WebEnviada', startAt);
+
+    await db.collection('leads').doc(finalLeadId).set({
+      webLinkSentAt: new Date(),
+      etiquetas: admin.firestore.FieldValue.arrayUnion('WebLinkSent')
+    }, { merge: true });
+
+    return res.json({ ok: true, scheduledAt: startAt.toISOString() });
+  } catch (e) {
+    console.error('/api/web/sample-sent error:', e);
     return res.status(500).json({ error: String(e?.message || e) });
   }
 });
