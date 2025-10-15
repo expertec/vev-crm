@@ -120,7 +120,7 @@ function firstName(n = '') {
   return String(n).trim().split(/\s+/)[0] || '';
 }
 
-// ================== Personalización por giro + craft de 2 mensajes ==================
+// ================== Personalización por giro (helpers ligeros) ==================
 const GIRO_ALIAS = {
   restaurantes: ['restaurante', 'cafetería', 'bar'],
   tiendaretail: ['tienda física', 'retail'],
@@ -155,81 +155,43 @@ function humanizeGiro(code = '') {
   if (GIRO_ALIAS[c]) return GIRO_ALIAS[c][0];
   return c.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim() || 'negocio';
 }
-async function craftValueMessages({ nombre, businessType, companyName }) {
-  const nombreCorto = firstName(nombre);
-  const giroHumano = humanizeGiro(businessType);
-
-  const reglas = `
-Vas a escribir DOS mensajes cortos de WhatsApp en español para un cliente que acaba de llenar un brief para una muestra GRATIS de su sitio web.
-
-- PERSONALIZA por nombre (si está) y por giro.
-- Estilo humano, claro y profesional (sin emojis).
-- Mensaje 1: confirmación + entusiasmo + “primer paso” + plazo 15 minutos. 26–38 palabras. 1–2 oraciones.
-- Mensaje 2: 3 tips prácticos para su giro (marketing, redes/canal, CTA/recurso web). Formato de 3 bullets con guion "–". Cada bullet máx. 12 palabras.
-- Sin comillas ni encabezados como "Mensaje 1/2".
-  `.trim();
-
-  const contexto = `
-Datos:
-- Nombre: ${nombreCorto || '(sin nombre)'}
-- Giro: ${giroHumano}
-- Empresa: ${companyName || '(sin empresa)'}
-  `.trim();
-
-  const sistema = 'Eres un copywriter senior de producto digital. Eres conciso y útil.';
-  const pedido = `
-Devuélveme SOLO JSON válido con esta forma exacta:
-
-{
-  "msg1": "<texto del mensaje 1>",
-  "msg2": "<texto del mensaje 2 con 3 bullets, cada uno iniciando con '– '>"
-}
-
-${reglas}
-
-${contexto}
-  `.trim();
-
-  const text = await chatCompletionCompat({
-    model: 'gpt-4o-mini',
-    messages: [
-      { role: 'system', content: sistema },
-      { role: 'user', content: pedido }
-    ],
-    temperature: 0.55,
-    max_tokens: 300
-  });
-
-  let raw = String(text || '').trim()
-    .replace(/^```json\s*/i, '')
-    .replace(/```$/i, '')
-    .trim();
-
-  let obj;
-  try {
-    obj = JSON.parse(raw);
-  } catch {
-    obj = {
-      msg1: `${nombreCorto ? (nombreCorto + ', ') : ''}recibimos tu brief de ${giroHumano}. Ya estamos ensamblando tu Muestra GRATUITA; en 15 minutos o menos la tienes aquí. Es el primer paso para captar más clientes y presencia profesional.`,
-      msg2: `Mientras esperas, 3 ideas rápidas:\n– Optimiza perfil de Google con horarios y fotos.\n– Publica top 3 productos/servicios fijados en redes.\n– Agrega botón de WhatsApp y formularios simples en la web.`
-    };
+function pickOpportunityTriplet(giroHumano = '') {
+  const base = giroHumano.toLowerCase();
+  const common = [
+    'CTA claro arriba del pliegue',
+    'Prueba social visible (reseñas/testimonios)',
+    'WhatsApp/botón sticky con texto pensado para convertir',
+  ];
+  if (/(restaurante|cafeter|bar)/.test(base)) {
+    return [
+      'Menú actualizado con fotos y precios',
+      'Reserva/ordenar en 1 clic por WhatsApp',
+      'Google Perfil optimizado con horarios y ubicación',
+    ];
   }
-
-  const clean = (s) => String(s || '').replace(/[“”"']/g, '').replace(/\s+/g, ' ').trim();
-  return {
-    msg1: clean(obj.msg1),
-    msg2: String(obj.msg2 || '')
-      .replace(/[“”"']/g, '')
-      .split('\n')
-      .map(x => x.trim())
-      .filter(Boolean)
-      .join('\n')
-      .trim()
-  };
+  if (/(tienda|retail|ecommerce)/.test(base)) {
+    return [
+      'Catálogo con categorías y filtros claros',
+      'Checkout o contacto rápido por WhatsApp',
+      'Sellos de confianza y políticas visibles',
+    ];
+  }
+  if (/(servicio|consultor|profesional|legal|médic|clínic)/.test(base)) {
+    return [
+      'Agenda/consultas en 1 clic por WhatsApp',
+      'Casos de éxito y testimonios en home',
+      'Sección de servicios con beneficios y precios guía',
+    ];
+  }
+  if (/(belleza|salón|barber|estética)/.test(base)) {
+    return [
+      'Portafolio antes/después en galería',
+      'Reservaciones rápidas por WhatsApp',
+      'Mapa y horarios visibles en la home',
+    ];
+  }
+  return common;
 }
-
-// ================ Config de secuencia del formulario ================
-const FORM_SEQUENCE_ID = 'FormularioWeb';
 
 // ================ App base ================
 const app = express();
@@ -434,61 +396,42 @@ app.post('/api/web/after-form', async (req, res) => {
       negocioDocId = ref.id;
     }
 
-    // 5) Transición de secuencias
+    // 5) Transición de secuencias: cancelar captación y activar WebEnviada
     try {
       if (cancelSequences) {
         await cancelSequences(finalLeadId, ['NuevoLead', 'NuevoLeadWeb', 'LeadWeb']);
         await leadRef.set({ nuevoLeadWebCancelled: true }, { merge: true });
       }
-      if (scheduleSequenceForLead && FORM_SEQUENCE_ID) {
-        await scheduleSequenceForLead(finalLeadId, FORM_SEQUENCE_ID, new Date());
+      // ⚠️ Ya no intentamos FORM_SEQUENCE_ID (FormularioWeb). Activamos WebEnviada directamente.
+      if (scheduleSequenceForLead) {
+        await scheduleSequenceForLead(finalLeadId, 'WebEnviada', new Date());
       }
     } catch (e) {
       console.warn('[after-form] transición de secuencias falló:', e?.message);
     }
 
-    // 6) MENSAJES DE VALOR (1/2 y 2/2)
-    if (leadData.empathyScheduledAt || leadData.empathySentAt) {
-      console.log('[after-form] empatía ya programada/enviada; se omite duplicado');
-    } else {
-      await leadRef.set({ empathyScheduledAt: new Date() }, { merge: true });
+    // 6) Empatía personalizada (un solo mensaje inmediato, iniciando con “tres áreas de oportunidad”)
+    const nombreCorto = firstName(leadData?.nombre || summary?.contactName || '');
+    const giroHumano  = humanizeGiro(summary?.businessType || summary?.businessSector || '');
+    const [op1, op2, op3] = pickOpportunityTriplet(giroHumano);
 
-      const nombre  = firstName(leadData?.nombre || '');
-      const sector  = summary.businessType || summary.businessSector || leadData?.businessType || '';
-      const empresa = summary.companyName || summary.company || '';
+    const empatiaMsg =
+      `${nombreCorto ? nombreCorto + ', ' : ''}ya recibí tu formulario 🙌\n` +
+      `Te dejo **tres áreas de oportunidad** para sacarle más provecho a tu web:\n` +
+      `1) **${op1}**\n` +
+      `2) **${op2}**\n` +
+      `3) **${op3}**\n` +
+      `Si te late, las implemento en tu demo y te la envío enseguida. ¿Le damos?`;
 
-      let msg1 = '', msg2 = '';
-      try {
-        const pack = await craftValueMessages({ nombre, businessType: sector, companyName: empresa });
-        msg1 = pack.msg1;
-        msg2 = pack.msg2;
-      } catch (e) {
-        console.warn('[after-form] craftValueMessages fallback:', e?.message);
-        msg1 = `${nombre ? (nombre + ', ') : ''}recibimos tu brief de ${humanizeGiro(sector)}. Ya estamos ensamblando tu Muestra GRATUITA; en 15 minutos o menos la tienes aquí. Es el primer paso para captar más clientes y presencia profesional.`;
-        msg2 = `Mientras esperas, 3 ideas:\n– Optimiza Google Perfil con fotos y horarios.\n– Publica top 3 productos/servicios fijados en redes.\n– Agrega botón de WhatsApp y un CTA claro en la web.`;
-      }
-
-      const delay1 = 10_000 + Math.floor(Math.random() * 5_000);
-      const delay2 = 70_000 + Math.floor(Math.random() * 20_000);
-
-      console.log('[after-form] empatía programada:', { e164, delay1, delay2 });
-
-      setTimeout(() => {
-        sendMessageToLead(e164, msg1)
-          .then(async () => {
-            await leadRef.set({ empathyMsg1At: new Date() }, { merge: true });
-          })
-          .catch(err => console.error('Empatía MSG1 error:', err));
-      }, delay1);
-
-      setTimeout(() => {
-        sendMessageToLead(e164, msg2)
-          .then(async () => {
-            await leadRef.set({ empathySentAt: new Date(), empathyMsg2At: new Date() }, { merge: true });
-          })
-          .catch(err => console.error('Empatía MSG2 error:', err));
-      }, delay2);
+    try { await sendMessageToLead(leadPhoneDigits, empatiaMsg); } catch (e) {
+      console.warn('[after-form] empatía WA error:', e?.message);
     }
+
+    // 7) Marcar estado/etiqueta
+    await leadRef.set({
+      etapa: 'form_submitted',
+      etiquetas: admin.firestore.FieldValue.arrayUnion('FormOK')
+    }, { merge: true });
 
     return res.json({ ok: true, negocioId: negocioDocId });
   } catch (e) {

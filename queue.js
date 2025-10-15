@@ -107,7 +107,7 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
   const data = seqDoc.data() || {};
   const active = data.active !== false;
   const messages = Array.isArray(data.messages) ? data.messages : [];
-  const oneShot = !!data.oneShot || !!data.once; // ← NUEVO: candado "una sola vez"
+  const oneShot = !!data.oneShot || !!data.once; // ← candado "una sola vez"
 
   if (!active || messages.length === 0) return 0;
 
@@ -147,22 +147,19 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
   await batch.commit();
 
   // Marcas en el lead:
+  const leadPatch = {
+    hasActiveSequences: true,
+    seqStatus: {
+      [trigger]: {
+        scheduledAt: FieldValue.serverTimestamp(),
+        count: messages.length
+      }
+    }
+  };
   if (oneShot) {
-    await db.collection('leads').doc(leadId).set({
-      seqOnce: { [trigger]: true },
-      seqStatus: {
-        [trigger]: {
-          scheduledAt: FieldValue.serverTimestamp(),
-          count: messages.length
-        }
-      },
-      hasActiveSequences: true
-    }, { merge: true });
-  } else {
-    await db.collection('leads').doc(leadId).set({
-      hasActiveSequences: true
-    }, { merge: true });
+    leadPatch.seqOnce = { [trigger]: true };
   }
+  await db.collection('leads').doc(leadId).set(leadPatch, { merge: true });
 
   return messages.length;
 }
@@ -187,6 +184,29 @@ export async function cancelSequences(leadId, triggers = []) {
     }
   }
   if (n) await batch.commit();
+  return n;
+}
+
+// 🔹 NUEVO: cancelar TODO lo pendiente de un lead
+export async function cancelAllSequences(leadId) {
+  if (!leadId) return 0;
+
+  const snap = await db.collection('sequenceQueue')
+    .where('leadId', '==', leadId)
+    .where('status', '==', 'pending')
+    .get();
+
+  if (snap.empty) return 0;
+
+  const batch = db.batch();
+  let n = 0;
+  for (const d of snap.docs) { batch.delete(d.ref); n++; }
+  if (n) await batch.commit();
+
+  await db.collection('leads').doc(leadId).set({
+    hasActiveSequences: false
+  }, { merge: true });
+
   return n;
 }
 
@@ -297,6 +317,9 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
   const snap = await q.get();
   if (snap.empty) return 0;
 
+  // cache para evitar pedir el lead muchas veces
+  const pausedCache = new Map(); // leadId -> boolean
+
   // Orden determinista adicional por idx y createdAt
   const jobs = snap.docs
     .map(d => ({ id: d.id, ref: d.ref, ...d.data() }))
@@ -312,6 +335,21 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
 
   for (const job of jobs) {
     try {
+      // ⏸️ respetar pausa por lead (seqPaused)
+      let isPaused = pausedCache.get(job.leadId);
+      if (isPaused === undefined) {
+        const l = await _getLead(job.leadId);
+        isPaused = !!l?.seqPaused;
+        pausedCache.set(job.leadId, isPaused);
+      }
+      if (isPaused) {
+        await job.ref.update({
+          status: 'paused',
+          processedAt: FieldValue.serverTimestamp()
+        });
+        continue;
+      }
+
       await deliverPayload(job.leadId, job.payload);
 
       await job.ref.update({

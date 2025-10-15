@@ -111,6 +111,25 @@ async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb') 
   return { trigger: defaultTrigger, cancel: [], source: 'default' };
 }
 
+/** Determina si debemos BLOQUEAR programación de secuencias para este lead. */
+function shouldBlockSequences(leadData, nextTrigger) {
+  const etiquetas = leadData?.etiquetas || [];
+  const etapa = leadData?.etapa || '';
+  const estado = (leadData?.estado || '').toLowerCase();
+
+  // Pausa administrativa
+  if (leadData?.seqPaused) return true;
+
+  // Venta cerrada
+  if (estado === 'compro' || etiquetas.includes('Compro')) return true;
+
+  // Ya llenó formulario: bloquea reactivar captación (LeadWeb / NuevoLead*)
+  if (etapa === 'form_submitted' || etiquetas.includes('FormOK')) {
+    if (['LeadWeb', 'NuevoLead', 'NuevoLeadWeb'].includes(nextTrigger)) return true;
+  }
+  return false;
+}
+
 /* ---------------------------- conexión WA ---------------------------- */
 export async function connectToWhatsApp() {
   try {
@@ -125,8 +144,9 @@ export async function connectToWhatsApp() {
     const sock = makeWASocket({
       auth: state,
       logger: Pino({ level: 'info' }),
-      printQRInTerminal: true, // seguirá saliendo con el listener de abajo
+      printQRInTerminal: true,
       version,
+      // Puedes activar markOnlineOnConnect: false si quieres
     });
     whatsappSock = sock;
 
@@ -277,8 +297,8 @@ export async function connectToWhatsApp() {
             source: 'WhatsApp',
           };
 
+          // ------------- Lead nuevo -------------
           if (!leadSnap.exists) {
-            // Lead nuevo: se permite programar incluso con trigger 'default'
             await leadRef.set({
               ...baseLead,
               fecha_creacion: now(),
@@ -288,21 +308,41 @@ export async function connectToWhatsApp() {
               lastMessageAt: now(),
             });
 
+            // Reglas de cancelación por trigger
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
-            await scheduleSequenceForLead(leadId, trigger, now());
 
-            console.log('[WA] Lead CREADO:', { leadId, phone: normNum, trigger, source: rule.source });
+            // Programa aunque sea "default" (es el primer contacto)
+            // Pero respeta bloqueos si el lead trae flags por algún estado previo (poco probable en CREADO)
+            const canSchedule = !shouldBlockSequences({}, trigger);
+            if (canSchedule) {
+              await scheduleSequenceForLead(leadId, trigger, now());
+              console.log('[WA] Lead CREADO + secuencia programada:', { leadId, phone: normNum, trigger, source: rule.source });
+            } else {
+              console.log('[WA] Lead CREADO (bloqueado por estado); no se programa:', { leadId, trigger });
+            }
           } else {
-            // Lead existente:
+            // ------------- Lead existente -------------
+            const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
             await leadRef.update({ lastMessageAt: now() });
             await leadRef.set({ etiquetas: FieldValue.arrayUnion(trigger) }, { merge: true });
+
+            // Reglas de cancelación por trigger
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
-            // Solo re-programar si vino por hashtag/DB. Si es 'default', NO reprogramar.
-            if (rule.source === 'hashtag' || rule.source === 'db') {
+
+            const blocked = shouldBlockSequences(current, trigger);
+
+            // Solo reprogramar si vino por hashtag/DB y no está bloqueado
+            if (!blocked && (rule.source === 'hashtag' || rule.source === 'db')) {
               await scheduleSequenceForLead(leadId, trigger, now());
               console.log('[WA] Lead ACTUALIZADO (reprogramado por hashtag/db):', { leadId, trigger, source: rule.source });
             } else {
-              console.log('[WA] Lead ACTUALIZADO (sin reprogramar; trigger default):', { leadId, trigger, source: rule.source });
+              console.log('[WA] Lead ACTUALIZADO (sin reprogramar):', {
+                leadId,
+                trigger,
+                source: rule.source,
+                blocked,
+                reason: blocked ? 'seqPaused/Compro/FormOK' : 'trigger=default'
+              });
             }
           }
 
@@ -348,7 +388,7 @@ export async function sendMessageToLead(phone, messageContent) {
 
   await whatsappSock.sendMessage(
     jid,
-    { text: messageContent, linkPreview: false }, // evita dependency de link-preview-js
+    { text: messageContent, linkPreview: false },
     { timeoutMs: 60_000 }
   );
 
