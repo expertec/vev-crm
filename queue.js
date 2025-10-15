@@ -66,6 +66,12 @@ async function persistOutgoing(leadId, { content = '', mediaType = 'text', media
   );
 }
 
+// helper: obtener lead
+async function _getLead(leadId) {
+  const snap = await db.collection('leads').doc(leadId).get();
+  return snap.exists ? { id: snap.id, ...(snap.data() || {}) } : null;
+}
+
 /* -------------------- programar / cancelar secuencias ------------------- */
 export async function scheduleSequenceForLead(leadId, trigger, startAt = new Date()) {
   // 0) limpiar pendientes del mismo trigger para este lead
@@ -101,8 +107,19 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
   const data = seqDoc.data() || {};
   const active = data.active !== false;
   const messages = Array.isArray(data.messages) ? data.messages : [];
+  const oneShot = !!data.oneShot || !!data.once; // ← NUEVO: candado "una sola vez"
 
   if (!active || messages.length === 0) return 0;
+
+  // === One-shot guard por lead+trigger ===
+  if (oneShot) {
+    const lead = await _getLead(leadId);
+    const seqOnce = lead?.seqOnce || {};
+    if (seqOnce[trigger]) {
+      console.log(`[scheduleSequenceForLead] '${trigger}' oneShot ya marcado para ${leadId}; skip`);
+      return 0;
+    }
+  }
 
   const batch = db.batch();
   const startMs = new Date(startAt).getTime();
@@ -129,9 +146,23 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
 
   await batch.commit();
 
-  await db.collection('leads').doc(leadId).set({
-    hasActiveSequences: true
-  }, { merge: true });
+  // Marcas en el lead:
+  if (oneShot) {
+    await db.collection('leads').doc(leadId).set({
+      seqOnce: { [trigger]: true },
+      seqStatus: {
+        [trigger]: {
+          scheduledAt: FieldValue.serverTimestamp(),
+          count: messages.length
+        }
+      },
+      hasActiveSequences: true
+    }, { merge: true });
+  } else {
+    await db.collection('leads').doc(leadId).set({
+      hasActiveSequences: true
+    }, { merge: true });
+  }
 
   return messages.length;
 }

@@ -37,7 +37,7 @@ const STATIC_HASHTAG_MAP = {
 
 // Si el trigger es LeadWeb, cancela estas (evita duplicidad)
 const STATIC_CANCEL_BY_TRIGGER = {
-  'LeadWeb': ['NuevoLeadWeb', 'NuevoLead'],
+  LeadWeb: ['NuevoLeadWeb', 'NuevoLead'],
 };
 
 function firstName(n = '') {
@@ -60,8 +60,8 @@ function extractHashtags(text = '') {
 
 // Normaliza a formato que WhatsApp acepta para MX:
 // - 10 dígitos → 521 + 10
-// - 52XXXXXXXXXX (12 dígitos) → 521XXXXXXXXX
-// - 521XXXXXXXXX → se mantiene
+// - 52XXXXXXXXXX (12 dígitos) → 521XXXXXXXXXX
+// - 521XXXXXXXXXX → se mantiene
 function normalizePhoneForWA(phone) {
   let num = String(phone || '').replace(/\D/g, '');
   if (num.length === 10) return '521' + num; // MX móvil clásico
@@ -84,14 +84,18 @@ async function resolveHashtagInDB(code) {
   return { trigger: row.trigger, cancel: row.cancel || [] };
 }
 
+/**
+ * Devuelve { trigger, cancel, source }
+ * source: 'db' | 'hashtag' | 'default'
+ */
 async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb') {
   const tags = extractHashtags(text);
-  if (tags.length === 0) return { trigger: defaultTrigger, cancel: [] };
+  if (tags.length === 0) return { trigger: defaultTrigger, cancel: [], source: 'default' };
 
   // 1) Firestore (dinámico)
   for (const tag of tags) {
     const dbRule = await resolveHashtagInDB(tag);
-    if (dbRule?.trigger) return dbRule;
+    if (dbRule?.trigger) return { ...dbRule, source: 'db' };
   }
 
   // 2) Estático
@@ -99,12 +103,12 @@ async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb') 
     const trg = STATIC_HASHTAG_MAP[tag];
     if (trg) {
       const cancel = STATIC_CANCEL_BY_TRIGGER[trg] || [];
-      return { trigger: trg, cancel };
+      return { trigger: trg, cancel, source: 'hashtag' };
     }
   }
 
   // 3) Default
-  return { trigger: defaultTrigger, cancel: [] };
+  return { trigger: defaultTrigger, cancel: [], source: 'default' };
 }
 
 /* ---------------------------- conexión WA ---------------------------- */
@@ -231,6 +235,30 @@ export async function connectToWhatsApp() {
             content = '';
           }
 
+          // Si el mensaje lo enviaste tú (business), NO dispares reglas/colas; solo guarda
+          if (sender === 'business') {
+            const leadRef = db.collection('leads').doc(leadId);
+            const msgData = {
+              content,
+              mediaType,
+              mediaUrl,
+              sender,
+              timestamp: now(),
+            };
+            await leadRef.set(
+              {
+                telefono: normNum,
+                nombre: msg.pushName || '',
+                source: 'WhatsApp',
+                lastMessageAt: msgData.timestamp,
+              },
+              { merge: true }
+            );
+            await leadRef.collection('messages').add(msgData);
+            console.log('[WA] (fromMe) Mensaje propio guardado →', leadId);
+            continue;
+          }
+
           // ------- config global + resolver trigger (hashtags > DB > estático > default) -------
           const cfgSnap = await db.collection('config').doc('appConfig').get();
           const cfg = cfgSnap.exists ? cfgSnap.data() : {};
@@ -250,6 +278,7 @@ export async function connectToWhatsApp() {
           };
 
           if (!leadSnap.exists) {
+            // Lead nuevo: se permite programar incluso con trigger 'default'
             await leadRef.set({
               ...baseLead,
               fecha_creacion: now(),
@@ -262,15 +291,19 @@ export async function connectToWhatsApp() {
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
             await scheduleSequenceForLead(leadId, trigger, now());
 
-            console.log('[WA] Lead CREADO:', { leadId, phone: normNum, trigger, fromMe: sender === 'business' });
+            console.log('[WA] Lead CREADO:', { leadId, phone: normNum, trigger, source: rule.source });
           } else {
+            // Lead existente:
             await leadRef.update({ lastMessageAt: now() });
-            // aplica hashtag también en leads existentes
             await leadRef.set({ etiquetas: FieldValue.arrayUnion(trigger) }, { merge: true });
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
-            await scheduleSequenceForLead(leadId, trigger, now());
-
-            console.log('[WA] Lead ACTUALIZADO:', { leadId, phone: normNum, trigger, fromMe: sender === 'business' });
+            // Solo re-programar si vino por hashtag/DB. Si es 'default', NO reprogramar.
+            if (rule.source === 'hashtag' || rule.source === 'db') {
+              await scheduleSequenceForLead(leadId, trigger, now());
+              console.log('[WA] Lead ACTUALIZADO (reprogramado por hashtag/db):', { leadId, trigger, source: rule.source });
+            } else {
+              console.log('[WA] Lead ACTUALIZADO (sin reprogramar; trigger default):', { leadId, trigger, source: rule.source });
+            }
           }
 
           // ------- guardar mensaje -------
