@@ -479,6 +479,65 @@ app.post('/api/web/sample-sent', async (req, res) => {
   }
 });
 
+// ============== tracking: link abierto ==============
+// Acepta { leadId? , leadPhone? , slug? } — con cualquiera basta.
+// Si viene slug, lo resolvemos a phone → leadId.
+app.post('/api/track/link-open', async (req, res) => {
+  try {
+    let { leadId, leadPhone, slug } = req.body || {};
+
+    // a) si vino slug, busca el negocio y toma su leadPhone
+    if (slug && !leadPhone && !leadId) {
+      const snap = await db.collection('Negocios').where('slug', '==', String(slug)).limit(1).get();
+      if (!snap.empty) {
+        const d = snap.docs[0].data() || {};
+        leadPhone = d.leadPhone || leadPhone;
+      }
+    }
+
+    // b) normaliza a leadId
+    if (!leadId && leadPhone) {
+      const e164 = toE164(leadPhone);
+      leadId = e164ToLeadId(e164);
+    }
+    if (!leadId) return res.status(400).json({ error: 'Falta leadId/leadPhone/slug' });
+
+    const leadRef = db.collection('leads').doc(leadId);
+    const leadSnap = await leadRef.get();
+    if (!leadSnap.exists) return res.status(404).json({ error: 'Lead no encontrado' });
+
+    // Evita re-disparar si ya se marcó
+    const leadData = leadSnap.data() || {};
+    if (leadData.linkOpenedAt) {
+      return res.json({ ok: true, already: true });
+    }
+
+    // 1) Marca evento
+    await leadRef.set({
+      linkOpenedAt: new Date(),
+      etiquetas: admin.firestore.FieldValue.arrayUnion('LinkAbierto')
+    }, { merge: true });
+
+    // 2) Cambia secuencia: WebEnviada → LinkAbierto
+    try {
+      if (cancelSequences) {
+        await cancelSequences(leadId, ['WebEnviada']);
+      }
+      if (scheduleSequenceForLead) {
+        await scheduleSequenceForLead(leadId, 'LinkAbierto', new Date());
+      }
+    } catch (seqErr) {
+      console.warn('[track/link-open] secuencias:', seqErr?.message);
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('/api/track/link-open error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
 // ============== sample-create (nuevo, para el formulario turbo) ==============
 // Acepta { leadPhone, summary: { companyName, businessStory, slug } }
 app.post('/api/web/sample-create', async (req, res) => {
