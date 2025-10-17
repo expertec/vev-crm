@@ -127,7 +127,7 @@ function replacePlaceholders(template, leadData) {
 const SECTOR_PALETTES = [
   {
     keys: ['auto', 'automotriz', 'taller', 'mecánico', 'mecanico', 'refacciones', 'servicio automotriz'],
-    colors: { primary: '#0F172A', secondary: '#334155', accent: '#EF4444', text: '#FFFFFF' }
+    colors: { primary: '#0F172A', secondary: '#334155', accent: '#2b2b2bff', text: '#FFFFFF' }
   },
   {
     keys: ['restaurante', 'comida', 'cafetería', 'bar', 'panadería', 'cocina', 'food'],
@@ -143,15 +143,15 @@ const SECTOR_PALETTES = [
   },
   {
     keys: ['educación', 'capacitaci', 'curso', 'academ', 'colegio'],
-    colors: { primary: '#1D3557', secondary: '#457B9D', accent: '#E63946', text: '#FFFFFF' }
+    colors: { primary: '#1D3557', secondary: '#457B9D', accent: '#001666ff', text: '#FFFFFF' }
   },
   {
     keys: ['construcción', 'obra', 'remodelación', 'albañil', 'arquitect', 'ingenier'],
-    colors: { primary: '#111827', secondary: '#374151', accent: '#F59E0B', text: '#FFFFFF' }
+    colors: { primary: '#111827', secondary: '#374151', accent: '#3c3c3cff', text: '#FFFFFF' }
   },
   {
     keys: ['finanzas', 'banca', 'conta', 'impuestos', 'crédito', 'seguro'],
-    colors: { primary: '#0B3D2E', secondary: '#14532D', accent: '#22C55E', text: '#FFFFFF' }
+    colors: { primary: '#0B3D2E', secondary: '#14532D', accent: '#000000ff', text: '#FFFFFF' }
   }
 ];
 
