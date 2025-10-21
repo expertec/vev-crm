@@ -26,6 +26,7 @@ import {
   sendMessageToLead,
   getSessionPhone,
   sendAudioMessage,
+  sendVideoNote,   
 } from './whatsappService.js';
 
 // ================ Secuencias / Scheduler (web) ================
@@ -536,6 +537,30 @@ app.post('/api/track/link-open', async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+
+// ---------------- Enviar video note (PTV) ----------------
+app.post('/api/whatsapp/send-video-note', async (req, res) => {
+  try {
+    const { phone, url, seconds } = req.body || {};
+    if (!phone || !url) {
+      return res.status(400).json({ ok: false, error: 'Faltan phone y url' });
+    }
+
+    console.log(`[API] send-video-note → ${phone} ${url} s=${seconds ?? 'n/a'}`);
+    await sendVideoNote(
+      phone,
+      url,
+      Number.isFinite(+seconds) ? +seconds : null
+    );
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('/api/whatsapp/send-video-note error:', e);
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 
 
 // ============== sample-create (nuevo, para el formulario turbo) ==============

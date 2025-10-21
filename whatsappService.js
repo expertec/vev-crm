@@ -534,27 +534,70 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
 /**
  * Envía **video note** (video redondo).
  */
-export async function sendVideoNote(phone, videoUrlOrPath) {
+/**
+ * Envía **video note** (PTV = video redondo) desde URL o path local.
+ * - Intento 1: enviar por URL (mimetype forzado)
+ * - Intento 2: fallback → descargar y enviar como buffer (evita bloqueos de lectura remota)
+ * - secondsHint (opcional): ayuda a WA a validar duración
+ */
+export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
   const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
 
-  const content =
-    String(videoUrlOrPath).startsWith('http')
-      ? { video: { url: videoUrlOrPath }, ptv: true }
-      : { video: fs.readFileSync(videoUrlOrPath), ptv: true };
+  const opts = { timeoutMs: 120_000, sendSeen: false };
 
-  await sock.sendMessage(jid, content, { timeoutMs: 120_000 });
+  const buildMsg = (video) => {
+    const msg = { video, ptv: true, mimetype: 'video/mp4' }; // ← fuerza mimetype
+    if (Number.isFinite(secondsHint)) {
+      msg.seconds = Math.max(1, Math.round(secondsHint));
+    }
+    return msg;
+  };
 
+  const isHttp = String(videoUrlOrPath).startsWith('http');
+
+  // 1) Intento por URL directa
+  if (isHttp) {
+    try {
+      await sock.sendMessage(jid, buildMsg({ url: videoUrlOrPath }), opts);
+      console.log(`✅ videonota enviada por URL a ${jid}`);
+    } catch (e1) {
+      console.warn(`[videonota] fallo por URL: ${e1?.message || e1}`);
+      // 2) Fallback: descargar y enviar como buffer
+      try {
+        const res = await axios.get(videoUrlOrPath, { responseType: 'arraybuffer' });
+        const buf = Buffer.from(res.data);
+
+        // Si el server nos da un video/* lo respetamos; si no, dejamos 'video/mp4'
+        const ct = String(res.headers?.['content-type'] || '').toLowerCase();
+        const msg = buildMsg(buf);
+        if (ct.startsWith('video/')) msg.mimetype = ct;
+
+        await sock.sendMessage(jid, msg, opts);
+        console.log(`✅ videonota enviada como buffer a ${jid} (mime=${msg.mimetype})`);
+      } catch (e2) {
+        console.error(`❌ videonota falló también con buffer: ${e2?.message || e2}`);
+        throw e2;
+      }
+    }
+  } else {
+    // Path local
+    const buf = fs.readFileSync(videoUrlOrPath);
+    await sock.sendMessage(jid, buildMsg(buf), opts);
+    console.log(`✅ videonota enviada desde archivo local a ${jid}`);
+  }
+
+  // Persistencia en Firestore (si el lead existe)
   const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
   if (!q.empty) {
     const leadId = q.docs[0].id;
     const msgData = {
       content: '',
       mediaType: 'video_note',
-      mediaUrl: String(videoUrlOrPath).startsWith('http') ? videoUrlOrPath : null,
+      mediaUrl: isHttp ? videoUrlOrPath : null,
       sender: 'business',
       timestamp: new Date()
     };
@@ -562,3 +605,4 @@ export async function sendVideoNote(phone, videoUrlOrPath) {
     await db.collection('leads').doc(leadId).update({ lastMessageAt: msgData.timestamp });
   }
 }
+

@@ -50,7 +50,28 @@ function e164ToJid(e164) {
   return `${normalizePhoneForWA(digits)}@s.whatsapp.net`;
 }
 
-// persistencia uniforme en Firestore para salientes (business)
+/* ----------------------- normalización de tipos ------------------------ */
+// Unifica variantes: 'videonota' | 'video_note' | 'video-note' | 'ptv' → 'videonota'
+function normType(t = '') {
+  return String(t).trim().toLowerCase().replace(/[_\s-]+/g, '');
+}
+const TYPE_MAP = {
+  texto: 'texto',
+  imagen: 'imagen',
+  audio: 'audio',
+  clip: 'audio',
+  video: 'video',
+  videonota: 'videonota',
+  videonote: 'videonota',
+  videoptv: 'videonota',
+  ptv: 'videonota'
+};
+function resolveType(raw) {
+  const k = normType(raw);
+  return TYPE_MAP[k] || k;
+}
+
+/* ---------------- persistencia uniforme de salientes ------------------- */
 async function persistOutgoing(leadId, { content = '', mediaType = 'text', mediaUrl = null }) {
   const now = new Date();
   await db.collection('leads').doc(leadId).collection('messages').add({
@@ -129,18 +150,24 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
     // Jitter de 250ms por posición para mantener orden dentro del mismo minuto
     const dueAt = new Date(startMs + delayMin * 60_000 + idx * 250);
     const ref = db.collection('sequenceQueue').doc();
+
+    // ⬇️ propagamos seconds si viene desde el front (p.ej. videonota)
+    const payload = {
+      type: m.type || 'texto',
+      contenido: m.contenido || ''
+    };
+    if (m.seconds != null) payload.seconds = Number(m.seconds);
+
     batch.set(ref, {
       leadId,
       trigger,
       idx,
-      payload: {
-        type: m.type || 'texto',
-        contenido: m.contenido || ''
-      },
+      payload,
       dueAt,
       status: 'pending',
       shard: Math.floor(Math.random() * 10),
-      createdAt: FieldValue.serverTimestamp()
+      createdAt: FieldValue.serverTimestamp(),
+      retry: 0 // para reintentos simples
     });
   });
 
@@ -234,12 +261,15 @@ async function deliverPayload(leadId, payload) {
   const e164 = toE164(lead.telefono);
   const jid  = e164ToJid(e164);
 
-  const type = (payload?.type || 'texto').toLowerCase();
+  const rawType = (payload?.type || 'texto');
+  const type = resolveType(rawType); // ⬅️ normalizado
   const contenido = payload?.contenido || '';
+  const seconds = Number.isFinite(+payload?.seconds) ? +payload.seconds : null;
 
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
+  console.log(`[SEQ] dispatch → ${jid} type=${type} delay? (payload no incluye delay)`);
   switch (type) {
     case 'texto': {
       const text = replacePlaceholders(contenido, lead).trim();
@@ -259,11 +289,9 @@ async function deliverPayload(leadId, payload) {
       break;
     }
 
-    case 'audio':
-    case 'clip': {
+    case 'audio': {
       const url = replacePlaceholders(contenido, lead).trim();
       if (url) {
-        // usa helper robusto con fallback URL→buffer y reintentos
         await sendClipMessage(e164, url).catch(err => { throw err; });
         await persistOutgoing(leadId, { content: '', mediaType: 'audio', mediaUrl: url });
       }
@@ -288,22 +316,24 @@ async function deliverPayload(leadId, payload) {
       break;
     }
 
-    case 'videonota':
-    case 'video_note':
-    case 'video-note': {
+    case 'videonota': { // ← incluye 'video_note', 'video-note', 'ptv', etc. por normalización
       const url = replacePlaceholders(contenido, lead).trim();
+      console.log(`[SEQ] videonota → ${jid} url=${url || '(vacío)'} seconds=${seconds ?? 'n/a'}`);
       if (url) {
-        await sendVideoNote(e164, url);
+        await sendVideoNote(e164, url, seconds);
         await persistOutgoing(leadId, { content: '', mediaType: 'video_note', mediaUrl: url });
       }
       break;
     }
 
     default: {
+      // fallback a texto
       const text = replacePlaceholders(contenido, lead).trim();
       if (text) {
         await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 60_000 });
         await persistOutgoing(leadId, { content: text, mediaType: 'text' });
+      } else {
+        console.warn(`[SEQ] tipo no soportado: ${rawType} (normalizado=${type})`);
       }
     }
   }
@@ -421,11 +451,30 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
 
       await sleep(350);
     } catch (err) {
-      await job.ref.update({
-        status: 'error',
-        processedAt: FieldValue.serverTimestamp(),
-        error: String(err?.message || err)
-      });
+      const msg = String(err?.message || err);
+      console.error(`[QUEUE] error job=${job.id}: ${msg}`);
+
+      // Reintento simple para errores transitorios de conexión/socket
+      const transient = /socket|terminated|timed out|econn|network|disconnected|closed/i.test(msg);
+      const retryCount = Number(job.retry || 0);
+
+      if (transient && retryCount < 3) {
+        const delayMs = (retryCount + 1) * 15000; // 15s, 30s, 45s
+        await job.ref.update({
+          status: 'pending',
+          dueAt: new Date(Date.now() + delayMs),
+          retry: retryCount + 1,
+          error: msg,
+          processedAt: FieldValue.serverTimestamp()
+        });
+        console.log(`[QUEUE] ↻ reprogramado job=${job.id} en ${delayMs}ms (retry=${retryCount + 1})`);
+      } else {
+        await job.ref.update({
+          status: 'error',
+          processedAt: FieldValue.serverTimestamp(),
+          error: msg
+        });
+      }
     }
   }
 
