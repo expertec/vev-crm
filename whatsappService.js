@@ -13,6 +13,9 @@ import path from 'path';
 import axios from 'axios';
 import admin from 'firebase-admin';
 import { db } from './firebaseAdmin.js';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // Cola de secuencias
 import { scheduleSequenceForLead, cancelSequences } from './queue.js';
@@ -130,6 +133,7 @@ function shouldBlockSequences(leadData, nextTrigger) {
   return false;
 }
 
+/* ---------------------------- conexión WA ---------------------------- */
 /* ---------------------------- conexión WA ---------------------------- */
 export async function connectToWhatsApp() {
   try {
@@ -254,7 +258,7 @@ export async function connectToWhatsApp() {
             content = '';
           }
 
-          // Si el mensaje lo enviaste tú (business), NO dispares reglas/colas; solo guarda
+          // ---------- CAMBIO 1: branch fromMe NO toca 'nombre' ----------
           if (sender === 'business') {
             const leadRef = db.collection('leads').doc(leadId);
             const msgData = {
@@ -264,15 +268,11 @@ export async function connectToWhatsApp() {
               sender,
               timestamp: now(),
             };
-            await leadRef.set(
-              {
-                telefono: normNum,
-                nombre: msg.pushName || '',
-                source: 'WhatsApp',
-                lastMessageAt: msgData.timestamp,
-              },
-              { merge: true }
-            );
+            await leadRef.set({
+              telefono: normNum,
+              source: 'WhatsApp',
+              lastMessageAt: msgData.timestamp,
+            }, { merge: true });
             await leadRef.collection('messages').add(msgData);
             console.log('[WA] (fromMe) Mensaje propio guardado →', leadId);
             continue;
@@ -322,6 +322,12 @@ export async function connectToWhatsApp() {
             // ------------- Lead existente -------------
             const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
             await leadRef.update({ lastMessageAt: now() });
+
+            // ---------- CAMBIO 2: sólo si viene del lead y nombre está vacío ----------
+            if (!current.nombre && msg.pushName) {
+              await leadRef.set({ nombre: msg.pushName }, { merge: true });
+            }
+
             await leadRef.set({ etiquetas: FieldValue.arrayUnion(trigger) }, { merge: true });
 
             // Reglas de cancelación por trigger
@@ -372,6 +378,7 @@ export async function connectToWhatsApp() {
     throw error;
   }
 }
+
 
 /* ----------------------------- helpers envío ---------------------------- */
 export function getLatestQR() { return latestQR; }
@@ -427,23 +434,61 @@ export async function sendAudioMessage(phone, filePath) {
   const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
 
-  const audioBuffer = fs.readFileSync(filePath);
-  await sock.sendMessage(jid, { audio: audioBuffer, mimetype: 'audio/mp4', ptt: true });
+  // Si NO es .ogg/.opus → convertir a OGG/Opus para que salga como PTT real
+  const isAlreadyOpus = /\.(ogg|opus)$/i.test(filePath);
+  let oggPath = filePath;
 
-  // subir a Storage y guardar en mensajes
-  const dest = `audios/${num}-${Date.now()}.m4a`;
+  if (!isAlreadyOpus) {
+    oggPath = `${filePath}.ogg`;
+    await new Promise((resolve, reject) => {
+      ffmpeg(filePath)
+        .audioCodec('libopus')
+        .audioChannels(1)
+        .audioBitrate('48k')
+        .audioFrequency(48000)
+        .outputOptions(['-vn', '-compression_level 10', '-application voip'])
+        .toFormat('ogg')
+        .save(oggPath)
+        .on('end', resolve)
+        .on('error', reject);
+    });
+  }
+
+  const audioBuffer = fs.readFileSync(oggPath);
+
+  // Envío como NOTA DE VOZ (PTT)
+  await sock.sendMessage(
+    jid,
+    { audio: audioBuffer, mimetype: 'audio/ogg; codecs=opus', ptt: true },
+    { timeoutMs: 120_000 }
+  );
+
+  // Subir a Storage y persistir (opcional; guardamos como PTT)
+  const dest = `audios/${num}-${Date.now()}.ogg`;
   const file = bucket.file(dest);
-  await file.save(audioBuffer, { contentType: 'audio/mp4' });
+  await file.save(audioBuffer, { contentType: 'audio/ogg' });
   const [mediaUrl] = await file.getSignedUrl({ action: 'read', expires: '03-01-2500' });
 
   const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
   if (!q.empty) {
     const leadId = q.docs[0].id;
-    const msgData = { content: '', mediaType: 'audio', mediaUrl, sender: 'business', timestamp: now() };
+    const msgData = {
+      content: '',
+      mediaType: 'audio_ptt', // ← marcamos como nota de voz
+      mediaUrl,
+      sender: 'business',
+      timestamp: now()
+    };
     await db.collection('leads').doc(leadId).collection('messages').add(msgData);
     await db.collection('leads').doc(leadId).update({ lastMessageAt: msgData.timestamp });
   }
+
+  // Limpieza si convertimos
+  if (!isAlreadyOpus) {
+    try { fs.unlinkSync(oggPath); } catch {}
+  }
 }
+
 
 /**
  * Envía audio por URL. Si es .ogg/.opus lo envía como **nota de voz** (PTT).
