@@ -36,6 +36,7 @@ const STATIC_HASHTAG_MAP = {
   '#miwebgratis':  'LeadWeb',   // ← reemplazo de #webpro990
   '#leadweb':      'LeadWeb',
   '#nuevolead':    'NuevoLeadWeb',
+  '#planredes990': 'PlanRedes',
 };
 
 // Si el trigger es LeadWeb, cancela estas (evita duplicidad)
