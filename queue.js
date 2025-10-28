@@ -305,7 +305,8 @@ async function deliverPayload(leadId, payload) {
     const audioSource = /^https?:/i.test(src) ? { url: src } : src;
 
     // Usa e164 como en sendVideoNote; si tu helper espera JID, cambia e164 → jid
-    await sendAudioMessage(e164, audioSource, { ptt, forwarded });
+  
+    await sendAudioMessage(e164, audioSource, { ptt, forwarded, showAvatar: true, displayName: lead?.nombre });
 
     await persistOutgoing(leadId, { content: '', mediaType: 'audio', mediaUrl: src });
   }
