@@ -231,12 +231,18 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
 });
 
 // ---------------- Enviar audio (convierte a M4A) ----------------
+// ---------------- Enviar audio (convierte a M4A pero manda en Opus/PTT si aplica) ----------------
 app.post('/api/whatsapp/send-audio', upload.single('audio'), async (req, res) => {
-  const { phone } = req.body;
+  const { phone, forwarded, ptt } = req.body; // ← NUEVO: banderas desde el front
+  if (!phone || !req.file) {
+    return res.status(400).json({ success: false, error: 'Faltan phone o archivo' });
+  }
+
   const uploadPath = req.file.path;
   const m4aPath = `${uploadPath}.m4a`;
 
   try {
+    // 1) Convertir el archivo subido (cualquier formato) a M4A (AAC)
     await new Promise((resolve, reject) => {
       ffmpeg(uploadPath)
         .outputOptions(['-c:a aac', '-vn'])
@@ -246,9 +252,17 @@ app.post('/api/whatsapp/send-audio', upload.single('audio'), async (req, res) =>
         .on('error', reject);
     });
 
-    await sendAudioMessage(phone, m4aPath);
-    fs.unlinkSync(uploadPath);
-    fs.unlinkSync(m4aPath);
+    // 2) Enviar el audio (whatsappService luego lo recodifica a OGG/Opus PTT si es necesario)
+    //    y aplica el banner "Reenviado" cuando forwarded === true
+    await sendAudioMessage(phone, m4aPath, {
+      ptt: String(ptt).toLowerCase() === 'true' || ptt === true,
+      forwarded: String(forwarded).toLowerCase() === 'true' || forwarded === true,
+    });
+
+    // 3) Limpieza local
+    try { fs.unlinkSync(uploadPath); } catch {}
+    try { fs.unlinkSync(m4aPath); } catch {}
+
     return res.json({ success: true });
   } catch (error) {
     console.error('Error enviando audio:', error);
@@ -257,6 +271,7 @@ app.post('/api/whatsapp/send-audio', upload.single('audio'), async (req, res) =>
     return res.status(500).json({ success: false, error: error.message });
   }
 });
+
 
 // ---------------- Crear usuario + bienvenida WA ----------------
 app.post('/api/crear-usuario', async (req, res) => {

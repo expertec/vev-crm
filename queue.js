@@ -157,6 +157,8 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
       contenido: m.contenido || ''
     };
     if (m.seconds != null) payload.seconds = Number(m.seconds);
+     if (m.forwarded != null) payload.forwarded = !!m.forwarded; // ← NUEVO
+   if (m.ptt != null) payload.ptt = !!m.ptt;
 
     batch.set(ref, {
       leadId,
@@ -289,14 +291,26 @@ async function deliverPayload(leadId, payload) {
       break;
     }
 
-    case 'audio': {
-      const url = replacePlaceholders(contenido, lead).trim();
-      if (url) {
-        await sendClipMessage(e164, url).catch(err => { throw err; });
-        await persistOutgoing(leadId, { content: '', mediaType: 'audio', mediaUrl: url });
-      }
-      break;
-    }
+   case 'audio': {
+  // URL o ruta que guardas en Firestore como "contenido"
+  const src = replacePlaceholders(contenido, lead).trim();
+
+  // Flags desde Firestore (pueden venir como boolean o string)
+  const ptt = payload?.ptt === true || String(payload?.ptt).toLowerCase() === 'true';
+  const forwarded = payload?.forwarded === true || String(payload?.forwarded).toLowerCase() === 'true';
+
+  if (src) {
+    // Baileys acepta Buffer | stream | { url } | path local
+    const audioSource = /^https?:/i.test(src) ? { url: src } : src;
+
+    // Usa e164 como en sendVideoNote; si tu helper espera JID, cambia e164 → jid
+    await sendAudioMessage(e164, audioSource, { ptt, forwarded });
+
+    await persistOutgoing(leadId, { content: '', mediaType: 'audio', mediaUrl: src });
+  }
+  break;
+}
+
 
     case 'imagen': {
       const url = replacePlaceholders(contenido, lead).trim();

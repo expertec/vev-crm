@@ -428,65 +428,90 @@ export async function sendFullAudioAsDocument(phone, fileUrl) {
   console.log(`✅ Canción completa enviada como adjunto a ${jid}`);
 }
 
-export async function sendAudioMessage(phone, filePath) {
+// Enviar audio con soporte de "Reenviado", PTT y quoted.
+// Acepta: phoneOrJid (E164/jid/10 dígitos), audio = Buffer | { url } | string (url o ruta local)
+export async function sendAudioMessage(phoneOrJid, audio, {
+  ptt = false,
+  quoted = null,
+  forwarded = false,
+} = {}) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
-  const num = normalizePhoneForWA(phone);
-  const jid = `${num}@s.whatsapp.net`;
+  // ---- Resolver JID (acepta jid directo o teléfono/e164) ----
+  const raw = String(phoneOrJid || '');
+  const jid = raw.includes('@s.whatsapp.net')
+    ? raw
+    : `${normalizePhoneForWA(raw) }@s.whatsapp.net`;
 
-  // Si NO es .ogg/.opus → convertir a OGG/Opus para que salga como PTT real
-  const isAlreadyOpus = /\.(ogg|opus)$/i.test(filePath);
-  let oggPath = filePath;
+  // ---- Preparar payload según tipo de fuente ----
+  let message = null;
+  let cleanupPath = null; // para borrar conversión temporal si aplica
 
-  if (!isAlreadyOpus) {
-    oggPath = `${filePath}.ogg`;
-    await new Promise((resolve, reject) => {
-      ffmpeg(filePath)
-        .audioCodec('libopus')
-        .audioChannels(1)
-        .audioBitrate('48k')
-        .audioFrequency(48000)
-        .outputOptions(['-vn', '-compression_level 10', '-application voip'])
-        .toFormat('ogg')
-        .save(oggPath)
-        .on('end', resolve)
-        .on('error', reject);
-    });
-  }
+  const isHttp = (v) => typeof v === 'string' && /^https?:/i.test(v);
+  const isPath = (v) => typeof v === 'string' && !isHttp(v);
 
-  const audioBuffer = fs.readFileSync(oggPath);
-
-  // Envío como NOTA DE VOZ (PTT)
-  await sock.sendMessage(
-    jid,
-    { audio: audioBuffer, mimetype: 'audio/ogg; codecs=opus', ptt: true },
-    { timeoutMs: 120_000 }
-  );
-
-  // Subir a Storage y persistir (opcional; guardamos como PTT)
-  const dest = `audios/${num}-${Date.now()}.ogg`;
-  const file = bucket.file(dest);
-  await file.save(audioBuffer, { contentType: 'audio/ogg' });
-  const [mediaUrl] = await file.getSignedUrl({ action: 'read', expires: '03-01-2500' });
-
-  const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
-  if (!q.empty) {
-    const leadId = q.docs[0].id;
-    const msgData = {
-      content: '',
-      mediaType: 'audio_ptt', // ← marcamos como nota de voz
-      mediaUrl,
-      sender: 'business',
-      timestamp: now()
+  if (Buffer.isBuffer(audio)) {
+    // Buffer en mano → si marcamos PTT asumimos OGG/Opus
+    message = {
+      audio,
+      mimetype: ptt ? 'audio/ogg; codecs=opus' : undefined,
+      ptt: !!ptt,
     };
-    await db.collection('leads').doc(leadId).collection('messages').add(msgData);
-    await db.collection('leads').doc(leadId).update({ lastMessageAt: msgData.timestamp });
+  } else if (isHttp(audio) || (audio && typeof audio === 'object' && audio.url)) {
+    // URL remota
+    const url = typeof audio === 'object' ? audio.url : audio;
+    const isOgg = /\.(ogg|opus)(\?|#|$)/i.test(url);
+    message = {
+      audio: { url },
+      mimetype: isOgg ? 'audio/ogg; codecs=opus' : (ptt ? 'audio/ogg; codecs=opus' : 'audio/mp4'),
+      ptt: isOgg ? !!ptt : !!ptt, // si no es ogg igual podemos marcar ptt, algunos clientes recodifican
+    };
+  } else if (isPath(audio)) {
+    // Ruta local (p. ej. subida al server). Si no es ogg/opus y queremos PTT, convertimos a OGG/Opus.
+    const isAlreadyOpus = /\.(ogg|opus)(\?|#|$)/i.test(audio);
+    let oggPath = audio;
+
+    if (ptt && !isAlreadyOpus) {
+      oggPath = `${audio}.ogg`;
+      await new Promise((resolve, reject) => {
+        ffmpeg(audio)
+          .audioCodec('libopus')
+          .audioChannels(1)
+          .audioBitrate('48k')
+          .audioFrequency(48000)
+          .outputOptions(['-vn', '-compression_level 10', '-application voip'])
+          .toFormat('ogg')
+          .save(oggPath)
+          .on('end', resolve)
+          .on('error', reject);
+      });
+      cleanupPath = oggPath;
+    }
+
+    const buf = fs.readFileSync(oggPath);
+    message = {
+      audio: buf,
+      mimetype: ptt || /\.(ogg|opus)(\?|#|$)/i.test(oggPath) ? 'audio/ogg; codecs=opus' : undefined,
+      ptt: !!ptt,
+    };
+  } else {
+    throw new Error('Fuente de audio no válida');
   }
 
-  // Limpieza si convertimos
-  if (!isAlreadyOpus) {
-    try { fs.unlinkSync(oggPath); } catch {}
+  // ---- Opciones de envío (reenviado / citado) ----
+  const options = { timeoutMs: 120_000 };
+  if (quoted) options.quoted = quoted;
+  if (forwarded) {
+    options.contextInfo = { isForwarded: true, forwardingScore: 2 };
+  }
+
+  // ---- Enviar ----
+  await sock.sendMessage(jid, message, options);
+
+  // ---- Limpieza si convertimos temporalmente ----
+  if (cleanupPath) {
+    try { fs.unlinkSync(cleanupPath); } catch {}
   }
 }
 
