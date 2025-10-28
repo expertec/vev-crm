@@ -430,81 +430,43 @@ export async function sendFullAudioAsDocument(phone, fileUrl) {
 
 // Enviar audio con soporte de "Reenviado", PTT y quoted.
 // Acepta: phoneOrJid (E164/jid/10 dígitos), audio = Buffer | { url } | string (url o ruta local)
+// Enviar audio como NOTA DE VOZ (PTT) con soporte opcional de “Reenviado”
 export async function sendAudioMessage(phoneOrJid, audioSrc, {
-  ptt = false,
+  ptt = true,                   // ← por defecto true para forzar estilo PTT
   forwarded = false,
-  quoted = null,
-  showAvatar = false,          // ← NUEVO: mostrar foto del contacto
-  displayName = null           // ← opcional: título encima de la miniatura
+  quoted = null
 } = {}) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
-  // Resolver JID (acepta JID directo o teléfono/E.164)
+  // --- Resolver JID (acepta JID directo o teléfono/E.164/10 dígitos MX) ---
   const raw = String(phoneOrJid || '');
   const digits = raw.replace(/\D/g, '');
   const norm = (() => {
     if (raw.includes('@s.whatsapp.net')) return raw;             // ya es JID
-    if (/^\d{10}$/.test(digits)) return `521${digits}`;           // MX 10 → 521 + 10
+    if (/^\d{10}$/.test(digits)) return `521${digits}`;          // MX 10 → 521 + 10
     if (/^52\d{10}$/.test(digits)) return `521${digits.slice(2)}`;// 52+10 → 521+10
-    return digits;                                                // 521… u otros
+    return digits;                                               // 521… u otros
   })();
   const jid = norm.includes('@s.whatsapp.net') ? norm : `${norm}@s.whatsapp.net`;
 
-  // Preparar fuente de audio
+  // --- Preparar fuente (URL, Buffer o path). Para PTT: OGG/OPUS recomendado ---
   const isHttp = (v) => typeof v === 'string' && /^https?:/i.test(v);
-  const isOgg = (v) => typeof v === 'string' && /\.(ogg|opus)(\?|#|$)/i.test(v);
+  const audioPayload =
+    (typeof audioSrc === 'string')
+      ? (isHttp(audioSrc) ? { url: audioSrc } : fs.readFileSync(audioSrc))
+      : (Buffer.isBuffer(audioSrc) ? audioSrc
+         : (audioSrc && typeof audioSrc === 'object' && audioSrc.url ? { url: audioSrc.url } : null));
 
-  let audioPayload;
-  if (typeof audioSrc === 'string') {
-    audioPayload = isHttp(audioSrc) ? { url: audioSrc } : fs.readFileSync(audioSrc);
-  } else if (Buffer.isBuffer(audioSrc)) {
-    audioPayload = audioSrc;
-  } else if (audioSrc && typeof audioSrc === 'object' && audioSrc.url) {
-    audioPayload = { url: audioSrc.url };
-  } else {
-    throw new Error('Fuente de audio inválida');
-  }
+  if (!audioPayload) throw new Error('Fuente de audio inválida');
 
-  // Construir message con banner "Reenviado"
+  // --- Mensaje PTT: mimetype opus + ptt:true; banner “Reenviado” se adjunta en el payload ---
   const message = {
     audio: audioPayload,
+    mimetype: 'audio/ogg; codecs=opus',   // ← clave para estilo PTT
     ptt: !!ptt,
-    mimetype: (ptt || (typeof audioSrc === 'string' && isOgg(audioSrc)))
-      ? 'audio/ogg; codecs=opus'
-      : undefined,
     ...(forwarded ? { contextInfo: { isForwarded: true, forwardingScore: 5 } } : {})
   };
-
-  // Adjuntar miniatura grande con la foto del contacto (aparece arriba del audio)
-  if (showAvatar) {
-    try {
-      const ppUrl = await sock.profilePictureUrl(jid, 'image'); // puede ser null
-      let thumbBuf = null;
-      if (ppUrl) {
-        const resp = await axios.get(ppUrl, { responseType: 'arraybuffer' });
-        thumbBuf = Buffer.from(resp.data);
-      }
-      // si no hay foto, no rompemos el envío
-      const waMe = `https://wa.me/${digits.replace(/^52(?!1)/, '521')}`;
-      const title = displayName || (sock?.user?.name ?? 'WhatsApp');
-
-      message.contextInfo = {
-        ...(message.contextInfo || {}),
-        externalAdReply: {
-          title,                     // título encima de la miniatura
-          body: '',                  // opcional
-          mediaType: 1,              // imagen
-          thumbnail: thumbBuf || undefined, // buffer JPEG/PNG
-          thumbnailUrl: thumbBuf ? undefined : ppUrl || undefined,
-          sourceUrl: waMe,           // tocar la tarjeta abre el chat
-          renderLargerThumbnail: true
-        }
-      };
-    } catch (e) {
-      console.warn('[WA] avatar thumbnail falló:', e?.message || e);
-    }
-  }
 
   const options = { timeoutMs: 120_000 };
   if (quoted) options.quoted = quoted;

@@ -293,25 +293,20 @@ async function deliverPayload(leadId, payload) {
     }
 
    case 'audio': {
-  // URL o ruta que guardas en Firestore como "contenido"
   const src = replacePlaceholders(contenido, lead).trim();
 
-  // Flags desde Firestore (pueden venir como boolean o string)
-  const ptt = payload?.ptt === true || String(payload?.ptt).toLowerCase() === 'true';
+  // lee flags desde Firestore; fuerza ptt si quieres el look PTT
+  const ptt = payload?.ptt === true || String(payload?.ptt).toLowerCase() === 'true' || true;
   const forwarded = payload?.forwarded === true || String(payload?.forwarded).toLowerCase() === 'true';
 
   if (src) {
-    // Baileys acepta Buffer | stream | { url } | path local
     const audioSource = /^https?:/i.test(src) ? { url: src } : src;
-
-    // Usa e164 como en sendVideoNote; si tu helper espera JID, cambia e164 → jid
-  
-    await sendAudioMessage(e164, audioSource, { ptt, forwarded, showAvatar: true, displayName: lead?.nombre });
-
+    await sendAudioMessage(e164, audioSource, { ptt, forwarded });
     await persistOutgoing(leadId, { content: '', mediaType: 'audio', mediaUrl: src });
   }
   break;
 }
+
 
 
     case 'imagen': {
