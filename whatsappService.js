@@ -430,90 +430,50 @@ export async function sendFullAudioAsDocument(phone, fileUrl) {
 
 // Enviar audio con soporte de "Reenviado", PTT y quoted.
 // Acepta: phoneOrJid (E164/jid/10 dígitos), audio = Buffer | { url } | string (url o ruta local)
-export async function sendAudioMessage(phoneOrJid, audio, {
-  ptt = false,
-  quoted = null,
-  forwarded = false,
-} = {}) {
+// --- Enviar AUDIO con soporte de "Reenviado" y PTT ---
+export async function sendAudioMessage(phoneOrJid, audioSrc, { ptt = false, forwarded = false, quoted = null } = {}) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
-  // ---- Resolver JID (acepta jid directo o teléfono/e164) ----
+  // Resolver JID (acepta JID directo o teléfono)
   const raw = String(phoneOrJid || '');
-  const jid = raw.includes('@s.whatsapp.net')
-    ? raw
-    : `${normalizePhoneForWA(raw) }@s.whatsapp.net`;
+  const digits = raw.replace(/\D/g, '');
+  const norm = (() => {
+    if (raw.includes('@s.whatsapp.net')) return raw;            // ya es JID
+    if (/^\d{10}$/.test(digits)) return `521${digits}`;          // MX 10 → 521 + 10
+    if (/^52\d{10}$/.test(digits)) return `521${digits.slice(2)}`; // 52 + 10 → 521 + 10
+    return digits;                                               // si ya viene 521… o cualquier otro
+  })();
+  const jid = norm.includes('@s.whatsapp.net') ? norm : `${norm}@s.whatsapp.net`;
 
-  // ---- Preparar payload según tipo de fuente ----
-  let message = null;
-  let cleanupPath = null; // para borrar conversión temporal si aplica
-
-  const isHttp = (v) => typeof v === 'string' && /^https?:/i.test(v);
-  const isPath = (v) => typeof v === 'string' && !isHttp(v);
-
-  if (Buffer.isBuffer(audio)) {
-    // Buffer en mano → si marcamos PTT asumimos OGG/Opus
-    message = {
-      audio,
-      mimetype: ptt ? 'audio/ogg; codecs=opus' : undefined,
-      ptt: !!ptt,
-    };
-  } else if (isHttp(audio) || (audio && typeof audio === 'object' && audio.url)) {
-    // URL remota
-    const url = typeof audio === 'object' ? audio.url : audio;
-    const isOgg = /\.(ogg|opus)(\?|#|$)/i.test(url);
-    message = {
-      audio: { url },
-      mimetype: isOgg ? 'audio/ogg; codecs=opus' : (ptt ? 'audio/ogg; codecs=opus' : 'audio/mp4'),
-      ptt: isOgg ? !!ptt : !!ptt, // si no es ogg igual podemos marcar ptt, algunos clientes recodifican
-    };
-  } else if (isPath(audio)) {
-    // Ruta local (p. ej. subida al server). Si no es ogg/opus y queremos PTT, convertimos a OGG/Opus.
-    const isAlreadyOpus = /\.(ogg|opus)(\?|#|$)/i.test(audio);
-    let oggPath = audio;
-
-    if (ptt && !isAlreadyOpus) {
-      oggPath = `${audio}.ogg`;
-      await new Promise((resolve, reject) => {
-        ffmpeg(audio)
-          .audioCodec('libopus')
-          .audioChannels(1)
-          .audioBitrate('48k')
-          .audioFrequency(48000)
-          .outputOptions(['-vn', '-compression_level 10', '-application voip'])
-          .toFormat('ogg')
-          .save(oggPath)
-          .on('end', resolve)
-          .on('error', reject);
-      });
-      cleanupPath = oggPath;
-    }
-
-    const buf = fs.readFileSync(oggPath);
-    message = {
-      audio: buf,
-      mimetype: ptt || /\.(ogg|opus)(\?|#|$)/i.test(oggPath) ? 'audio/ogg; codecs=opus' : undefined,
-      ptt: !!ptt,
-    };
+  // Preparar fuente (URL, Buffer o path local)
+  let audioPayload = null;
+  if (typeof audioSrc === 'string') {
+    audioPayload = /^https?:/i.test(audioSrc) ? { url: audioSrc } : fs.readFileSync(audioSrc);
+  } else if (Buffer.isBuffer(audioSrc)) {
+    audioPayload = audioSrc;
+  } else if (audioSrc && typeof audioSrc === 'object' && audioSrc.url) {
+    audioPayload = { url: audioSrc.url };
   } else {
-    throw new Error('Fuente de audio no válida');
+    throw new Error('Fuente de audio inválida');
   }
 
-  // ---- Opciones de envío (reenviado / citado) ----
+  // Construir mensaje
+  const isOggLike = (v) => typeof v === 'string' && /\.(ogg|opus)(\?|#|$)/i.test(v);
+  const message = {
+    audio: audioPayload,
+    ptt: !!ptt,
+    // si es PTT o ya es ogg/opus, sugerimos mimetype opus (no pasa nada si cliente recodifica)
+    mimetype: (ptt || (typeof audioSrc === 'string' && isOggLike(audioSrc))) ? 'audio/ogg; codecs=opus' : undefined,
+  };
+
   const options = { timeoutMs: 120_000 };
   if (quoted) options.quoted = quoted;
-  if (forwarded) {
-    options.contextInfo = { isForwarded: true, forwardingScore: 2 };
-  }
+  if (forwarded) options.contextInfo = { isForwarded: true, forwardingScore: 2 };
 
-  // ---- Enviar ----
-  await sock.sendMessage(jid, message, options);
-
-  // ---- Limpieza si convertimos temporalmente ----
-  if (cleanupPath) {
-    try { fs.unlinkSync(cleanupPath); } catch {}
-  }
+  return sock.sendMessage(jid, message, options);
 }
+
 
 
 /**

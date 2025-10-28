@@ -3,7 +3,8 @@ import { db, admin } from './firebaseAdmin.js';
 import {
   sendClipMessage,
   getWhatsAppSock,
-  sendVideoNote
+  sendVideoNote,
+  sendAudioMessage,
 } from './whatsappService.js';
 
 const { FieldValue } = admin.firestore;
