@@ -573,7 +573,11 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
  *   - fileName: string           // nombre visible del archivo (opcional)
  *   - width: number              // ancho objetivo (default 720). Mantiene aspect ratio.
  */
-export async function sendVideoWithAutoRotate(phoneOrJid, srcUrlOrPath, { seconds = null, fileName = 'video.mp4', width = 720 } = {}) {
+export async function sendVideoWithAutoRotate(
+  phoneOrJid,
+  srcUrlOrPath,
+  { seconds = null, fileName = 'video.mp4', width = 720, caption = '' } = {}
+) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');
 
@@ -602,12 +606,15 @@ export async function sendVideoWithAutoRotate(phoneOrJid, srcUrlOrPath, { second
 
   // 2) Inspeccionar rotación vía ffprobe (si disponible)
   let rotate = 0;
+ let durationSec = null;
   try {
     const meta = await new Promise((resolve) => {
       ffmpeg.ffprobe(tmpIn, (err, data) => resolve(err ? {} : data));
     });
     const v = (meta.streams || []).find(s => s.codec_type === 'video') || {};
     rotate = Number((v.tags && v.tags.rotate) || 0) || 0;
+     const dur = Number(v.duration || meta.format?.duration || 0);
+    durationSec = Number.isFinite(dur) && dur > 0 ? Math.round(dur) : null;
   } catch (_) {
     // si falla ffprobe, seguimos sin rotación detectada (forzamos normalización igual)
   }
@@ -640,8 +647,9 @@ export async function sendVideoWithAutoRotate(phoneOrJid, srcUrlOrPath, { second
   // 5) Enviar a WA como buffer
   const buf = fs.readFileSync(tmpOut);
   const msg = { video: buf, mimetype: 'video/mp4' };
-  if (fileName) msg.fileName = fileName;
-  if (Number.isFinite(seconds)) msg.seconds = Math.max(1, Math.round(seconds));
+  if (caption) msg.caption = caption;
+   const sec = Number.isFinite(seconds) ? seconds : durationSec;
+  if (Number.isFinite(sec)) msg.seconds = Math.max(1, Math.round(sec));
 
   await sock.sendMessage(jid, msg, { timeoutMs: 120_000 });
 

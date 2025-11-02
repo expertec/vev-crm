@@ -319,15 +319,13 @@ async function deliverPayload(leadId, payload) {
       break;
     }
 
-    case 'video': {
-           const url = replacePlaceholders(contenido, lead).trim();
-      // seconds ya viene calculado arriba si lo enviaste desde front
-      if (url) {
-        await sendVideoWithAutoRotate(e164, url, { seconds, fileName: 'video.mp4', width: 720 });
-        await persistOutgoing(leadId, { content: '', mediaType: 'video', mediaUrl: url });
-      }
-      break;
-    }
+   case 'video': {
+  const url = replacePlaceholders(job.payload?.url || '', leadData).trim();
+  if (url) {
+    await sendVideoWithAutoRotate(leadData.telefono, url, { caption: job.payload?.caption || '' });
+  }
+  break;
+}
 
     case 'videonota': { // ← incluye 'video_note', 'video-note', 'ptv', etc. por normalización
       const url = replacePlaceholders(contenido, lead).trim();
@@ -393,6 +391,38 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
 
   for (const job of jobs) {
     try {
+      const jobRef = job.ref;
+
+      // -------- 🔒 RECLAMO ATÓMICO DEL JOB (evita duplicados) --------
+      let claimed = false;
+      await db.runTransaction(async (tx) => {
+        const snapTx = await tx.get(jobRef);
+        const d = snapTx.data();
+        const dueMs = d?.dueAt?.toMillis?.() ?? 0;
+
+        // solo reclamar si sigue 'pending' y ya venció
+        if (!d || d.status !== 'pending' || dueMs > Date.now()) {
+          throw new Error('SKIP');
+        }
+
+        tx.update(jobRef, {
+          status: 'processing',
+          claimedAt: FieldValue.serverTimestamp(),
+          claimedBy: process.env.RENDER_INSTANCE_ID || 'single',
+        });
+        claimed = true;
+      }).catch(err => {
+        if (err?.message !== 'SKIP') {
+          console.error('[QUEUE] error al reclamar job:', err);
+        }
+      });
+
+      if (!claimed) {
+        // otro worker ya lo tomó o aún no vence: saltar
+        continue;
+      }
+      // -------- 🔒 FIN RECLAMO ATÓMICO --------
+
       // obtener estado del lead (cacheado)
       let lead = leadCache.get(job.leadId);
       if (!lead) {
@@ -401,7 +431,7 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
       }
       if (!lead) {
         // si el lead no existe, marca error y sigue
-        await job.ref.update({
+        await jobRef.update({
           status: 'error',
           processedAt: FieldValue.serverTimestamp(),
           error: 'Lead no existe'
@@ -427,7 +457,7 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
       }
 
       if (stopState === 'paused') {
-        await job.ref.update({
+        await jobRef.update({
           status: 'paused',
           processedAt: FieldValue.serverTimestamp()
         });
@@ -436,7 +466,7 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
 
       if (stopState === 'stopped') {
         // marca este job como cancelado y borra el resto pendientes del lead
-        await job.ref.update({
+        await jobRef.update({
           status: 'canceled',
           processedAt: FieldValue.serverTimestamp(),
           error: 'Lead con stop flag/etiqueta'
@@ -453,7 +483,7 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
       // entrega normal
       await deliverPayload(job.leadId, job.payload);
 
-      await job.ref.update({
+      await jobRef.update({
         status: 'sent',
         processedAt: FieldValue.serverTimestamp()
       });
@@ -493,6 +523,7 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
 
   return jobs.length;
 }
+
 
 // alias opcional usado por scheduler
 export const processDueSequenceJobs = processQueue;
