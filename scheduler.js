@@ -1,7 +1,9 @@
 // scheduler.js
 import admin from 'firebase-admin';
 import { db } from './firebaseAdmin.js';
-import { getWhatsAppSock } from './whatsappService.js';
+
+import { getWhatsAppSock, sendVideoWithAutoRotate } from './whatsappService.js';
+
 
 import axios from 'axios';
 import { jsonrepair } from 'jsonrepair';
@@ -518,7 +520,10 @@ export async function enviarMensaje(lead, mensaje) {
       }
       case 'video': {
         const url = replacePlaceholders(mensaje.contenido, lead).trim();
-        if (url) await sock.sendMessage(jid, { video: { url } });
+        if (url) {
+   // puedes pasar segundos/fileName si los tienes:
+   await sendVideoWithAutoRotate(lead.telefono, url, { fileName: 'video.mp4', width: 720 });
+ }
         break;
       }
       default:

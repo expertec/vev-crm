@@ -5,6 +5,7 @@ import {
   getWhatsAppSock,
   sendVideoNote,
   sendAudioMessage,
+   sendVideoWithAutoRotate,
 } from './whatsappService.js';
 
 const { FieldValue } = admin.firestore;
@@ -319,9 +320,10 @@ async function deliverPayload(leadId, payload) {
     }
 
     case 'video': {
-      const url = replacePlaceholders(contenido, lead).trim();
+           const url = replacePlaceholders(contenido, lead).trim();
+      // seconds ya viene calculado arriba si lo enviaste desde front
       if (url) {
-        await sock.sendMessage(jid, { video: { url } }, { timeoutMs: 120_000 });
+        await sendVideoWithAutoRotate(e164, url, { seconds, fileName: 'video.mp4', width: 720 });
         await persistOutgoing(leadId, { content: '', mediaType: 'video', mediaUrl: url });
       }
       break;
