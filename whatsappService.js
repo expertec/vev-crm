@@ -9,24 +9,13 @@ import {
 import QRCode from 'qrcode-terminal';
 import Pino from 'pino';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import axios from 'axios';
 import admin from 'firebase-admin';
 import { db } from './firebaseAdmin.js';
-
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-
-// (opcional) si tienes @ffprobe-installer/ffprobe en package.json, usa su binario;
-// si no, fluent-ffmpeg intentará usar el del sistema.
-try {
-  const ffprobeInstaller = await import('@ffprobe-installer/ffprobe').then(m => m.default || m);
-  if (ffprobeInstaller?.path) {
-    ffmpeg.setFfprobePath(ffprobeInstaller.path);
-  }
-} catch (_) { /* ignore - optional */ }
 
 // Cola de secuencias
 import { scheduleSequenceForLead, cancelSequences } from './queue.js';
@@ -73,7 +62,7 @@ function extractHashtags(text = '') {
   return found ? Array.from(new Set(found)) : [];
 }
 
-// Normaliza a formato que WhatsApp acepta para MX.
+// Normaliza a formato que WhatsApp acepta para MX:
 // - 10 dígitos → 521 + 10
 // - 52XXXXXXXXXX (12 dígitos) → 521XXXXXXXXXX
 // - 521XXXXXXXXXX → se mantiene
@@ -145,6 +134,7 @@ function shouldBlockSequences(leadData, nextTrigger) {
   return false;
 }
 
+/* ---------------------------- conexión WA ---------------------------- */
 /* ---------------------------- conexión WA ---------------------------- */
 export async function connectToWhatsApp() {
   try {
@@ -269,7 +259,7 @@ export async function connectToWhatsApp() {
             content = '';
           }
 
-          // ---------- Branch fromMe: guarda mensaje propio sin tocar nombre ----------
+          // ---------- CAMBIO 1: branch fromMe NO toca 'nombre' ----------
           if (sender === 'business') {
             const leadRef = db.collection('leads').doc(leadId);
             const msgData = {
@@ -318,7 +308,10 @@ export async function connectToWhatsApp() {
               lastMessageAt: now(),
             });
 
+            // Reglas de cancelación por trigger
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
+
+            // Programa aunque sea "default" (es el primer contacto)
             const canSchedule = !shouldBlockSequences({}, trigger);
             if (canSchedule) {
               await scheduleSequenceForLead(leadId, trigger, now());
@@ -331,17 +324,19 @@ export async function connectToWhatsApp() {
             const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
             await leadRef.update({ lastMessageAt: now() });
 
-            // Sólo si viene del lead y nombre está vacío
+            // ---------- CAMBIO 2: sólo si viene del lead y nombre está vacío ----------
             if (!current.nombre && msg.pushName) {
               await leadRef.set({ nombre: msg.pushName }, { merge: true });
             }
 
             await leadRef.set({ etiquetas: FieldValue.arrayUnion(trigger) }, { merge: true });
 
+            // Reglas de cancelación por trigger
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
+
             const blocked = shouldBlockSequences(current, trigger);
 
-            // Reprogramar solo si el trigger viene de hashtag/DB y no está bloqueado
+            // Solo reprogramar si vino por hashtag/DB y no está bloqueado
             if (!blocked && (rule.source === 'hashtag' || rule.source === 'db')) {
               await scheduleSequenceForLead(leadId, trigger, now());
               console.log('[WA] Lead ACTUALIZADO (reprogramado por hashtag/db):', { leadId, trigger, source: rule.source });
@@ -434,26 +429,28 @@ export async function sendFullAudioAsDocument(phone, fileUrl) {
 }
 
 // Enviar audio con soporte de "Reenviado", PTT y quoted.
+// Acepta: phoneOrJid (E164/jid/10 dígitos), audio = Buffer | { url } | string (url o ruta local)
+// Enviar audio como NOTA DE VOZ (PTT) con soporte opcional de “Reenviado”
 export async function sendAudioMessage(phoneOrJid, audioSrc, {
-  ptt = true,
+  ptt = true,                   // ← por defecto true para forzar estilo PTT
   forwarded = false,
   quoted = null
 } = {}) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
-  // Resolver JID (acepta JID directo o teléfono)
+  // --- Resolver JID (acepta JID directo o teléfono/E.164/10 dígitos MX) ---
   const raw = String(phoneOrJid || '');
   const digits = raw.replace(/\D/g, '');
   const norm = (() => {
-    if (raw.includes('@s.whatsapp.net')) return raw;
-    if (/^\d{10}$/.test(digits)) return `521${digits}`;
-    if (/^52\d{10}$/.test(digits)) return `521${digits.slice(2)}`;
-    return digits;
+    if (raw.includes('@s.whatsapp.net')) return raw;             // ya es JID
+    if (/^\d{10}$/.test(digits)) return `521${digits}`;          // MX 10 → 521 + 10
+    if (/^52\d{10}$/.test(digits)) return `521${digits.slice(2)}`;// 52+10 → 521+10
+    return digits;                                               // 521… u otros
   })();
   const jid = norm.includes('@s.whatsapp.net') ? norm : `${norm}@s.whatsapp.net`;
 
-  // Preparar fuente (URL, Buffer o path). Para PTT: OGG/OPUS recomendado
+  // --- Preparar fuente (URL, Buffer o path). Para PTT: OGG/OPUS recomendado ---
   const isHttp = (v) => typeof v === 'string' && /^https?:/i.test(v);
   const audioPayload =
     (typeof audioSrc === 'string')
@@ -463,9 +460,10 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
 
   if (!audioPayload) throw new Error('Fuente de audio inválida');
 
+  // --- Mensaje PTT: mimetype opus + ptt:true; banner “Reenviado” se adjunta en el payload ---
   const message = {
     audio: audioPayload,
-    mimetype: 'audio/ogg; codecs=opus',
+    mimetype: 'audio/ogg; codecs=opus',   // ← clave para estilo PTT
     ptt: !!ptt,
     ...(forwarded ? { contextInfo: { isForwarded: true, forwardingScore: 5 } } : {})
   };
@@ -475,6 +473,8 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
 
   return sock.sendMessage(jid, message, options);
 }
+
+
 
 /**
  * Envía audio por URL. Si es .ogg/.opus lo envía como **nota de voz** (PTT).
@@ -494,7 +494,7 @@ export async function sendClipMessage(phone, clipUrl) {
 
   const opts = { timeoutMs: 120_000, sendSeen: false };
 
-  // 1) Primer intento: por URL directa
+  // 1) Primer intento: enviar por URL directa
   try {
     await sock.sendMessage(jid, urlPayload, opts);
     console.log(`✅ clip enviado por URL a ${jid}`);
@@ -503,11 +503,12 @@ export async function sendClipMessage(phone, clipUrl) {
     console.warn(`⚠️ fallo envío por URL: ${err?.message || err}`);
   }
 
-  // 2) Fallback: descargar y enviar como buffer
+  // 2) Fallback: descargar y enviar como buffer (evita bloqueos de lectura remota)
   try {
     const res = await axios.get(clipUrl, { responseType: 'arraybuffer' });
     const buf = Buffer.from(res.data);
 
+    // Detecta mimetype si no viene claro
     const mime =
       isOgg ? 'audio/ogg; codecs=opus' :
       (res.headers['content-type']?.toLowerCase().startsWith('audio/')
@@ -521,7 +522,7 @@ export async function sendClipMessage(phone, clipUrl) {
     return;
   } catch (err2) {
     console.error(`❌ envío de clip falló también con buffer: ${err2?.message || err2}`);
-    throw err2;
+    throw err2; // deja que la cola marque el job con error
   }
 }
 
@@ -561,106 +562,14 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
   }
 }
 
-/* -------------------- VIDEO: auto-rotar y normalizar antes de enviar -------------------- */
 /**
- * Descarga (si es URL) y re-encodea el video “horneando” la rotación para evitar
- * que se vea acostado. También normaliza SAR=1 y formato yuv420p (compatibilidad WA).
- *
- * @param {string} phoneOrJid  Teléfono (10 dígitos MX, 52/521…) o JID completo.
- * @param {string} srcUrlOrPath  URL http(s) o ruta local.
- * @param {object} opts
- *   - seconds: number|null       // pista de duración para WA (opcional)
- *   - fileName: string           // nombre visible del archivo (opcional)
- *   - width: number              // ancho objetivo (default 720). Mantiene aspect ratio.
+ * Envía **video note** (video redondo).
  */
-export async function sendVideoWithAutoRotate(
-  phoneOrJid,
-  srcUrlOrPath,
-  { seconds = null, fileName = 'video.mp4', width = 720, caption = '' } = {}
-) {
-  const sock = getWhatsAppSock();
-  if (!sock) throw new Error('No hay conexión activa con WhatsApp');
-
-  // --- Resolver JID ---
-  const raw = String(phoneOrJid || '');
-  const digits = raw.replace(/\D/g, '');
-  const norm = (() => {
-    if (raw.includes('@s.whatsapp.net')) return raw;
-    if (/^\d{10}$/.test(digits)) return `521${digits}`;
-    if (/^52\d{10}$/.test(digits)) return `521${digits.slice(2)}`;
-    return digits;
-  })();
-  const jid = norm.includes('@s.whatsapp.net') ? norm : `${norm}@s.whatsapp.net`;
-
-  // --- Preparar archivos temporales ---
-  const tmpIn  = path.join(os.tmpdir(), `wa-in-${Date.now()}-${Math.random().toString(36).slice(2)}.mp4`);
-  const tmpOut = path.join(os.tmpdir(), `wa-out-${Date.now()}-${Math.random().toString(36).slice(2)}.mp4`);
-
-  // 1) Obtener fuente
-  if (/^https?:/i.test(srcUrlOrPath)) {
-    const res = await axios.get(srcUrlOrPath, { responseType: 'arraybuffer' });
-    fs.writeFileSync(tmpIn, Buffer.from(res.data));
-  } else {
-    fs.copyFileSync(srcUrlOrPath, tmpIn);
-  }
-
-  // 2) Inspeccionar rotación vía ffprobe (si disponible)
-  let rotate = 0;
- let durationSec = null;
-  try {
-    const meta = await new Promise((resolve) => {
-      ffmpeg.ffprobe(tmpIn, (err, data) => resolve(err ? {} : data));
-    });
-    const v = (meta.streams || []).find(s => s.codec_type === 'video') || {};
-    rotate = Number((v.tags && v.tags.rotate) || 0) || 0;
-     const dur = Number(v.duration || meta.format?.duration || 0);
-    durationSec = Number.isFinite(dur) && dur > 0 ? Math.round(dur) : null;
-  } catch (_) {
-    // si falla ffprobe, seguimos sin rotación detectada (forzamos normalización igual)
-  }
-
-  // 3) Filtros de video
-  // - setsar=1 para quitar pixel aspect raro (iPhone)
-  // - scale mantiene AR con height=-2
-  // - format=yuv420p para compatibilidad
-  const chain = [`scale=${Number(width) || 720}:-2`, 'setsar=1', 'format=yuv420p'];
-  if (rotate === 90)  chain.unshift('transpose=1');
-  if (rotate === 270 || rotate === -90) chain.unshift('transpose=2');
-  if (rotate === 180) chain.unshift('transpose=1,transpose=1');
-
-  // 4) Re-encodear “horneando” la orientación
-  await new Promise((resolve, reject) => {
-    ffmpeg(tmpIn)
-      .videoFilters(chain.join(','))
-      .outputOptions([
-        '-movflags +faststart',
-        '-metadata:s:v:0 rotate=0'
-      ])
-      .videoCodec('libx264')
-      .audioCodec('aac')
-      .output(tmpOut)
-      .on('end', resolve)
-      .on('error', reject)
-      .run();
-  });
-
-  // 5) Enviar a WA como buffer
-  const buf = fs.readFileSync(tmpOut);
-  const msg = { video: buf, mimetype: 'video/mp4' };
-  if (caption) msg.caption = caption;
-   const sec = Number.isFinite(seconds) ? seconds : durationSec;
-  if (Number.isFinite(sec)) msg.seconds = Math.max(1, Math.round(sec));
-
-  await sock.sendMessage(jid, msg, { timeoutMs: 120_000 });
-
-  // 6) Limpiar temporales
-  try { fs.unlinkSync(tmpIn); } catch {}
-  try { fs.unlinkSync(tmpOut); } catch {}
-}
-
 /**
- * (opcional) Enviar videonota (PTV = video redondo).
- * Si mandas material vertical aquí, considera pre-procesarlo con crop/scale para centrar rostro.
+ * Envía **video note** (PTV = video redondo) desde URL o path local.
+ * - Intento 1: enviar por URL (mimetype forzado)
+ * - Intento 2: fallback → descargar y enviar como buffer (evita bloqueos de lectura remota)
+ * - secondsHint (opcional): ayuda a WA a validar duración
  */
 export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
   const sock = getWhatsAppSock();
@@ -672,7 +581,7 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
   const opts = { timeoutMs: 120_000, sendSeen: false };
 
   const buildMsg = (video) => {
-    const msg = { video, ptv: true, mimetype: 'video/mp4' };
+    const msg = { video, ptv: true, mimetype: 'video/mp4' }; // ← fuerza mimetype
     if (Number.isFinite(secondsHint)) {
       msg.seconds = Math.max(1, Math.round(secondsHint));
     }
@@ -681,18 +590,23 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
 
   const isHttp = String(videoUrlOrPath).startsWith('http');
 
+  // 1) Intento por URL directa
   if (isHttp) {
     try {
       await sock.sendMessage(jid, buildMsg({ url: videoUrlOrPath }), opts);
       console.log(`✅ videonota enviada por URL a ${jid}`);
     } catch (e1) {
       console.warn(`[videonota] fallo por URL: ${e1?.message || e1}`);
+      // 2) Fallback: descargar y enviar como buffer
       try {
         const res = await axios.get(videoUrlOrPath, { responseType: 'arraybuffer' });
         const buf = Buffer.from(res.data);
+
+        // Si el server nos da un video/* lo respetamos; si no, dejamos 'video/mp4'
         const ct = String(res.headers?.['content-type'] || '').toLowerCase();
         const msg = buildMsg(buf);
         if (ct.startsWith('video/')) msg.mimetype = ct;
+
         await sock.sendMessage(jid, msg, opts);
         console.log(`✅ videonota enviada como buffer a ${jid} (mime=${msg.mimetype})`);
       } catch (e2) {
@@ -701,6 +615,7 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
       }
     }
   } else {
+    // Path local
     const buf = fs.readFileSync(videoUrlOrPath);
     await sock.sendMessage(jid, buildMsg(buf), opts);
     console.log(`✅ videonota enviada desde archivo local a ${jid}`);
@@ -721,3 +636,4 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
     await db.collection('leads').doc(leadId).update({ lastMessageAt: msgData.timestamp });
   }
 }
+
