@@ -18,7 +18,9 @@ import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // Cola de secuencias
-import { scheduleSequenceForLead, cancelSequences } from './queue.js';
+// Cola de secuencias
+import { scheduleSequenceForLead, cancelSequences, cancelAllSequences } from './queue.js';
+
 
 let latestQR = null;
 let connectionStatus = 'Desconectado';
@@ -260,24 +262,49 @@ export async function connectToWhatsApp() {
           }
 
           // ---------- CAMBIO 1: branch fromMe NO toca 'nombre' ----------
-          if (sender === 'business') {
-            const leadRef = db.collection('leads').doc(leadId);
-            const msgData = {
-              content,
-              mediaType,
-              mediaUrl,
-              sender,
-              timestamp: now(),
-            };
-            await leadRef.set({
-              telefono: normNum,
-              source: 'WhatsApp',
-              lastMessageAt: msgData.timestamp,
-            }, { merge: true });
-            await leadRef.collection('messages').add(msgData);
-            console.log('[WA] (fromMe) Mensaje propio guardado →', leadId);
-            continue;
-          }
+          // ---------- fromMe: guardar mensaje y permitir comandos administrativos ----------
+if (sender === 'business') {
+  const leadRef = db.collection('leads').doc(leadId);
+
+  // 1) Persistimos el mensaje propio en el hilo
+  const msgData = {
+    content,
+    mediaType,
+    mediaUrl,
+    sender,
+    timestamp: now(),
+  };
+  await leadRef.set({
+    telefono: normNum,
+    source: 'WhatsApp',
+    lastMessageAt: msgData.timestamp,
+  }, { merge: true });
+  await leadRef.collection('messages').add(msgData);
+
+  // 2) Comando #ok → detener TODAS las secuencias y bloquear futuros envíos
+  const textLower = String(content || '').toLowerCase();
+  if (/\B#ok\b/.test(textLower)) {
+    try {
+      // cancela TODO lo pendiente
+      await cancelAllSequences(leadId);
+
+      // aplica "paro duro" para que la cola no envíe nada más en este lead
+      await leadRef.set({
+        stopSequences: true,
+        hasActiveSequences: false,
+        etiquetas: FieldValue.arrayUnion('DetenerSecuencia')
+      }, { merge: true });
+
+      console.log(`[WA] #ok → secuencias canceladas y bloqueo aplicado a ${leadId}`);
+    } catch (e) {
+      console.warn('[WA] error aplicando #ok:', e?.message || e);
+    }
+  }
+
+  console.log('[WA] (fromMe) Mensaje propio guardado →', leadId);
+  continue;
+}
+
 
           // ------- config global + resolver trigger (hashtags > DB > estático > default) -------
           const cfgSnap = await db.collection('config').doc('appConfig').get();
