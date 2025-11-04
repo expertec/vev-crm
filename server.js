@@ -87,6 +87,45 @@ function extractText(resp, mode) {
     return resp?.data?.choices?.[0]?.message?.content?.trim() || '';
   } catch { return ''; }
 }
+
+
+
+// === Helper: subir imagen base64 a Firebase Storage y devolver URL pública
+async function uploadBase64Image({ base64, folder = 'web-assets', filenamePrefix = 'img', contentType = 'image/png' }) {
+  if (!base64) return null;
+  try {
+    // base64 puede venir como "data:image/png;base64,AAAA..." o puro base64
+    const matches = String(base64).match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/);
+    const mime = matches ? matches[1] : (contentType || 'image/png');
+    const b64  = matches ? matches[2] : base64;
+
+    const buffer = Buffer.from(b64, 'base64');
+    const ts = Date.now();
+    const fileName = `${folder}/${filenamePrefix}_${ts}.png`; // si quieres respeta extensión desde mime
+    const file = admin.storage().bucket().file(fileName);
+
+    await file.save(buffer, {
+      contentType: mime,
+      metadata: { cacheControl: 'public,max-age=31536000' },
+      resumable: false,
+      public: true,
+      validation: false,
+    });
+
+    // Asegura que sea público; en buckets con uniform access suele bastar el ACL default
+    try { await file.makePublic(); } catch { /* noop si ya es público */ }
+
+    return `https://storage.googleapis.com/${admin.storage().bucket().name}/${fileName}`;
+  } catch (err) {
+    console.error('[uploadBase64Image] error:', err);
+    return null;
+  }
+}
+
+
+
+
+
 async function chatCompletionCompat({ model, messages, max_tokens = 300, temperature = 0.55 }) {
   const { client, mode } = await getOpenAI();
   if (mode === 'v4-chat') {
@@ -340,6 +379,8 @@ app.post('/api/whatsapp/mark-read', async (req, res) => {
 
 // ============== after-form (web) ==============
 // Acepta { leadId, leadPhone, summary, negocioId? }
+// ============== after-form (web) ==============
+// Acepta { leadId, leadPhone, summary, negocioId? }
 app.post('/api/web/after-form', async (req, res) => {
   try {
     const { leadId, leadPhone, summary, negocioId } = req.body || {};
@@ -351,7 +392,7 @@ app.post('/api/web/after-form', async (req, res) => {
     const finalLeadId = leadId || e164ToLeadId(e164);
     const leadPhoneDigits = e164.replace('+', '');
 
-    // 2) Verificar/crear lead
+    // 2) Verificar/crear lead  ✅ (NO guardar campos del negocio aquí)
     const leadRef  = db.collection('leads').doc(finalLeadId);
     const leadSnap = await leadRef.get();
     if (!leadSnap.exists) {
@@ -368,15 +409,47 @@ app.post('/api/web/after-form', async (req, res) => {
     }
     const leadData = (await leadRef.get()).data() || {};
 
-    // 3) Guardar brief en el lead
+    // 3) Guardar brief en el lead (puedes incluir aquí metadata del brief si quieres)
     await leadRef.set({
       briefWeb: summary || {},
       etiquetas: admin.firestore.FieldValue.arrayUnion('FormularioCompletado'),
       lastMessageAt: new Date(),
     }, { merge: true });
 
+    // 3.5) Subir assets (logo e imágenes) a Storage y obtener URLs
+    let uploadedLogoURL = null;
+    let uploadedPhotos = [];
+    try {
+      const assets = summary?.assets || {};
+      const { logo, images = [] } = assets;
+
+      if (logo) {
+        uploadedLogoURL = await uploadBase64Image({
+          base64: logo,
+          folder: `web-assets/${(summary.slug || 'site').toLowerCase()}`,
+          filenamePrefix: 'logo'
+        });
+      }
+
+      if (Array.isArray(images)) {
+        for (let i = 0; i < Math.min(images.length, 3); i++) {
+          const b64 = images[i];
+          if (!b64) continue;
+          const url = await uploadBase64Image({
+            base64: b64,
+            folder: `web-assets/${(summary.slug || 'site').toLowerCase()}`,
+            filenamePrefix: `photo_${i + 1}`
+          });
+          if (url) uploadedPhotos.push(url);
+        }
+      }
+    } catch (e) {
+      console.error('[after-form] error subiendo assets:', e);
+    }
+
     // 4) Crear/actualizar Negocios — BLOQUEA duplicado por WhatsApp
     let negocioDocId = negocioId;
+    let finalSlug = summary.slug || '';
     if (!negocioDocId) {
       const existSnap = await db.collection('Negocios')
         .where('leadPhone', '==', leadPhoneDigits)
@@ -393,78 +466,64 @@ app.post('/api/web/after-form', async (req, res) => {
         });
       }
 
+      // crear documento en Negocios  ✅ (aquí sí van template/color/assets)
       const ref = await db.collection('Negocios').add({
         leadId: finalLeadId,
         leadPhone: leadPhoneDigits,
         status: 'Sin procesar',
+
         companyInfo:     summary.companyName || '',
         businessSector:  summary.businessType || '',
+        businessStory:   summary.businessStory || '',
+
+        templateId:      String(summary.templateId || 'info').toLowerCase(),
+        primaryColor:    summary.primaryColor || null,
         palette:         summary.palette || (summary.primaryColor ? [summary.primaryColor] : []),
         keyItems:        summary.keyItems || [],
+
         contactWhatsapp: summary.contactWhatsapp || '',
         contactEmail:    summary.email || '',
         socialFacebook:  summary.socialFacebook || '',
         socialInstagram: summary.socialInstagram || '',
-        logoURL:         summary.logoURL || '',
-        slug:            summary.slug || '',
-        createdAt:       new Date()
+
+        logoURL:   uploadedLogoURL || summary.logoURL || '',
+        photoURLs: uploadedPhotos && uploadedPhotos.length ? uploadedPhotos : (summary.photoURLs || []),
+
+        slug:      summary.slug || '',
+        createdAt: new Date()
       });
       negocioDocId = ref.id;
+      finalSlug = summary.slug || '';
     }
 
-    // 5) Transición de secuencias: SOLO cancelar captación (NO activar WebEnviada aquí)
-    try {
-      if (cancelSequences) {
-        await cancelSequences(finalLeadId, ['NuevoLead', 'NuevoLeadWeb', 'LeadWeb']);
-        await leadRef.set({ nuevoLeadWebCancelled: true }, { merge: true });
-      }
-    } catch (e) {
-      console.warn('[after-form] cancelación de secuencias falló:', e?.message);
-    }
-
-    // 6) Empatía en DOS mensajes con delay realista (no técnico)
+    // (empatía + respuesta)
     const nombreCorto = firstName(leadData?.nombre || summary?.contactName || '');
     const giroHumano  = humanizeGiro(summary?.businessType || summary?.businessSector || '');
     const [op1, op2, op3] = pickOpportunityTriplet(giroHumano);
 
-    const msg1 =
-      `${nombreCorto ? nombreCorto + ', ' : ''}ya recibí tu formulario. ` +
-      `Mi equipo y yo ya estamos trabajando en tu muestra para que quede clara y útil.`;
+    const msg1 = `${nombreCorto ? nombreCorto + ', ' : ''}ya recibí tu formulario. Mi equipo y yo ya estamos trabajando en tu muestra para que quede clara y útil.`;
+    const msg2 = `Platicando con mi equipo, identificamos tres áreas para que tu ${giroHumano} aproveche mejor su web:\n1) ${op1}\n2) ${op2}\n3) ${op3}\nSi te late, las integramos en tu demo y te la comparto.`;
 
-    const msg2 =
-      `Platicando con mi equipo, identificamos tres áreas para que tu ${giroHumano} aproveche mejor su web:\n` +
-      `1) ${op1}\n` +
-      `2) ${op2}\n` +
-      `3) ${op3}\n` +
-      `Si te late, las integramos en tu demo y te la comparto.`;
+    const d1 = 60_000 + Math.floor(Math.random() * 30_000);
+    const d2 = 115_000 + Math.floor(Math.random() * 65_000);
 
-    const d1 = 60_000 + Math.floor(Math.random() * 30_000);  // 60–90s
-    const d2 = 115_000 + Math.floor(Math.random() * 65_000); // 115–180s
+    setTimeout(() => sendMessageToLead(leadPhoneDigits, msg1).catch(console.error), d1);
+    setTimeout(() => sendMessageToLead(leadPhoneDigits, msg2).catch(console.error), d2);
 
-    setTimeout(() => {
-      sendMessageToLead(leadPhoneDigits, msg1)
-        .then(() => leadRef.set({ empathyMsg1At: new Date() }, { merge: true }))
-        .catch(err => console.error('[after-form] empatía msg1 error:', err));
-    }, d1);
-
-    setTimeout(() => {
-      sendMessageToLead(leadPhoneDigits, msg2)
-        .then(() => leadRef.set({ empathyMsg2At: new Date() }, { merge: true }))
-        .catch(err => console.error('[after-form] empatía msg2 error:', err));
-    }, d2);
-
-    // 7) Marcar estado/etiqueta
     await leadRef.set({
       etapa: 'form_submitted',
       etiquetas: admin.firestore.FieldValue.arrayUnion('FormOK')
     }, { merge: true });
 
-    return res.json({ ok: true, negocioId: negocioDocId });
+    // ✅ devuelve también el slug
+    return res.json({ ok: true, negocioId: negocioDocId, slug: finalSlug });
   } catch (e) {
     console.error('/api/web/after-form error:', e);
     return res.status(500).json({ error: String(e?.message || e) });
   }
 });
+
+
 
 // ============== Activar WebEnviada tras mandar link ==============
 // Acepta { leadId?, leadPhone?, link? } — activa 'WebEnviada' 15 min después
@@ -580,6 +639,8 @@ app.post('/api/whatsapp/send-video-note', async (req, res) => {
 
 // ============== sample-create (nuevo, para el formulario turbo) ==============
 // Acepta { leadPhone, summary: { companyName, businessStory, slug } }
+// ============== sample-create (turbo, ahora con plantillas y assets) ==============
+// Acepta { leadPhone, summary: { companyName, businessStory, slug, templateId?, primaryColor?, assets? } }
 app.post('/api/web/sample-create', async (req, res) => {
   try {
     const { leadPhone, summary } = req.body || {};
@@ -598,7 +659,6 @@ app.post('/api/web/sample-create', async (req, res) => {
       .where('leadPhone', '==', leadPhoneDigits)
       .limit(1)
       .get();
-
     if (!existSnap.empty) {
       const exist = existSnap.docs[0];
       const existData = exist.data() || {};
@@ -613,7 +673,7 @@ app.post('/api/web/sample-create', async (req, res) => {
     const finalSlug = await ensureUniqueSlug(summary.slug || summary.companyName);
 
     // Crea/asegura el lead
-    const leadRef = db.collection('leads').doc(finalLeadId);
+    const leadRef  = db.collection('leads').doc(finalLeadId);
     const leadSnap = await leadRef.get();
     if (!leadSnap.exists) {
       await leadRef.set({
@@ -628,21 +688,64 @@ app.post('/api/web/sample-create', async (req, res) => {
       }, { merge: true });
     }
 
-    // Crea el Negocio
+    // ⬆️ Subir assets (logo e imágenes) a Storage y obtener URLs
+    let uploadedLogoURL = null;
+    let uploadedPhotos = [];
+    try {
+      const assets = summary?.assets || {};
+      const { logo, images = [] } = assets;
+
+      if (logo) {
+        uploadedLogoURL = await uploadBase64Image({
+          base64: logo,
+          folder: `web-assets/${(finalSlug || 'site').toLowerCase()}`,
+          filenamePrefix: 'logo'
+        });
+      }
+
+      if (Array.isArray(images)) {
+        for (let i = 0; i < Math.min(images.length, 3); i++) {
+          const b64 = images[i];
+          if (!b64) continue;
+          const url = await uploadBase64Image({
+            base64: b64,
+            folder: `web-assets/${(finalSlug || 'site').toLowerCase()}`,
+            filenamePrefix: `photo_${i + 1}`
+          });
+          if (url) uploadedPhotos.push(url);
+        }
+      }
+    } catch (e) {
+      console.error('[sample-create] error subiendo assets:', e);
+    }
+
+    // Crea el Negocio con plantilla/color/urls
     const ref = await db.collection('Negocios').add({
       leadId: finalLeadId,
       leadPhone: leadPhoneDigits,
       status: 'Sin procesar',
+
       companyInfo:     summary.companyName,
       businessSector:  '',
       businessStory:   summary.businessStory,
-      palette:         [],
+
+      // Plantilla y color
+      templateId:      summary.templateId || 'info',           // 'ecommerce' | 'info' | 'booking'
+      primaryColor:    summary.primaryColor || null,
+      palette:         summary.primaryColor ? [summary.primaryColor] : [],
+
       keyItems:        [],
-      contactWhatsapp: '',
-      contactEmail:    '',
-      socialFacebook:  '',
-      socialInstagram: '',
-      logoURL:         '',
+
+      // Contacto y redes
+      contactWhatsapp: summary.contactWhatsapp || '',
+      contactEmail:    summary.email || '',
+      socialFacebook:  summary.socialFacebook || '',
+      socialInstagram: summary.socialInstagram || '',
+
+      // Assets subidos
+      logoURL:         uploadedLogoURL || summary.logoURL || '',
+      photoURLs:       uploadedPhotos && uploadedPhotos.length ? uploadedPhotos : (summary.photoURLs || []),
+
       slug:            finalSlug,
       createdAt:       new Date()
     });
@@ -653,6 +756,8 @@ app.post('/api/web/sample-create', async (req, res) => {
         companyName: summary.companyName,
         businessStory: summary.businessStory,
         slug: finalSlug,
+        templateId: summary.templateId || 'info',
+        primaryColor: summary.primaryColor || null,
         turbo: true
       },
       etiquetas: admin.firestore.FieldValue.arrayUnion('FormularioTurbo'),
@@ -665,6 +770,7 @@ app.post('/api/web/sample-create', async (req, res) => {
     return res.status(500).json({ error: String(e?.message || e) });
   }
 });
+
 
 // ============== Arranque servidor + WA ==============
 app.listen(port, () => {

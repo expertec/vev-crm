@@ -11,6 +11,118 @@ import * as Q from './queue.js';
 // OpenAI compat (v3/v4)
 import OpenAIImport from 'openai';
 
+
+
+
+function pickPrimaryColor(data) {
+  // Si el cliente eligió un color, úsalo; si no, usa normalizeColors/forzados
+  if (data.primaryColor && /^#(?:[0-9a-f]{3}){1,2}$/i.test(data.primaryColor)) {
+    return data.primaryColor;
+  }
+  // fallback a palette[0]
+  const fromPalette = Array.isArray(data.palette) && data.palette[0];
+  return fromPalette || '#16a34a';
+}
+
+function buildSchemaForTemplate(data) {
+  const template = (data.templateId || 'info').toLowerCase(); // 'ecommerce' | 'info' | 'booking'
+  const brand    = data.companyInfo || data.slug || 'Mi Negocio';
+  const waDigits = data.contactWhatsapp || data.leadPhone || '';
+  const waUrl    = waDigits ? `https://wa.me/${waDigits}` : '';
+
+  // Imágenes
+  const heroImg = Array.isArray(data.photoURLs) && data.photoURLs[0]
+    ? data.photoURLs[0]
+    : unsplashFallback(brand, 1600, 900);
+  const gallery = (Array.isArray(data.photoURLs) && data.photoURLs.length > 0)
+    ? data.photoURLs
+    : [unsplashFallback(brand, 1200, 800), unsplashFallback(brand, 1200, 800), unsplashFallback(brand, 1200, 800)];
+
+  const primary = pickPrimaryColor(data);
+  const colors = normalizeColors({ primary }, { primary, secondary:'#0ea5e9', accent:'#f59e0b', text:'#111827' });
+
+  // Bloques comunes
+  const base = {
+    slug: data.slug,
+    brand: {
+      name: brand,
+      logo: data.logoURL || null
+    },
+    contact: {
+      whatsapp: waDigits || '',
+      email: data.contactEmail || '',
+      facebook: data.socialFacebook || '',
+      instagram: data.socialInstagram || ''
+    },
+    colors,
+    hero: {
+      title: brand,
+      subtitle: data.businessSector || data.businessStory || '',
+      image: heroImg,
+      ctaText: 'Hablar por WhatsApp',
+      ctaUrl: waUrl || '#'
+    },
+    gallery
+  };
+
+  if (template === 'ecommerce') {
+    // Productos básicos de muestra; luego podrás mapear desde keyItems
+    const items = (Array.isArray(data.keyItems) && data.keyItems.length > 0)
+      ? data.keyItems.map((k, i) => ({
+          id: `p${i+1}`, title: k.title || k, price: k.price || 199, image: gallery[i % gallery.length],
+        }))
+      : [
+          { id:'p1', title:'Producto 1', price:149, image:gallery[0] },
+          { id:'p2', title:'Producto 2', price:249, image:gallery[1] },
+          { id:'p3', title:'Producto 3', price:199, image:gallery[2] },
+        ];
+
+    return {
+      templateId: 'ecommerce',
+      ...base,
+      ecommerce: {
+        currency: 'MXN',
+        cart: { sendToWhatsApp: true },
+        products: items.map(it => ensureWhatsAppButton(it, waUrl))
+      }
+    };
+  }
+
+  if (template === 'booking') {
+    // Reservas por WhatsApp: mostramos horarios de ejemplo y CTA que abre wa.me con el slot
+    const slots = [
+      { id:'s1', label:'Hoy 4:00 PM' },
+      { id:'s2', label:'Hoy 6:00 PM' },
+      { id:'s3', label:'Mañana 11:00 AM' },
+    ];
+    return {
+      templateId: 'booking',
+      ...base,
+      booking: {
+        slots: slots.map(s => ({
+          ...s,
+          buttonUrl: waUrl ? `${waUrl}?text=${encodeURIComponent(`Hola, quiero reservar: ${s.label}`)}` : '#',
+          buttonText: 'Reservar por WhatsApp'
+        }))
+      }
+    };
+  }
+
+  // Presencia (info) por defecto
+  return {
+    templateId: 'info',
+    ...base,
+    info: {
+      features: [
+        { icon: 'BulbOutlined', title: 'Profesional', text: 'Imagen clara y confiable.' },
+        { icon: 'RocketOutlined', title: 'Rápido', text: 'Carga optimizada.' },
+        { icon: 'HeartOutlined', title: 'Hecho para ti', text: 'A tu medida.' }
+      ].map(x => ensureWhatsAppButton(x, waUrl))
+    }
+  };
+}
+
+
 const { FieldValue } = admin.firestore;
 
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
@@ -258,6 +370,7 @@ async function withTaskLock(taskKey, ttlSeconds, fn) {
 }
 
 /* ====================== Generación del site schema ===================== */
+/* ====================== Generación del site schema ===================== */
 export async function generateSiteSchemas() {
   if (!PEXELS_API_KEY) {
     console.warn('⚠️ PEXELS_API_KEY no configurada: se usarán imágenes de Unsplash Source como fallback.');
@@ -315,21 +428,8 @@ Estructura EXACTA a devolver (JSON):
   "products": {
     "title":"<Título productos>",
     "items":[
-      { "title":"<nombre>", "text":"<desc>", "imageUrl":"<img>", "buttonText":"<botón>", "buttonUrl":"<url>" }
+      { "title":"<P1>","text":"<desc>","price":199,"imageUrl":"<URL>","buttonText":"Comprar","buttonUrl":"<URL|WA>" }
     ]
-  },
-  "about": { "title":"<Título>", "text":"<Texto>" },
-  "menu":[
-    {"id":"services","label":"Servicios"},
-    {"id":"about","label":"Nosotros"},
-    {"id":"contact","label":"Contáctanos"}
-  ],
-  "contact": {
-    "whatsapp":"<tel>",
-    "email":"<email>",
-    "facebook":"<url>",
-    "instagram":"<url>",
-    "youtube":"<url>"
   },
   "testimonials": {
     "title":"<Título testimonios>",
@@ -346,14 +446,10 @@ Estructura EXACTA a devolver (JSON):
             { role: 'user', content: promptUser },
           ],
           temperature: 0.6,
-          max_tokens: 1800,
+          max_tokens: 900,
         });
 
-        raw = String(raw || '').trim()
-          .replace(/^```json\s*/i, '')
-          .replace(/```$/i, '')
-          .trim();
-
+        // 1.0 parse/repair
         let schema;
         try {
           schema = JSON.parse(raw);
@@ -374,7 +470,13 @@ Estructura EXACTA a devolver (JSON):
         });
         schema.colors = normalizeColors(schema.colors, forcedPalette);
 
-        // 1.1.2 Logo por defecto o si es placeholder
+        // 1.1.1.1 Override explícito si el cliente eligió color primario
+        if (data.primaryColor && /^#(?:[0-9a-f]{3}){1,2}$/i.test(data.primaryColor)) {
+          schema.colors = schema.colors || {};
+          schema.colors.primary = data.primaryColor;
+        }
+
+        // 1.1.2 Logo por defecto o si es placeholder (luego preferimos el del cliente)
         if (!schema.logoUrl || isPlaceholderUrl(schema.logoUrl)) {
           const seed = data.companyInfo || schema.slug || 'brand';
           schema.logoUrl = `https://api.dicebear.com/8.x/initials/svg?seed=${encodeURIComponent(seed)}&radius=8`;
@@ -398,41 +500,100 @@ Estructura EXACTA a devolver (JSON):
           schema.products.items = schema.products.items.map(it => ensureWhatsAppButton(it, waUrl));
         }
 
-        // 2) Query para imágenes (usa businessStory si no hay sector)
+        // 1.3 Plantilla (templateId) y ajustes por tipo
+        const template = String(data.templateId || 'info').toLowerCase();
+        schema.templateId = template; // para el front
+
+        if (template === 'ecommerce') {
+          // asegura sección productos con botones WA
+          schema.products = schema.products || { title: 'Nuestros productos', items: [] };
+          if (!Array.isArray(schema.products.items) || schema.products.items.length === 0) {
+            schema.products.items = [
+              { title: 'Producto 1', text: 'Descripción breve.', price: 149, imageUrl: '', buttonText: 'Pedir por WhatsApp', buttonUrl: waUrl },
+              { title: 'Producto 2', text: 'Descripción breve.', price: 249, imageUrl: '', buttonText: 'Pedir por WhatsApp', buttonUrl: waUrl },
+              { title: 'Producto 3', text: 'Descripción breve.', price: 199, imageUrl: '', buttonText: 'Pedir por WhatsApp', buttonUrl: waUrl },
+            ];
+          } else {
+            schema.products.items = schema.products.items.map(it => ensureWhatsAppButton(it, waUrl));
+          }
+        } else if (template === 'booking') {
+          // landing orientada a reservar
+          schema.hero.title = schema.hero.title || 'Reserva en minutos';
+          schema.hero.subtitle = schema.hero.subtitle || 'Agenda por WhatsApp de forma rápida.';
+          schema.hero.ctaText = schema.hero.ctaText || 'Reservar por WhatsApp';
+
+          schema.booking = schema.booking || {
+            slots: [
+              { id:'s1', label:'Hoy 4:00 PM' },
+              { id:'s2', label:'Hoy 6:00 PM' },
+              { id:'s3', label:'Mañana 11:00 AM' },
+            ]
+          };
+          schema.booking.slots = (schema.booking.slots || []).map(s => ({
+            ...s,
+            buttonText: s.buttonText || 'Reservar por WhatsApp',
+            buttonUrl: waUrl ? `${waUrl}?text=${encodeURIComponent(`Hola, quiero reservar: ${s.label}`)}` : '#'
+          }));
+        } else {
+          // info (presencia) – dejar que prompt domine y solo asegurar CTAs
+          if (schema.info?.features?.length) {
+            schema.info.features = schema.info.features.map(x => ensureWhatsAppButton(x, waUrl));
+          }
+        }
+
+        // 2) Query base para imágenes de stock (usada solo de fallback)
         const sectorOrStory = Array.isArray(data.businessSector)
           ? data.businessSector.join(', ')
           : (data.businessSector || data.businessStory || data.companyInfo || '');
+        const searchQuery = (
+          (schema.hero?.title ? `${schema.hero.title} ` : '') +
+          sectorOrStory
+        ).trim() || 'business';
 
-        const englishQuery = await chatCompletionCompat({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: 'Convierte el giro o descripción a una frase corta de búsqueda en inglés para fotos de stock.' },
-            { role: 'user', content: `Texto: "${sectorOrStory}". Frase breve (2-4 palabras), sin comillas.` },
-          ],
-          temperature: 0.2,
-          max_tokens: 40,
-        }).then(s => (s || 'business'));
-
-        // 3) Imágenes + reemplazo de placeholders
+        // 3) Preferir ASSETS DEL CLIENTE y luego hacer FALLBACK a stock
         try {
-          const searchQuery =
-            (englishQuery && englishQuery.trim()) ||
-            sectorOrStory ||
-            data.companyInfo ||
-            'business';
+          // 3.1 Preferir logo del cliente
+          if (data.logoURL && (!schema.logoUrl || isPlaceholderUrl(schema.logoUrl))) {
+            schema.logoUrl = data.logoURL;
+          }
 
-          // --- HERO ---
+          // 3.2 Preferir fotos del cliente
+          const customerPhotos = Array.isArray(data.photoURLs) ? data.photoURLs.filter(Boolean) : [];
+
+          // HERO
           if (!schema.hero) schema.hero = {};
           if (!schema.hero.backgroundImageUrl || isPlaceholderUrl(schema.hero.backgroundImageUrl)) {
-            schema.hero.backgroundImageUrl = await getStockImage(`${searchQuery} website banner`, {
-              width: 1600, height: 900
-            });
+            if (customerPhotos[0]) {
+              schema.hero.backgroundImageUrl = customerPhotos[0];
+            }
+          }
+
+          // PRODUCTS
+          if (schema.products?.items && Array.isArray(schema.products.items)) {
+            let k = 0;
+            for (let i = 0; i < schema.products.items.length; i++) {
+              const it = schema.products.items[i] || {};
+              if ((!it.imageUrl || isPlaceholderUrl(it.imageUrl)) && customerPhotos[k]) {
+                it.imageUrl = customerPhotos[k++];
+              }
+              schema.products.items[i] = ensureWhatsAppButton(it, waUrl);
+            }
+          }
+
+          // FEATURED gallery (si la manejas)
+          if (!schema.gallery && customerPhotos.length > 1) {
+            schema.gallery = customerPhotos;
+          }
+
+          // 3.3 Fallback a stock (Pexels/Unsplash) **solo si faltan**
+          // --- HERO ---
+          if (!schema.hero.backgroundImageUrl || isPlaceholderUrl(schema.hero.backgroundImageUrl)) {
+            schema.hero.backgroundImageUrl = await getStockImage(searchQuery, { width: 1600, height: 900 });
           }
 
           // --- PRODUCTS ---
-          if (schema.products && Array.isArray(schema.products.items) && schema.products.items.length) {
-            const limit = Math.min(4, schema.products.items.length);
-            for (let i = 0; i < limit; i++) {
+          if (schema.products?.items && Array.isArray(schema.products.items)) {
+            for (let i = 0; i < schema.products.items.length; i++) {
               const it = schema.products.items[i] || {};
               if (!it.imageUrl || isPlaceholderUrl(it.imageUrl)) {
                 const q = `${searchQuery} ${it.title || 'product'}`;
@@ -477,6 +638,7 @@ Estructura EXACTA a devolver (JSON):
     return processed;
   });
 }
+
 
 /* ================= Envío por WhatsApp (texto / links / media) ========== */
 export async function enviarMensaje(lead, mensaje) {
