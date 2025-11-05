@@ -51,6 +51,8 @@ try {
 import OpenAIImport from 'openai';
 const OpenAICtor = OpenAIImport?.OpenAI || OpenAIImport;
 
+import { classifyBusiness } from './utils/businessClassifier.js';
+
 
 function buildUnsplashFeaturedQueries(summary = {}) {
   const objetivoMap = {
@@ -101,8 +103,13 @@ async function resolveUnsplashFinalUrl(sourceUrl) {
 
 // Usa Pexels como fuente principal (requiere PEXELS_API_KEY) y
 // cae a Unsplash Source (resuelto a URL final) si Pexels falla o no hay resultados.
+// Usa el clasificador (LLM + heurístico) para armar keywords,
+// busca primero en Pexels y cae a Unsplash (resuelto a URL final) si falla.
 async function getStockPhotoUrls(summary, count = 3) {
-  // 1) Armar keywords a partir del objetivo + nombre + primeras palabras de la descripción
+  // 1) Clasificar sector + keywords
+  const { sector, keywords } = await classifyBusiness(summary);
+
+  // 2) Query robusto: sector + keywords + nombre + objetivo
   const objetivoMap = {
     ecommerce: 'tienda online productos',
     booking:   'reservas servicios agenda',
@@ -110,82 +117,39 @@ async function getStockPhotoUrls(summary, count = 3) {
   };
   const objetivo = objetivoMap[String(summary?.templateId || '').toLowerCase()] || 'negocio local';
   const nombre   = (summary?.companyName || summary?.name || summary?.slug || '').toString().trim();
-  const descTop  = (summary?.description || '')
-    .toString()
-    .replace(/https?:\/\/\S+/g, '')
-    .replace(/[^\p{L}\p{N}\s]/gu, '')
-    .split(/\s+/).filter(Boolean).slice(0, 4).join(' ');
-  const query = [objetivo, nombre, descTop].filter(Boolean).join(' ').trim() || 'negocio local';
 
-  // 2) Intentar Pexels primero (si hay API key)
+  const query = [sector, keywords, objetivo, nombre].filter(Boolean).join(' ').trim();
+
+  // 3) PEXELS primero (si hay API key)
   const apiKey = process.env.PEXELS_API_KEY;
   if (apiKey) {
     try {
-      const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=landscape`;
+      const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=landscape&locale=es-ES`;
       const { data } = await axios.get(url, { headers: { Authorization: apiKey } });
       const photos = Array.isArray(data?.photos) ? data.photos : [];
       const pexelsUrls = photos.slice(0, count).map(p =>
         p?.src?.landscape || p?.src?.large2x || p?.src?.large || p?.src?.original
       ).filter(Boolean);
-
       if (pexelsUrls.length) return pexelsUrls;
     } catch (e) {
       console.error('[getStockPhotoUrls] Pexels error:', e?.message || e);
-      // continúa a Unsplash fallback
     }
   }
 
-  // 3) Fallback: Unsplash Source → resolver 302 a URL final del CDN
-  const sources = buildUnsplashFeaturedQueries({
-    templateId: summary?.templateId,
-    companyName: nombre,
-    description: descTop
-  });
+  // 4) Fallback: Unsplash Source → resolver 302 a URL final
+  const termsForUnsplash = [sector, keywords, objetivo, nombre].filter(Boolean).join(',');
+  const q = encodeURIComponent(termsForUnsplash);
+  const w = 1200, h = 800;
+  const sourceList = [
+    `https://source.unsplash.com/featured/${w}x${h}/?${q}&sig=1`,
+    `https://source.unsplash.com/featured/${w}x${h}/?${q}&sig=2`,
+    `https://source.unsplash.com/featured/${w}x${h}/?${q}&sig=3`,
+  ];
   const finals = [];
-  for (const u of sources) {
-    finals.push(await resolveUnsplashFinalUrl(u));
-  }
+  for (const u of sourceList) finals.push(await resolveUnsplashFinalUrl(u));
   return finals.filter(Boolean);
 }
 
-
-function assertOpenAIKey() {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error('Falta la variable de entorno OPENAI_API_KEY');
-  }
-}
-async function getOpenAI() {
-  assertOpenAIKey();
-  try {
-    const client = new OpenAICtor({ apiKey: process.env.OPENAI_API_KEY });
-    const hasChatCompletions = !!client?.chat?.completions?.create;
-    const hasResponses        = !!client?.responses?.create;
-    if (hasChatCompletions) return { client, mode: 'v4-chat' };
-    if (hasResponses)       return { client, mode: 'v4-resp'  };
-  } catch {}
-  const { Configuration, OpenAIApi } = await import('openai');
-  const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY });
-  const client = new OpenAIApi(configuration);
-  return { client, mode: 'v3' };
-}
-function extractText(resp, mode) {
-  try {
-    if (mode === 'v4-chat') return resp?.choices?.[0]?.message?.content?.trim() || '';
-    if (mode === 'v4-resp') {
-      if (resp?.output_text) return String(resp.output_text).trim();
-      const parts = [];
-      const content = resp?.output || resp?.content || [];
-      for (const item of content) {
-        if (typeof item === 'string') parts.push(item);
-        else if (Array.isArray(item?.content)) {
-          for (const c of item.content) if (c?.text?.value) parts.push(c.text.value);
-        } else if (item?.text?.value) parts.push(item.text.value);
-      }
-      return parts.join(' ').trim();
-    }
-    return resp?.data?.choices?.[0]?.message?.content?.trim() || '';
-  } catch { return ''; }
-}
 
 
 
