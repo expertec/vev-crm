@@ -373,8 +373,13 @@ async function withTaskLock(taskKey, ttlSeconds, fn) {
 /* ====================== Generación del site schema ===================== */
 // Reemplaza TODO tu generateSiteSchemas() por esto:
 
+
+
+
+
+// ====================== Generación del site schema (versión "completa") ======================
 export async function generateSiteSchemas() {
-  const BATCH = 6; // cuántos negocios “Sin procesar” tomamos por pasada
+  const BATCH = 6;
   const snap = await db.collection('Negocios')
     .where('status', '==', 'Sin procesar')
     .limit(BATCH)
@@ -391,33 +396,27 @@ export async function generateSiteSchemas() {
     const id   = doc.id;
     const data = doc.data() || {};
 
+    // Insumos del brief
     const companyName   = safe(data.companyInfo, 'Tu Negocio');
-    const businessStory = safe(data.businessStory, 'Descripción breve del negocio.');
-    const templateId    = String(safe(data.templateId, 'info')).toLowerCase(); // 'ecommerce' | 'info' | 'booking'
+    const businessStory = safe(data.businessStory, 'Ayudamos a nuestros clientes con productos y servicios de calidad.');
     const primaryColor  = safe(data.primaryColor, null);
     const palette       = Array.isArray(data.palette) && data.palette.length ? data.palette : (primaryColor ? [primaryColor] : []);
     const logoURL       = safe(data.logoURL, '');
     const photoURLs     = Array.isArray(data.photoURLs) ? data.photoURLs : [];
-    const whatsapp      = safe(data.contactWhatsapp, '');
+    const whatsapp      = safe(data.contactWhatsapp || data.leadPhone, '');
     const email         = safe(data.contactEmail, '');
     const facebook      = safe(data.socialFacebook, '');
     const instagram     = safe(data.socialInstagram, '');
     const youtube       = safe(data.socialYoutube || data.socialYouTube, '');
+    const address       = safe(data.businessAddress, '');
+    const templateId    = 'info'; // Para este layout completo usamos "info" como base
+    const slug          = safe(data.slug, id).toLowerCase();
 
-    const slug = safe(data.slug, id).toLowerCase();
-
-    const goal =
-      templateId === 'ecommerce' ? 'ecommerce' :
-      templateId === 'booking'   ? 'booking'   :
-      'services';
-
-    // ————— Prompt SIN placeholders tipo "string ..." (ejemplos ya entre comillas) —————
+    // Prompt de salida estricta al esquema "completo" (menú ligero + muchas secciones)
     const prompt = `
-Eres un director de UX/UI y copywriting 2025. Devuelve SOLO un JSON válido
-para renderizar un sitio web ${goal} profesional, moderno, responsive y mobile-first.
-NO incluyas comentarios ni texto fuera del JSON.
+Eres un arquitecto UX/UI y copywriter 2025. Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin texto extra).
+Genera el contenido de un sitio de información/servicios "completo", moderno, mobile-first, basado en:
 
-Contexto del negocio:
 - nombre: ${companyName}
 - descripcion: ${businessStory}
 - whatsapp: ${whatsapp}
@@ -426,91 +425,131 @@ Contexto del negocio:
 - logoURL: ${logoURL}
 - photoURLs: ${photoURLs.join(', ')}
 
-Estructura requerida del JSON (usa exactamente estos nombres de claves):
+El menú debe ser LIGERO con solo estas entradas en orden:
+  hero, about, pricing, faqs, contact
+
+Claves obligatorias del JSON y formato exacto:
 
 {
   "slug": "${slug}",
-  "templateId": "${templateId}",
+  "templateId": "info",
   "colors": {
-    "primary": "${primaryColor || (palette[0] || '#16A34A')}",
+    "primary": "${primaryColor || (palette[0] || '#22C55E')}",
     "secondary": "#FFFFFF",
-    "accent": "#F1F5F9",
-    "text": "#222222"
+    "accent": "#DCFCE7",
+    "text": "#1F2937"
   },
   "menu": [
     { "id": "hero", "label": "Inicio" },
-    { "id": "benefits", "label": "Beneficios" },
-    ${goal === 'ecommerce' ? `{ "id": "products", "label": "Productos" },` : `{ "id": "services", "label": "Servicios" },`}
-    { "id": "process", "label": "Cómo Funciona" },
-    { "id": "testimonials", "label": "Opiniones" },
+    { "id": "about", "label": "Nosotros" },
+    { "id": "pricing", "label": "Planes" },
     { "id": "faqs", "label": "Preguntas" },
     { "id": "contact", "label": "Contacto" }
   ],
 
   "hero": {
-    "title": "Título breve y potente",
-    "subtitle": "Subtítulo claro de máximo 18 palabras.",
-    "ctaText": "Escríbenos por WhatsApp",
-    "backgroundImageUrl": "${photoURLs[0] || ''}",
+    "title": "Título potente de máximo 8 palabras",
+    "subtitle": "Beneficio claro en una línea",
+    "ctaText": "Hablar por WhatsApp",
+    "backgroundImageUrl": "${photoURLs[0] || 'https://source.unsplash.com/1600x900/?business'}",
     "kpis": [
-      { "label": "Clientes felices", "value": "500+" },
-      { "label": "Años", "value": "5" }
+      { "label": "Clientes felices", "value": "1.8K+" },
+      { "label": "Años", "value": "5+" }
+    ],
+    "badges": [
+      { "text": "Atención rápida" },
+      { "text": "Primera consulta gratis" }
+    ]
+  },
+
+  "about": {
+    "title": "Conoce a ${companyName}",
+    "text": "Descripción breve (2–3 frases) sobre el negocio, enfoque y propuesta de valor.",
+    "features": [
+      { "icon": "UserOutlined", "title": "Equipo experto", "text": "Profesionales certificados." },
+      { "icon": "HeartOutlined", "title": "Cercanos a ti", "text": "Acompañamiento por WhatsApp." }
     ]
   },
 
   "benefits": {
-    "title": "Beneficios",
+    "title": "Beneficios de elegirnos",
     "items": [
-      { "icon": "CheckCircleOutlined", "title": "Beneficio claro", "text": "Frase breve (1–2 líneas) que explique el beneficio." },
-      { "icon": "ThunderboltOutlined", "title": "Entrega rápida", "text": "Explica tu rapidez o SLA (1–2 frases)." },
-      { "icon": "SafetyOutlined", "title": "Confiable", "text": "Garantía o soporte (1–2 frases)." }
+      { "icon": "SmileOutlined", "title": "Experiencia positiva", "text": "Atención clara y resultados palpables." },
+      { "icon": "ThunderboltOutlined", "title": "Rápidos", "text": "Respuesta y entrega ágil." },
+      { "icon": "SafetyOutlined", "title": "Confiables", "text": "Políticas transparentes y soporte real." }
     ]
   },
 
-  "${goal === 'ecommerce' ? 'products' : 'services'}": {
-    "title": "${goal === 'ecommerce' ? 'Nuestros Productos' : 'Nuestros Servicios'}",
-    "items": [
-      {
-        "title": "Nombre del ${goal === 'ecommerce' ? 'producto' : 'servicio'}",
-        "text": "Descripción breve en 1–2 frases.",
-        ${goal === 'ecommerce' ? `"price": 199.00,` : `"price": null,`}
-        "imageUrl": "${photoURLs[0] || ''}",
-        "buttonText": "${goal === 'ecommerce' ? 'Agregar' : 'Solicitar'}"
-      },
-      {
-        "title": "Otra opción",
-        "text": "Otra descripción breve.",
-        ${goal === 'ecommerce' ? `"price": 249.00,` : `"price": null,`}
-        "imageUrl": "${photoURLs[1] || ''}",
-        "buttonText": "${goal === 'ecommerce' ? 'Agregar' : 'Solicitar'}"
-      }
-    ]
-  },
-
-  "process": {
+  "howItWorks": {
     "title": "Cómo funciona",
     "steps": [
-      { "icon": "NumberOutlined",  "title": "Elige",     "text": "Selecciona ${goal === 'ecommerce' ? 'productos' : 'tu servicio'}" },
-      { "icon": "MessageOutlined", "title": "WhatsApp",  "text": "Confirma por WhatsApp en 1 paso" },
-      { "icon": "SmileOutlined",   "title": "Disfruta",  "text": "Recibe y listo" }
+      { "icon": "NumberOutlined", "title": "1) Cuéntanos tus metas", "text": "Envíanos un mensaje con lo que necesitas." },
+      { "icon": "NumberOutlined", "title": "2) Te proponemos un plan", "text": "Opciones claras y transparentes." },
+      { "icon": "NumberOutlined", "title": "3) Empezamos", "text": "Seguimiento por WhatsApp." }
+    ],
+    "videoUrl": ""
+  },
+
+  "stats": [
+    { "label": "Clientes", "value": "1.8K+" },
+    { "label": "Proyectos", "value": "3.2K+" },
+    { "label": "Años", "value": "5+" }
+  ],
+
+  "useCases": {
+    "title": "Casos de éxito",
+    "items": [
+      { "title": "Caso A", "text": "Resultado logrado en poco tiempo.", "imageUrl": "${photoURLs[1] || 'https://source.unsplash.com/1200x800/?success'}" },
+      { "title": "Caso B", "text": "Mejoras claras y medibles.",       "imageUrl": "${photoURLs[2] || 'https://source.unsplash.com/1200x800/?team'}" }
+    ]
+  },
+
+  "pricing": {
+    "title": "Planes y precios",
+    "subtitle": "Elige el ideal para ti",
+    "plans": [
+      {
+        "name": "Básico",
+        "price": "$299",
+        "period": "por mes",
+        "features": ["Asesoría inicial", "Soporte por chat", "Entrega en 48h"],
+        "ctaText": "Comenzar ahora"
+      },
+      {
+        "name": "Premium",
+        "price": "$499",
+        "period": "por mes",
+        "features": ["Seguimiento semanal", "Ajustes personalizados", "Atención prioritaria"],
+        "ctaText": "Agendar cita"
+      }
     ]
   },
 
   "testimonials": {
     "title": "Lo que dicen",
     "items": [
-      { "text": "Excelente atención y resultados.", "author": "Cliente 1", "imageUrl": "" },
-      { "text": "Súper recomendado.",               "author": "Cliente 2", "imageUrl": "" }
+      { "text": "Excelente servicio, superaron mis expectativas.", "author": "Cliente 1", "imageUrl": "" },
+      { "text": "Atención rápida y resultados reales.",             "author": "Cliente 2", "imageUrl": "" }
     ]
   },
 
   "faqs": [
-    { "q": "¿Cómo hago el pedido?", "a": "Escríbenos al WhatsApp y te guiamos." },
-    { "q": "¿Tienen garantía?",     "a": "Sí, satisfacción garantizada." }
+    { "q": "¿Cómo empiezo?", "a": "Escríbenos por WhatsApp y te guiamos paso a paso." },
+    { "q": "¿Puedo pagar mensual?", "a": "Sí, aceptamos pagos mensuales." }
   ],
 
   "gallery": {
-    "images": [${photoURLs.slice(0,5).map(u => `"${u}"`).join(', ')}]
+    "images": [
+      "${photoURLs[0] || 'https://source.unsplash.com/1200x800/?business,team'}",
+      "${photoURLs[1] || 'https://source.unsplash.com/1200x800/?office'}",
+      "${photoURLs[2] || 'https://source.unsplash.com/1200x800/?people,work'}"
+    ]
+  },
+
+  "policies": {
+    "shipping": "",
+    "payments": "Aceptamos tarjeta y transferencia.",
+    "refunds": "Cancelación mensual sin permanencia."
   },
 
   "contact": {
@@ -521,31 +560,40 @@ Estructura requerida del JSON (usa exactamente estos nombres de claves):
     "youtube": "${youtube}"
   },
 
+  "hours": [
+    { "day": "Lun-Vie", "open": "09:00", "close": "19:00" },
+    { "day": "Sáb",     "open": "10:00", "close": "14:00" }
+  ],
+
+  "location": {
+    "address": "${address}",
+    "mapEmbed": ""
+  },
+
   "ctaFinal": {
     "title": "¿Listo para empezar?",
-    "text": "Escríbenos y lo hacemos por ti.",
+    "text": "Escríbenos y te respondemos hoy mismo.",
     "ctaText": "Hablar por WhatsApp"
+  },
+
+  "footer": {
+    "links": [
+      { "label": "Política de privacidad", "href": "#policies" },
+      { "label": "Contacto", "href": "#contact" }
+    ]
   }
 }
-
-Consideraciones:
-- Texto breve, legible, directo. Evita párrafos largos.
-- Prioriza WhatsApp como CTA.
-- No inventes precios fuera de rango; si dudas, usa 199–499 MXN.
-- Si faltan imágenes, sugiere valores genéricos (“/img/placeholder.jpg”).
-- Devuelve SOLO JSON válido.
     `;
 
     try {
-      const ai = await getOpenAI();
       const resultText = await chatCompletionCompat({
         model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
         messages: [
-          { role: 'system', content: 'Eres un generador de JSON estricto. Responde ÚNICAMENTE con un objeto JSON válido. Sin comentarios, sin texto fuera del JSON, sin placeholders como "string".' },
+          { role: 'system', content: 'Eres un generador de JSON estricto. Responde SOLO con un objeto JSON válido.' },
           { role: 'user', content: prompt }
         ],
-        max_tokens: 1400,
-        temperature: 0.6
+        max_tokens: 1600,
+        temperature: 0.55
       });
 
       let schema = {};
@@ -556,70 +604,88 @@ Consideraciones:
         const end      = unfenced.lastIndexOf('}');
         const candidate = (start >= 0 && end >= 0 && end > start) ? unfenced.slice(start, end + 1) : unfenced;
 
-        // Repara JSON “casi válido” (comas colgantes, comillas simples, etc.)
         const repaired = jsonrepair(candidate);
         schema = JSON.parse(repaired);
       } catch (parseErr) {
         console.error('[generateSiteSchemas] JSON parse error:', parseErr);
-
-        // Fallback mínimo para que NUNCA se quede en "Procesando"
+        // Fallback mínimo para no dejar el doc en limbo
         schema = {
           slug,
           templateId,
-          colors: { primary: (palette[0] || '#16a34a'), secondary: '#ffffff', accent: '#f4f6f8', text: '#222' },
+          colors: { primary: (palette[0] || '#22C55E'), secondary: '#FFFFFF', accent: '#DCFCE7', text: '#1F2937' },
           hero: {
             title: companyName,
             subtitle: businessStory,
-            ctaText: 'Escríbenos por WhatsApp',
+            ctaText: 'Hablar por WhatsApp',
             backgroundImageUrl: photoURLs[0] || ''
           },
-          menu: [{ id:'hero', label:'Inicio' }],
+          menu: [
+            { id: 'hero', label: 'Inicio' },
+            { id: 'about', label: 'Nosotros' },
+            { id: 'pricing', label: 'Planes' },
+            { id: 'faqs', label: 'Preguntas' },
+            { id: 'contact', label: 'Contacto' }
+          ]
         };
-
-        const preview = String(resultText || '').replace(/\s+/g, ' ').slice(0, 400);
-        console.error('[generateSiteSchemas] Raw preview (400c):', preview);
       }
 
-      // ——— Normalizaciones críticas para que el front no truene ———
+      // Normalizaciones críticas
       schema.slug = schema.slug || slug;
-      schema.templateId = schema.templateId || templateId;
+      schema.templateId = 'info';
 
       schema.colors = schema.colors || {};
-      schema.colors.primary   = schema.colors.primary   || (palette[0] || '#16a34a');
-      schema.colors.secondary = schema.colors.secondary || '#ffffff';
-      schema.colors.accent    = schema.colors.accent    || '#f4f6f8';
-      schema.colors.text      = schema.colors.text      || '#222222';
-
-      schema.hero = schema.hero || {};
-      schema.hero.title  = schema.hero.title  || companyName;
-      schema.hero.subtitle = schema.hero.subtitle || businessStory;
-      schema.hero.ctaText  = schema.hero.ctaText  || 'Escríbenos por WhatsApp';
-      schema.hero.backgroundImageUrl = schema.hero.backgroundImageUrl || photoURLs[0] || '';
+      schema.colors.primary   = schema.colors.primary   || (palette[0] || '#22C55E');
+      schema.colors.secondary = schema.colors.secondary || '#FFFFFF';
+      schema.colors.accent    = schema.colors.accent    || '#DCFCE7';
+      schema.colors.text      = schema.colors.text      || '#1F2937';
 
       if (!Array.isArray(schema.menu) || !schema.menu.length) {
-        schema.menu = [{ id: 'hero', label: 'Inicio' }];
+        schema.menu = [
+          { id: 'hero', label: 'Inicio' },
+          { id: 'about', label: 'Nosotros' },
+          { id: 'pricing', label: 'Planes' },
+          { id: 'faqs', label: 'Preguntas' },
+          { id: 'contact', label: 'Contacto' }
+        ];
       }
+
+      schema.hero = schema.hero || {};
+      schema.hero.title               = schema.hero.title               || companyName;
+      schema.hero.subtitle            = schema.hero.subtitle            || businessStory;
+      schema.hero.ctaText             = schema.hero.ctaText             || 'Hablar por WhatsApp';
+      schema.hero.backgroundImageUrl  = schema.hero.backgroundImageUrl  || (photoURLs[0] || '');
 
       schema.contact = schema.contact || {};
-      schema.contact.whatsapp = schema.contact.whatsapp || whatsapp;
-      schema.contact.email    = schema.contact.email    || email;
-      schema.contact.facebook = schema.contact.facebook || facebook;
-      schema.contact.instagram= schema.contact.instagram|| instagram;
+      schema.contact.whatsapp = schema.contact.whatsapp || whatsapp || '';
+      schema.contact.email    = schema.contact.email    || email    || '';
+      schema.contact.facebook = schema.contact.facebook || facebook || '';
+      schema.contact.instagram= schema.contact.instagram|| instagram|| '';
       if (youtube) schema.contact.youtube = schema.contact.youtube || youtube;
 
-      if (templateId === 'ecommerce') {
-        schema.products = schema.products || { title: 'Nuestros Productos', items: [] };
-        schema.products.items = Array.isArray(schema.products.items) ? schema.products.items : [];
-      } else {
-        schema.services = schema.services || { title: 'Nuestros Servicios', items: [] };
-        schema.services.items = Array.isArray(schema.services.items) ? schema.services.items : [];
-      }
+      // Asegurar estructuras opcionales
+      if (!schema.about)       schema.about = { title: `Conoce a ${companyName}`, text: businessStory, features: [] };
+      if (!schema.benefits)    schema.benefits = { title: 'Beneficios', items: [] };
+      if (!schema.howItWorks)  schema.howItWorks = { title: 'Cómo funciona', steps: [] };
+      if (!schema.stats)       schema.stats = [];
+      if (!schema.useCases)    schema.useCases = { title: 'Casos de éxito', items: [] };
+      if (!schema.pricing)     schema.pricing = { title: 'Planes', subtitle: '', plans: [] };
+      if (!schema.testimonials)schema.testimonials = { title: 'Lo que dicen', items: [] };
+      if (!schema.faqs)        schema.faqs = [];
+      if (!schema.gallery)     schema.gallery = { images: photoURLs.slice(0,3) };
+      if (!schema.policies)    schema.policies = { shipping: '', payments: '', refunds: '' };
+      if (!schema.hours)       schema.hours = [
+        { day: 'Lun-Vie', open: '09:00', close: '19:00' },
+        { day: 'Sáb',     open: '10:00', close: '14:00' }
+      ];
+      if (!schema.location)    schema.location = { address, mapEmbed: '' };
+      if (!schema.ctaFinal)    schema.ctaFinal = { title: '¿Listo para empezar?', text: 'Escríbenos por WhatsApp.', ctaText: 'Hablar por WhatsApp' };
+      if (!schema.footer)      schema.footer = { links: [{ label: 'Política de privacidad', href: '#policies' }, { label: 'Contacto', href: '#contact' }] };
 
-      // Persistencia (guarda siteSchema + compat en schema)
+      // Persistencia
       await db.collection('Negocios').doc(id).set({
         status: 'Procesado',
-        siteSchema: schema,
-        schema,
+        siteSchema: schema,     // renderer principal
+        schema,                 // compat
         colors: schema.colors,
         contact: {
           whatsapp: schema.contact.whatsapp || '',
@@ -633,8 +699,6 @@ Consideraciones:
           subtitle: schema.hero.subtitle,
           backgroundImageUrl: schema.hero.backgroundImageUrl || ''
         },
-        products: templateId === 'ecommerce' ? (schema.products || null) : null,
-        services: templateId !== 'ecommerce' ? (schema.services || null) : null,
         updatedAt: Timestamp.now(),
         lastGeneratedAt: Timestamp.now()
       }, { merge: true });
@@ -649,6 +713,12 @@ Consideraciones:
     }
   }
 }
+
+
+
+
+
+
 
 
 
