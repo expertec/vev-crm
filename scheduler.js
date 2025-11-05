@@ -371,273 +371,244 @@ async function withTaskLock(taskKey, ttlSeconds, fn) {
 
 /* ====================== Generación del site schema ===================== */
 /* ====================== Generación del site schema ===================== */
+// Reemplaza TODO tu generateSiteSchemas() por esto:
+
 export async function generateSiteSchemas() {
-  if (!PEXELS_API_KEY) {
-    console.warn('⚠️ PEXELS_API_KEY no configurada: se usarán imágenes de Unsplash Source como fallback.');
+  const BATCH = 6; // cuántos negocios “Sin procesar” tomamos por pasada
+  const snap = await db.collection('Negocios')
+    .where('status', '==', 'Sin procesar')
+    .limit(BATCH)
+    .get();
+
+  if (snap.empty) {
+    console.log('generateSiteSchemas: sin pendientes');
+    return;
   }
 
-  return withTaskLock('generateSiteSchemas', 45, async () => {
-    console.log('▶️ generateSiteSchemas: inicio');
-    const snap = await db.collection('Negocios').where('status', '==', 'Sin procesar').get();
-    if (snap.empty) {
-      console.log('generateSiteSchemas: sin pendientes');
-      return 0;
-    }
+  // Util para asegurar valores por si el brief viene incompleto
+  const safe = (v, def = '') => (v === undefined || v === null ? def : v);
 
-    let processed = 0;
+  for (const doc of snap.docs) {
+    const id   = doc.id;
+    const data = doc.data() || {};
 
-    for (const doc of snap.docs) {
-      const data = doc.data();
-      try {
-        const promptSystem = `
-Eres un redactor publicitario SENIOR, experto en copywriting para sitios web.
-Devuelve SOLO JSON válido con la estructura pedida.
-`.trim();
+    // Insumos que ya guardas desde /api/web/after-form ó /api/web/sample-create
+    const companyName   = safe(data.companyInfo, 'Tu Negocio');
+    const businessStory = safe(data.businessStory, 'Descripción breve del negocio.');
+    const templateId    = String(safe(data.templateId, 'info')).toLowerCase(); // 'ecommerce' | 'info' | 'booking'
+    const primaryColor  = safe(data.primaryColor, null);
+    const palette       = Array.isArray(data.palette) && data.palette.length ? data.palette : (primaryColor ? [primaryColor] : []);
+    const logoURL       = safe(data.logoURL, '');
+    const photoURLs     = Array.isArray(data.photoURLs) ? data.photoURLs : [];
+    const whatsapp      = safe(data.contactWhatsapp, '');
+    const email         = safe(data.contactEmail, '');
+    const facebook      = safe(data.socialFacebook, '');
+    const instagram     = safe(data.socialInstagram, '');
+    const youtube       = safe(data.socialYoutube || data.socialYouTube, '');
 
-        const promptUser = `
-Negocio de giro: "${data.businessSector}"
-Nombre: "${data.companyInfo}"
-Historia: "${data.businessStory}"
-Colores disponibles: ${JSON.stringify(data.palette || {})}
-Servicios/productos: ${JSON.stringify(data.keyItems || [])}
-WhatsApp: ${data.contactWhatsapp || ''}
-Instagram: ${data.socialInstagram || ''}
-Facebook: ${data.socialFacebook || ''}
+    // slug (ya viene del server y es único)
+    const slug = safe(data.slug, id).toLowerCase();
 
-IMPORTANTE: En "features.items" asigna el icono de Ant Design más representativo:
-SafetyOutlined, BulbOutlined, UsergroupAddOutlined, HeartOutlined, RocketOutlined, ExperimentOutlined
+    // Ajustes por plantilla (secciones que exigiremos)
+    // — ecommerce: catálogo, beneficios, proceso de compra, testimonios, FAQ, contacto, CTA final
+    // — info/servicios: héroe, beneficios, servicios, proceso, casos/testimonios, FAQ, contacto, CTA final
+    // — booking: héroe con CTA a WhatsApp, servicios/paquetes, calendario simple (texto), proceso, testimonios, FAQ, contacto
+    const goal = (
+      templateId === 'ecommerce' ? 'ecommerce' :
+      templateId === 'booking'   ? 'booking'   :
+      'services'
+    );
 
-Estructura EXACTA a devolver (JSON):
+    const prompt = `
+Eres un director de UX/UI y copywriting 2025. Devuelve SOLO un JSON válido
+para renderizar un sitio web ${goal} profesional, moderno, responsive y mobile-first.
+NO incluyas comentarios ni texto fuera del JSON.
+
+Contexto del negocio:
+- nombre: ${companyName}
+- descripcion: ${businessStory}
+- whatsapp: ${whatsapp}
+- email: ${email}
+- redes: facebook=${facebook} instagram=${instagram} youtube=${youtube}
+- logoURL: ${logoURL}
+- photoURLs: ${photoURLs.join(', ')}
+
+Estructura requerida del JSON (usa exactamente estos nombres de claves):
+
 {
-  "slug": "<slug>",
-  "logoUrl": "<URL>",
-  "colors": { "primary": "<hex>", "secondary": "<hex>", "accent": "<hex>", "text": "<hex>" },
+  "slug": string,
+  "templateId": "${templateId}",
+  "colors": {
+    "primary": string (usa ${primaryColor || (palette[0] || '#16a34a')}),
+    "secondary": string,
+    "accent": string,
+    "text": "#222222"
+  },
+  "menu": [
+    { "id":"hero", "label":"Inicio" },
+    { "id":"benefits", "label":"Beneficios" },
+    ${goal === 'ecommerce' ? `{ "id":"products","label":"Productos" },` : `{ "id":"services","label":"Servicios" },`}
+    { "id":"process", "label":"Cómo Funciona" },
+    { "id":"testimonials", "label":"Opiniones" },
+    { "id":"faqs", "label":"Preguntas" },
+    { "id":"contact", "label":"Contacto" }
+  ],
+
   "hero": {
-    "title": "<Título>",
-    "subtitle": "<Subtítulo>",
-    "ctaText": "<CTA>",
-    "ctaUrl": "<URL>",
-    "backgroundImageUrl": "<URL fondo>"
+    "title": string potente (máx 8 palabras),
+    "subtitle": string claro (máx 18 palabras),
+    "ctaText": "Escríbenos por WhatsApp",
+    "backgroundImageUrl": string (elige una de photoURLs o sugiere stock genérico),
+    "kpis": [
+      { "label": "Clientes felices", "value": "500+" },
+      { "label": "Años", "value": "5" }
+    ]
   },
-  "features": {
-    "title": "¿Qué nos hace únicos?",
+
+  "benefits": {
+    "title": "Beneficios",
     "items": [
-      { "icon":"<Icono1>","title":"<T1>","text":"<D1>" }
+      { "icon":"CheckCircleOutlined", "title": string corto, "text": string 1-2 frases },
+      { "icon":"ThunderboltOutlined","title": string corto, "text": string 1-2 frases },
+      { "icon":"SafetyOutlined",     "title": string corto, "text": string 1-2 frases }
     ]
   },
-  "products": {
-    "title":"<Título productos>",
-    "items":[
-      { "title":"<P1>","text":"<desc>","price":199,"imageUrl":"<URL>","buttonText":"Comprar","buttonUrl":"<URL|WA>" }
+
+  "${goal === 'ecommerce' ? 'products' : 'services'}": {
+    "title": "${goal === 'ecommerce' ? 'Nuestros Productos' : 'Nuestros Servicios'}",
+    "items": [
+      {
+        "title": string,
+        "text": string 1-2 frases,
+        ${goal === 'ecommerce' ? `"price": 199.00,` : `"price": null,`}
+        "imageUrl": string (logoURL o alguna de photoURLs),
+        "buttonText": "${goal === 'ecommerce' ? 'Agregar' : 'Solicitar'}"
+      },
+      {
+        "title": string,
+        "text": string 1-2 frases,
+        ${goal === 'ecommerce' ? `"price": 249.00,` : `"price": null,`}
+        "imageUrl": string,
+        "buttonText": "${goal === 'ecommerce' ? 'Agregar' : 'Solicitar'}"
+      }
     ]
   },
+
+  "process": {
+    "title": "Cómo funciona",
+    "steps": [
+      { "icon":"NumberOutlined","title":"Elige",     "text":"Selecciona ${goal === 'ecommerce' ? 'productos' : 'tu servicio'}" },
+      { "icon":"MessageOutlined","title":"WhatsApp", "text":"Confirma por WhatsApp en 1 paso" },
+      { "icon":"SmileOutlined",  "title":"Disfruta",  "text":"Recibe y listo" }
+    ]
+  },
+
   "testimonials": {
-    "title":"<Título testimonios>",
-    "items":[ { "text":"<t1>", "author":"<a1>" } ]
+    "title": "Lo que dicen",
+    "items": [
+      { "text": "Excelente atención y resultados.", "author":"Cliente 1", "imageUrl": "" },
+      { "text": "Súper recomendado.",               "author":"Cliente 2", "imageUrl": "" }
+    ]
+  },
+
+  "faqs": [
+    { "q":"¿Cómo hago el pedido?", "a":"Escríbenos al WhatsApp y te guiamos." },
+    { "q":"¿Tienen garantía?",     "a":"Sí, satisfacción garantizada." }
+  ],
+
+  "gallery": {
+    "images": [${photoURLs.slice(0,5).map(u => `"${u}"`).join(', ')}]
+  },
+
+  "contact": {
+    "email": "${email}",
+    "whatsapp": "${whatsapp}",
+    "facebook": "${facebook}",
+    "instagram": "${instagram}",
+    "youtube": "${youtube}"
+  },
+
+  "ctaFinal": {
+    "title": "¿Listo para empezar?",
+    "text": "Escríbenos y lo hacemos por ti.",
+    "ctaText": "Hablar por WhatsApp"
   }
 }
-`.trim();
 
-        // 1) pedir JSON al modelo (compat v4/v3)
-        let raw = await chatCompletionCompat({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: promptSystem },
-            { role: 'user', content: promptUser },
-          ],
-          temperature: 0.6,
-          max_tokens: 900,
-        });
+Consideraciones:
+- Texto breve, legible, directo. Evita párrafos largos.
+- Prioriza WhatsApp como CTA.
+- No inventes precios fuera de rango; si dudas, usa 199–499 MXN.
+- Si faltan imágenes, sugiere valores genéricos (“/img/placeholder.jpg”).
+- Devuelve SOLO JSON válido.
+    `;
 
-        // 1.0 parse/repair
-        let schema;
-        try {
-          schema = JSON.parse(raw);
-        } catch {
-          schema = JSON.parse(jsonrepair(raw));
-          console.warn('[WARN] JSON reparado para', doc.id);
-        }
+    try {
+      const ai = await getOpenAI();
+      const resultText = await chatCompletionCompat({
+        model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
+        messages: [
+          { role: 'system', content: 'Eres un generador de esquemas JSON de sitios web, preciso y estricto con el formato.' },
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 1400,
+        temperature: 0.6
+      });
 
-        // 1.1 Normalizaciones mínimas
-        schema = schema && typeof schema === 'object' ? schema : {};
-        schema.slug = schema.slug || data.slug || String(doc.id).slice(0, 8);
-
-        // 1.1.1 Paleta por giro/descripcion (evita rosas fuera de contexto)
-        const forcedPalette = pickPaletteForBusiness({
-          sector: data.businessSector,
-          story: data.businessStory,
-          name: data.companyInfo
-        });
-        schema.colors = normalizeColors(schema.colors, forcedPalette);
-
-        // 1.1.1.1 Override explícito si el cliente eligió color primario
-        if (data.primaryColor && /^#(?:[0-9a-f]{3}){1,2}$/i.test(data.primaryColor)) {
-          schema.colors = schema.colors || {};
-          schema.colors.primary = data.primaryColor;
-        }
-
-        // 1.1.2 Logo por defecto o si es placeholder (luego preferimos el del cliente)
-        if (!schema.logoUrl || isPlaceholderUrl(schema.logoUrl)) {
-          const seed = data.companyInfo || schema.slug || 'brand';
-          schema.logoUrl = `https://api.dicebear.com/8.x/initials/svg?seed=${encodeURIComponent(seed)}&radius=8`;
-        }
-
-        // 1.2 CTA / Contacto con WhatsApp
-        const phoneDigits = String(data.leadPhone || '').replace(/\D/g, '');
-        const waUrl = phoneDigits ? `https://wa.me/${phoneDigits}` : '';
-
-        if (!schema.hero) schema.hero = {};
-        if (waUrl) {
-          schema.hero.ctaUrl = waUrl;
-          if (!schema.hero.ctaText) schema.hero.ctaText = 'Escríbenos por WhatsApp';
-          schema.hero.ctaColor = schema.colors?.accent || '#F97316';
-        }
-
-        if (!schema.contact) schema.contact = {};
-        if (waUrl) schema.contact.whatsapp = waUrl;
-
-        if (schema.products && Array.isArray(schema.products.items)) {
-          schema.products.items = schema.products.items.map(it => ensureWhatsAppButton(it, waUrl));
-        }
-
-        // 1.3 Plantilla (templateId) y ajustes por tipo
-        const template = String(data.templateId || 'info').toLowerCase();
-        schema.templateId = template; // para el front
-
-        if (template === 'ecommerce') {
-          // asegura sección productos con botones WA
-          schema.products = schema.products || { title: 'Nuestros productos', items: [] };
-          if (!Array.isArray(schema.products.items) || schema.products.items.length === 0) {
-            schema.products.items = [
-              { title: 'Producto 1', text: 'Descripción breve.', price: 149, imageUrl: '', buttonText: 'Pedir por WhatsApp', buttonUrl: waUrl },
-              { title: 'Producto 2', text: 'Descripción breve.', price: 249, imageUrl: '', buttonText: 'Pedir por WhatsApp', buttonUrl: waUrl },
-              { title: 'Producto 3', text: 'Descripción breve.', price: 199, imageUrl: '', buttonText: 'Pedir por WhatsApp', buttonUrl: waUrl },
-            ];
-          } else {
-            schema.products.items = schema.products.items.map(it => ensureWhatsAppButton(it, waUrl));
-          }
-        } else if (template === 'booking') {
-          // landing orientada a reservar
-          schema.hero.title = schema.hero.title || 'Reserva en minutos';
-          schema.hero.subtitle = schema.hero.subtitle || 'Agenda por WhatsApp de forma rápida.';
-          schema.hero.ctaText = schema.hero.ctaText || 'Reservar por WhatsApp';
-
-          schema.booking = schema.booking || {
-            slots: [
-              { id:'s1', label:'Hoy 4:00 PM' },
-              { id:'s2', label:'Hoy 6:00 PM' },
-              { id:'s3', label:'Mañana 11:00 AM' },
-            ]
-          };
-          schema.booking.slots = (schema.booking.slots || []).map(s => ({
-            ...s,
-            buttonText: s.buttonText || 'Reservar por WhatsApp',
-            buttonUrl: waUrl ? `${waUrl}?text=${encodeURIComponent(`Hola, quiero reservar: ${s.label}`)}` : '#'
-          }));
-        } else {
-          // info (presencia) – dejar que prompt domine y solo asegurar CTAs
-          if (schema.info?.features?.length) {
-            schema.info.features = schema.info.features.map(x => ensureWhatsAppButton(x, waUrl));
-          }
-        }
-
-        // 2) Query base para imágenes de stock (usada solo de fallback)
-        const sectorOrStory = Array.isArray(data.businessSector)
-          ? data.businessSector.join(', ')
-          : (data.businessSector || data.businessStory || data.companyInfo || '');
-        const searchQuery = (
-          (schema.hero?.title ? `${schema.hero.title} ` : '') +
-          sectorOrStory
-        ).trim() || 'business';
-
-        // 3) Preferir ASSETS DEL CLIENTE y luego hacer FALLBACK a stock
-        try {
-          // 3.1 Preferir logo del cliente
-          if (data.logoURL && (!schema.logoUrl || isPlaceholderUrl(schema.logoUrl))) {
-            schema.logoUrl = data.logoURL;
-          }
-
-          // 3.2 Preferir fotos del cliente
-          const customerPhotos = Array.isArray(data.photoURLs) ? data.photoURLs.filter(Boolean) : [];
-
-          // HERO
-          if (!schema.hero) schema.hero = {};
-          if (!schema.hero.backgroundImageUrl || isPlaceholderUrl(schema.hero.backgroundImageUrl)) {
-            if (customerPhotos[0]) {
-              schema.hero.backgroundImageUrl = customerPhotos[0];
-            }
-          }
-
-          // PRODUCTS
-          if (schema.products?.items && Array.isArray(schema.products.items)) {
-            let k = 0;
-            for (let i = 0; i < schema.products.items.length; i++) {
-              const it = schema.products.items[i] || {};
-              if ((!it.imageUrl || isPlaceholderUrl(it.imageUrl)) && customerPhotos[k]) {
-                it.imageUrl = customerPhotos[k++];
-              }
-              schema.products.items[i] = ensureWhatsAppButton(it, waUrl);
-            }
-          }
-
-          // FEATURED gallery (si la manejas)
-          if (!schema.gallery && customerPhotos.length > 1) {
-            schema.gallery = customerPhotos;
-          }
-
-          // 3.3 Fallback a stock (Pexels/Unsplash) **solo si faltan**
-          // --- HERO ---
-          if (!schema.hero.backgroundImageUrl || isPlaceholderUrl(schema.hero.backgroundImageUrl)) {
-            schema.hero.backgroundImageUrl = await getStockImage(searchQuery, { width: 1600, height: 900 });
-          }
-
-          // --- PRODUCTS ---
-          if (schema.products?.items && Array.isArray(schema.products.items)) {
-            for (let i = 0; i < schema.products.items.length; i++) {
-              const it = schema.products.items[i] || {};
-              if (!it.imageUrl || isPlaceholderUrl(it.imageUrl)) {
-                const q = `${searchQuery} ${it.title || 'product'}`;
-                it.imageUrl = await getStockImage(q, { width: 1200, height: 800 });
-              }
-              schema.products.items[i] = ensureWhatsAppButton(it, waUrl);
-            }
-          }
-
-          // --- TESTIMONIALS / TEAM ---
-          if (schema.testimonials?.items && Array.isArray(schema.testimonials.items)) {
-            schema.testimonials.items = schema.testimonials.items.map((t, idx) => {
-              if (!t.avatarUrl || isPlaceholderUrl(t.avatarUrl)) t.avatarUrl = avatarFor(`${schema.slug}-test-${idx}`);
-              return t;
-            });
-          }
-          if (schema.team && Array.isArray(schema.team)) {
-            schema.team = schema.team.map((m, idx) => {
-              if (!m.imageUrl || isPlaceholderUrl(m.imageUrl)) m.imageUrl = avatarFor(`${schema.slug}-team-${idx}`);
-              return m;
-            });
-          }
-        } catch (e) {
-          console.warn('[IMAGES] error general:', e?.message);
-        }
-
-        // 4) guardar
-        await doc.ref.update({
-          schema,
-          status: 'Procesado',
-          processedAt: FieldValue.serverTimestamp(),
-        });
-
-        processed++;
-        console.log(`✅ Site schema generado para ${doc.id}`);
-      } catch (err) {
-        console.error(`❌ generateSiteSchemas(${doc.id})`, err);
+      let schema = {};
+      try {
+        // intentamos parsear; si viniera con basura, limpiarlo simple
+        const trimmed = (resultText || '').trim();
+        const start = trimmed.indexOf('{');
+        const end   = trimmed.lastIndexOf('}');
+        const json  = start >= 0 && end >= 0 ? trimmed.slice(start, end + 1) : trimmed;
+        schema = JSON.parse(json);
+      } catch (parseErr) {
+        console.error('[generateSiteSchemas] JSON parse error:', parseErr);
+        // fallback mínimo
+        schema = {
+          slug,
+          templateId,
+          colors: { primary: palette[0] || '#16a34a', secondary: '#ffffff', accent: '#f4f6f8', text: '#222' },
+          hero: { title: companyName, subtitle: businessStory, ctaText: 'Escríbenos por WhatsApp', backgroundImageUrl: photoURLs[0] || '' },
+          menu: [{ id:'hero',label:'Inicio' }],
+        };
       }
-    }
 
-    console.log('▶️ generateSiteSchemas: finalizado');
-    return processed;
-  });
+      // Normalizaciones + refuerzos
+      schema.slug = slug;
+      schema.templateId = templateId;
+      schema.colors = schema.colors || {};
+      schema.colors.primary = schema.colors.primary || palette[0] || '#16a34a';
+      schema.colors.secondary = schema.colors.secondary || '#ffffff';
+      schema.colors.accent = schema.colors.accent || '#f4f6f8';
+      schema.colors.text = schema.colors.text || '#222222';
+
+      schema.contact = schema.contact || {};
+      schema.contact.whatsapp = schema.contact.whatsapp || whatsapp;
+      schema.contact.email = schema.contact.email || email;
+      schema.contact.facebook = schema.contact.facebook || facebook;
+      schema.contact.instagram = schema.contact.instagram || instagram;
+      schema.contact.youtube = schema.contact.youtube || youtube;
+
+      // Persistimos el schema
+      await db.collection('Negocios').doc(id).set({
+        status: 'Procesado',
+        schema,
+        lastGeneratedAt: new Date()
+      }, { merge: true });
+
+      console.log(`[generateSiteSchemas] OK → ${id} (${slug})`);
+    } catch (err) {
+      console.error('[generateSiteSchemas] error con negocio', id, err?.message || err);
+      await db.collection('Negocios').doc(id).set({
+        status: 'Error',
+        lastError: String(err?.message || err)
+      }, { merge: true });
+    }
+  }
 }
+
 
 
 /* ================= Envío por WhatsApp (texto / links / media) ========== */
