@@ -322,7 +322,7 @@ Responde SOLO con JSON:
 /**
  * Construye el schema base común a todas las plantillas
  */
-function buildBaseSchema(data, aiContent) {
+function buildBaseSchema(data, aiContent, templateId = 'info') {
   const brand = data.companyInfo || data.slug || 'Mi Negocio';
   const waDigits = data.contactWhatsapp || data.leadPhone || '';
   const waUrl = waDigits ? `https://wa.me/${waDigits}` : '';
@@ -408,7 +408,7 @@ function buildBaseSchema(data, aiContent) {
 export async function buildInfoSchema(data) {
   console.log('[buildInfoSchema] Generando contenido con IA...');
   const aiContent = await generateSiteContent(data);
-  const base = buildBaseSchema(data, aiContent);
+  const base = buildBaseSchema(data, aiContent, 'info');
 
   return {
     templateId: 'info',
@@ -435,7 +435,7 @@ export async function buildEcommerceSchema(data) {
     generateProducts(data, 6)
   ]);
   
-  const base = buildBaseSchema(data, aiContent);
+  const base = buildBaseSchema(data, aiContent, 'ecommerce');
   const waUrl = base.hero.ctaUrl;
 
   // Mapear productos con imágenes de la galería
@@ -479,7 +479,7 @@ export async function buildBookingSchema(data) {
     generateBookingSlots(data)
   ]);
   
-  const base = buildBaseSchema(data, aiContent);
+  const base = buildBaseSchema(data, aiContent, 'booking');
   const waUrl = base.hero.ctaUrl;
 
   // Mapear slots con URLs de WhatsApp
@@ -531,7 +531,7 @@ export async function generateCompleteSchema(data) {
   } catch (error) {
     console.error('[generateCompleteSchema] Error:', error);
     // Fallback al schema básico
-    const base = buildBaseSchema(data, generateFallbackContent(data));
+    const base = buildBaseSchema(data, generateFallbackContent(data), templateId);
     return { templateId: 'info', ...base };
   }
 }
