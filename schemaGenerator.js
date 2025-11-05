@@ -1,19 +1,18 @@
 // schemaGenerator.js - Generador de schemas profesionales con IA
 
 import OpenAIImport from 'openai';
-
 const OpenAICtor = OpenAIImport?.OpenAI || OpenAIImport;
 
 // ============ Configuración de OpenAI ============
 async function getOpenAI() {
   if (!process.env.OPENAI_API_KEY) throw new Error('Falta OPENAI_API_KEY');
-  
+
   try {
     const client = new OpenAICtor({ apiKey: process.env.OPENAI_API_KEY });
     const hasChatCompletions = !!client?.chat?.completions?.create;
     if (hasChatCompletions) return { client, mode: 'v4-chat' };
   } catch {}
-  
+
   const { Configuration, OpenAIApi } = await import('openai');
   const configuration = new Configuration({ apiKey: process.env.OPENAI_API_KEY });
   const client = new OpenAIApi(configuration);
@@ -39,7 +38,7 @@ async function chatCompletion({ model = 'gpt-4o-mini', messages, temperature = 0
   return extractText(resp, 'v3');
 }
 
-// ============ Utilidades ============
+// ============ Utilidades (imágenes, colores) ============
 function unsplashFallback(keyword, width = 1600, height = 900) {
   return `https://source.unsplash.com/${width}x${height}/?${encodeURIComponent(keyword)}`;
 }
@@ -61,6 +60,95 @@ function pickPrimaryColor(data) {
   return fromPalette || '#16a34a';
 }
 
+// ============ Asignación de íconos a CATEGORÍAS (server-side) ============
+function pickAntIconForCategory(label = '', sectorHint = '') {
+  const n = String(label || '').toLowerCase();
+  const s = String(sectorHint || '').toLowerCase();
+
+  // Alimenticio (panadería/pastelería/restaurante/café)
+  if (/(pastel|tarta|gallet|cupcake|postre|panader)/.test(n) || /(pasteler|panader)/.test(s)) return 'PieChartOutlined';
+  if (/(cafe|cafeter|barista|bebida)/.test(n) || /cafeter/.test(s)) return 'CoffeeOutlined';
+  if (/(restaurante|comida|pizza|taquer)/.test(n) || /restaurante/.test(s)) return 'RestOutlined';
+
+  // Retail / moda / calzado / accesorios
+  if (/(playera|camis|polo|ropa|moda|vestid|jean|boutique)/.test(n) || /(tienda|retail)/.test(s)) return 'ShoppingOutlined';
+  if (/(sneaker|tenis|zapat|calzad)/.test(n)) return 'SkinOutlined';
+  if (/(accesori|gafa|lente|reloj|bols|joy)/.test(n)) return 'GiftOutlined';
+
+  // Electrónica / tecnología
+  if (/(celular|phone|laptop|tablet|pc|electr[oó]nic|gadg)/.test(n) || /tecnolog/.test(s)) return 'MobileOutlined';
+
+  // Servicios / reservas
+  if (/(servici|booking|cita|reserva|agenda)/.test(n) || /servicio/.test(s)) return 'ToolOutlined';
+
+  // Hogar / ferretería
+  if (/(hogar|mueble|decor|ferreter|herramient)/.test(n)) return 'HomeOutlined';
+
+  // Salud / belleza / fitness
+  if (/(spa|belleza|barber|est[eé]tica)/.test(n) || /belleza/.test(s)) return 'HeartOutlined';
+  if (/(salud|cl[ií]nica|dent|m[eé]dic)/.test(n) || /cl[ií]nica|salud/.test(s)) return 'MedicineBoxOutlined';
+  if (/(gym|fitness|yoga|deport)/.test(n)) return 'HeartOutlined'; // No hay Dumbbell en AntD
+
+  // Mascotas
+  if (/(mascota|veterin|pet|perro|gato)/.test(n)) return 'SmileOutlined';
+
+  // Automotriz
+  if (/(auto|taller|llanta|mec[aá]nic)/.test(n)) return 'CarOutlined';
+
+  // Educación
+  if (/(escuel|curso|academ|clase|capacit)/.test(n)) return 'BookOutlined';
+
+  // Inmobiliario
+  if (/(inmobili|bienes ra[ií]ces|casa|depart)/.test(n)) return 'BankOutlined';
+
+  // Fallback neutro
+  return 'TagOutlined';
+}
+
+/**
+ * Inyecta `schema.categoriesDetailed = [{ label, icon }]` y mantiene compatibilidad:
+ * - Si ya viene `categoriesDetailed`, solo completa icon si falta.
+ * - Si solo viene `categories` (array de strings), lo transforma a detailed.
+ * - Si no hay categorías, intenta deducirlas desde `products.items[].category`.
+ */
+export function withCategoryIcons(schema = {}, { sector = '' } = {}) {
+  const s = { ...(schema || {}) };
+  const sectorHint = s?.brand?.sector || s?.businessSector || sector || '';
+
+  // 1) Normalizar fuente de categorías a un arreglo de objetos {label, icon?}
+  let detailed = [];
+  if (Array.isArray(s.categoriesDetailed) && s.categoriesDetailed.length) {
+    detailed = s.categoriesDetailed.map((c) =>
+      typeof c === 'string' ? ({ label: c, icon: null }) : ({ label: c?.label, icon: c?.icon || null })
+    ).filter((c) => c.label);
+  } else {
+    let labels = Array.isArray(s.categories) ? s.categories.slice() : [];
+    if (!labels.length && s.products?.items?.length) {
+      const set = new Set();
+      for (const it of s.products.items) {
+        if (it?.category) set.add(String(it.category));
+      }
+      labels = [...set];
+    }
+    detailed = labels.map((label) => ({ label: String(label || '').trim(), icon: null })).filter((c) => c.label);
+  }
+
+  // 2) Asignar icon si falta
+  detailed = detailed.map(({ label, icon }) => ({
+    label,
+    icon: icon || pickAntIconForCategory(label, sectorHint),
+  }));
+
+  s.categoriesDetailed = detailed;
+
+  // (Opcional) puedes seguir dejando `schema.categories` como array plano
+  if (!Array.isArray(s.categories) || !s.categories.length) {
+    s.categories = detailed.map((d) => d.label);
+  }
+
+  return s;
+}
+
 // ============ GENERADORES DE CONTENIDO CON IA ============
 
 /**
@@ -68,7 +156,7 @@ function pickPrimaryColor(data) {
  */
 async function generateSiteContent(data) {
   const { companyInfo, businessStory, businessSector, templateId } = data;
-  
+
   const prompt = `Eres un experto en marketing y copywriting. Genera contenido profesional y persuasivo para un sitio web.
 
 INFORMACIÓN DEL NEGOCIO:
@@ -179,7 +267,6 @@ IMPORTANTE:
       max_tokens: 2000
     });
 
-    // Limpiar el response por si viene con markdown
     let cleanedResponse = response.trim();
     if (cleanedResponse.startsWith('```json')) {
       cleanedResponse = cleanedResponse.replace(/^```json\s*/, '').replace(/\s*```$/, '');
@@ -191,7 +278,6 @@ IMPORTANTE:
     return content;
   } catch (error) {
     console.error('Error generando contenido con IA:', error);
-    // Fallback a contenido genérico
     return generateFallbackContent(data);
   }
 }
@@ -201,7 +287,7 @@ IMPORTANTE:
  */
 async function generateProducts(data, count = 6) {
   const { companyInfo, businessStory } = data;
-  
+
   const prompt = `Genera ${count} productos o servicios realistas para este negocio.
 
 NEGOCIO: ${companyInfo}
@@ -258,7 +344,7 @@ NOTA: Los precios deben ser realistas para México (en MXN).`;
  */
 async function generateBookingSlots(data) {
   const { companyInfo, businessStory } = data;
-  
+
   const prompt = `Genera 6 slots de horarios realistas para reservas de este negocio.
 
 NEGOCIO: ${companyInfo}
@@ -318,10 +404,6 @@ Responde SOLO con JSON:
 }
 
 // ============ SCHEMA BUILDERS ============
-
-/**
- * Construye el schema base común a todas las plantillas
- */
 function buildBaseSchema(data, aiContent, templateId = 'info') {
   const brand = data.companyInfo || data.slug || 'Mi Negocio';
   const waDigits = data.contactWhatsapp || data.leadPhone || '';
@@ -330,7 +412,7 @@ function buildBaseSchema(data, aiContent, templateId = 'info') {
   const heroImg = Array.isArray(data.photoURLs) && data.photoURLs[0]
     ? data.photoURLs[0]
     : unsplashFallback(brand, 1600, 900);
-  
+
   const gallery = (Array.isArray(data.photoURLs) && data.photoURLs.length > 0)
     ? data.photoURLs
     : [
@@ -349,8 +431,11 @@ function buildBaseSchema(data, aiContent, templateId = 'info') {
     slug: data.slug,
     brand: {
       name: brand,
-      logo: data.logoURL || null
+      logo: data.logoURL || null,
+      // si en otro punto llenas sector, aquí se respeta
+      sector: data.businessSector || ''
     },
+    businessSector: data.businessSector || '',
     contact: {
       whatsapp: waDigits || '',
       email: data.contactEmail || '',
@@ -408,7 +493,10 @@ function buildBaseSchema(data, aiContent, templateId = 'info') {
 export async function buildInfoSchema(data) {
   console.log('[buildInfoSchema] Generando contenido con IA...');
   const aiContent = await generateSiteContent(data);
-  const base = buildBaseSchema(data, aiContent, 'info');
+  let base = buildBaseSchema(data, aiContent, 'info');
+
+  // Inyectar íconos de categorías si aplica (por si en algún caso agregas categories)
+  base = withCategoryIcons(base, { sector: base.businessSector });
 
   return {
     templateId: 'info',
@@ -434,19 +522,20 @@ export async function buildEcommerceSchema(data) {
     generateSiteContent(data),
     generateProducts(data, 6)
   ]);
-  
-  const base = buildBaseSchema(data, aiContent, 'ecommerce');
+
+  let base = buildBaseSchema(data, aiContent, 'ecommerce');
   const waUrl = base.hero.ctaUrl;
 
   // Mapear productos con imágenes de la galería
-  const products = productsData.products.map((p, i) => ({
+  const products = (productsData.products || []).map((p, i) => ({
     ...p,
     image: base.gallery.images[i % base.gallery.images.length],
     buttonUrl: waUrl ? `${waUrl}?text=${encodeURIComponent(`Hola, me interesa ${p.title}`)}` : '#',
     buttonText: 'Ordenar por WhatsApp'
   }));
 
-  return {
+  // Construcción inicial del schema ecommerce
+  let schema = {
     templateId: 'ecommerce',
     ...base,
     categories: productsData.categories || ['Todos', 'Destacados'],
@@ -460,13 +549,18 @@ export async function buildEcommerceSchema(data) {
     payments: {
       text: 'Aceptamos transferencia, tarjeta de crédito/débito y pago contra entrega (según zona).'
     },
-    promo: aiContent.faqs && aiContent.faqs.length > 2 ? {
+    promo: (aiContent.faqs && aiContent.faqs.length > 2) ? {
       title: '¡Oferta Especial!',
       text: 'Pregunta por nuestras promociones vigentes.',
       cta: 'Conocer promociones',
       waText: 'Hola, quiero saber sobre las promociones disponibles.'
     } : null
   };
+
+  // 👉 Inyectar categorías con iconos (categoriesDetailed)
+  schema = withCategoryIcons(schema, { sector: schema.businessSector });
+
+  return schema;
 }
 
 /**
@@ -478,18 +572,17 @@ export async function buildBookingSchema(data) {
     generateSiteContent(data),
     generateBookingSlots(data)
   ]);
-  
-  const base = buildBaseSchema(data, aiContent, 'booking');
+
+  let base = buildBaseSchema(data, aiContent, 'booking');
   const waUrl = base.hero.ctaUrl;
 
-  // Mapear slots con URLs de WhatsApp
-  const slots = bookingData.slots.map(s => ({
+  const slots = (bookingData.slots || []).map(s => ({
     ...s,
     buttonUrl: waUrl ? `${waUrl}?text=${encodeURIComponent(`Hola, quiero reservar: ${s.label}`)}` : '#',
     buttonText: 'Reservar por WhatsApp'
   }));
 
-  return {
+  let schema = {
     templateId: 'booking',
     ...base,
     booking: {
@@ -508,6 +601,11 @@ export async function buildBookingSchema(data) {
       }))
     }
   };
+
+  // 👉 Por si tu booking maneja categorías (algunos negocios lo usan)
+  schema = withCategoryIcons(schema, { sector: schema.businessSector });
+
+  return schema;
 }
 
 /**
@@ -515,9 +613,9 @@ export async function buildBookingSchema(data) {
  */
 export async function generateCompleteSchema(data) {
   const templateId = (data.templateId || 'info').toLowerCase();
-  
+
   console.log(`[generateCompleteSchema] Generando schema para templateId: ${templateId}`);
-  
+
   try {
     switch (templateId) {
       case 'ecommerce':
@@ -530,9 +628,11 @@ export async function generateCompleteSchema(data) {
     }
   } catch (error) {
     console.error('[generateCompleteSchema] Error:', error);
-    // Fallback al schema básico
     const base = buildBaseSchema(data, generateFallbackContent(data), templateId);
-    return { templateId: 'info', ...base };
+    let fallbackSchema = { templateId: 'info', ...base };
+    // Aun en fallback, añade categoriesDetailed si aplica
+    fallbackSchema = withCategoryIcons(fallbackSchema, { sector: fallbackSchema.businessSector });
+    return fallbackSchema;
   }
 }
 
