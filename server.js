@@ -99,14 +99,55 @@ async function resolveUnsplashFinalUrl(sourceUrl) {
   }
 }
 
-async function getStockPhotoUrls(summary) {
-  const sources = buildUnsplashFeaturedQueries(summary);
+// Usa Pexels como fuente principal (requiere PEXELS_API_KEY) y
+// cae a Unsplash Source (resuelto a URL final) si Pexels falla o no hay resultados.
+async function getStockPhotoUrls(summary, count = 3) {
+  // 1) Armar keywords a partir del objetivo + nombre + primeras palabras de la descripción
+  const objetivoMap = {
+    ecommerce: 'tienda online productos',
+    booking:   'reservas servicios agenda',
+    info:      'negocio local'
+  };
+  const objetivo = objetivoMap[String(summary?.templateId || '').toLowerCase()] || 'negocio local';
+  const nombre   = (summary?.companyName || summary?.name || summary?.slug || '').toString().trim();
+  const descTop  = (summary?.description || '')
+    .toString()
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
+    .split(/\s+/).filter(Boolean).slice(0, 4).join(' ');
+  const query = [objetivo, nombre, descTop].filter(Boolean).join(' ').trim() || 'negocio local';
+
+  // 2) Intentar Pexels primero (si hay API key)
+  const apiKey = process.env.PEXELS_API_KEY;
+  if (apiKey) {
+    try {
+      const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=landscape`;
+      const { data } = await axios.get(url, { headers: { Authorization: apiKey } });
+      const photos = Array.isArray(data?.photos) ? data.photos : [];
+      const pexelsUrls = photos.slice(0, count).map(p =>
+        p?.src?.landscape || p?.src?.large2x || p?.src?.large || p?.src?.original
+      ).filter(Boolean);
+
+      if (pexelsUrls.length) return pexelsUrls;
+    } catch (e) {
+      console.error('[getStockPhotoUrls] Pexels error:', e?.message || e);
+      // continúa a Unsplash fallback
+    }
+  }
+
+  // 3) Fallback: Unsplash Source → resolver 302 a URL final del CDN
+  const sources = buildUnsplashFeaturedQueries({
+    templateId: summary?.templateId,
+    companyName: nombre,
+    description: descTop
+  });
   const finals = [];
   for (const u of sources) {
     finals.push(await resolveUnsplashFinalUrl(u));
   }
   return finals.filter(Boolean);
 }
+
 
 function assertOpenAIKey() {
   if (!process.env.OPENAI_API_KEY) {
