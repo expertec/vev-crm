@@ -383,6 +383,7 @@ app.post('/api/whatsapp/mark-read', async (req, res) => {
 // Acepta { leadId, leadPhone, summary, negocioId? }
 // ============== after-form (web) ==============
 // Acepta { leadId, leadPhone, summary, negocioId? }
+// ============== after-form (web) ==============
 app.post('/api/web/after-form', async (req, res) => {
   try {
     const { leadId, leadPhone, summary, negocioId } = req.body || {};
@@ -411,7 +412,7 @@ app.post('/api/web/after-form', async (req, res) => {
     }
     const leadData = (await leadRef.get()).data() || {};
 
-    // 3) Guardar brief en el lead (puedes incluir aquí metadata del brief si quieres)
+    // 3) Guardar brief en el lead
     await leadRef.set({
       briefWeb: summary || {},
       etiquetas: admin.firestore.FieldValue.arrayUnion('FormularioCompletado'),
@@ -449,16 +450,30 @@ app.post('/api/web/after-form', async (req, res) => {
       console.error('[after-form] error subiendo assets:', e);
     }
 
-    // 3.6) ⚠️ Fallback de imágenes si el usuario NO subió fotos
+    // 3.6) ⚠️ Fallback de imágenes cuando NO se suben fotos
     if (!uploadedPhotos || uploadedPhotos.length === 0) {
-      const keyword =
-        summary.businessType ||
-        summary.companyName ||
-        summary.slug ||
-        'negocio';
+      // Construir keyword desde objetivo (templateId) + nombre + primeras palabras de la descripción
+      const mapObjetivo = {
+        ecommerce: 'tienda online productos',
+        booking:   'reservas servicio agenda',
+        info:      'negocio local'
+      };
+      const objetivo = mapObjetivo[String(summary.templateId || '').toLowerCase()] || 'negocio local';
+      const nombre   = (summary.companyName || summary.name || summary.slug || '').toString().trim();
+      const descTop  = (summary.description || '')
+        .toString()
+        .replace(/https?:\/\/\S+/g, '')
+        .replace(/[^\p{L}\p{N}\s]/gu, '')
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 4)                 // 3–4 palabras bastan para orientar la búsqueda
+        .join(' ');
+
+      const keyword = [objetivo, nombre, descTop].filter(Boolean).join(' ') || 'negocio local';
       const k = encodeURIComponent(keyword);
       const w = 1200, h = 800;
-      // Unsplash Source: sin API key, devuelve una imagen por query
+
+      // Unsplash Source: sin API key, devuelve 1 imagen por query (variamos con %1, %2, %3)
       uploadedPhotos = [
         `https://source.unsplash.com/${w}x${h}/?${k}%201`,
         `https://source.unsplash.com/${w}x${h}/?${k}%202`,
@@ -485,15 +500,15 @@ app.post('/api/web/after-form', async (req, res) => {
         });
       }
 
-      // crear documento en Negocios  ✅ (aquí sí van template/color/assets)
+      // crear documento en Negocios  ✅
       const ref = await db.collection('Negocios').add({
         leadId: finalLeadId,
         leadPhone: leadPhoneDigits,
         status: 'Sin procesar',
 
-        companyInfo:     summary.companyName || '',
-        businessSector:  summary.businessType || '',
-        businessStory:   summary.businessStory || '',
+        companyInfo:     summary.companyName || summary.name || '',
+        businessSector:  '',                        // (sin businessType en este form)
+        businessStory:   summary.description || '',
 
         templateId:      String(summary.templateId || 'info').toLowerCase(),
         primaryColor:    summary.primaryColor || null,
@@ -516,10 +531,21 @@ app.post('/api/web/after-form', async (req, res) => {
       finalSlug = summary.slug || '';
     }
 
-    // (empatía + respuesta)
-    const nombreCorto = firstName(leadData?.nombre || summary?.contactName || '');
-    const giroHumano  = humanizeGiro(summary?.businessType || summary?.businessSector || '');
-    const [op1, op2, op3] = pickOpportunityTriplet(giroHumano);
+    // (empatía + respuesta) — derivar "giro" desde templateId
+    const first = (v = '') => String(v).trim().split(/\s+/)[0] || '';
+    const nombreCorto = first(leadData?.nombre || summary?.contactName || '');
+    const giroBase = (() => {
+      const t = String(summary?.templateId || '').toLowerCase();
+      if (t === 'ecommerce') return 'tienda online';
+      if (t === 'booking')   return 'servicio con reservas';
+      return 'negocio';
+    })();
+
+    // Si ya tienes humanizeGiro/pickOpportunityTriplet en tu server, puedes reutilizarlos:
+    const giroHumano  = humanizeGiro ? humanizeGiro(giroBase) : giroBase;
+    const [op1, op2, op3] = pickOpportunityTriplet
+      ? pickOpportunityTriplet(giroHumano)
+      : ['clarificar propuesta de valor', 'CTA visible a WhatsApp', 'pruebas sociales (reseñas)'];
 
     const msg1 = `${nombreCorto ? nombreCorto + ', ' : ''}ya recibí tu formulario. Mi equipo y yo ya estamos trabajando en tu muestra para que quede clara y útil.`;
     const msg2 = `Platicando con mi equipo, identificamos tres áreas para que tu ${giroHumano} aproveche mejor su web:\n1) ${op1}\n2) ${op2}\n3) ${op3}\nSi te late, las integramos en tu demo y te la comparto.`;
@@ -542,6 +568,7 @@ app.post('/api/web/after-form', async (req, res) => {
     return res.status(500).json({ error: String(e?.message || e) });
   }
 });
+
 
 
 
