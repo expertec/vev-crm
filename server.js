@@ -11,6 +11,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import dayjs from 'dayjs';
 import slugify from 'slugify';
+import axios from 'axios'; // 👈 si ya lo tienes importado, omite esta línea
 
 dotenv.config();
 
@@ -49,6 +50,63 @@ try {
 // ================ OpenAI compat (para mensajes GPT) ================
 import OpenAIImport from 'openai';
 const OpenAICtor = OpenAIImport?.OpenAI || OpenAIImport;
+
+
+function buildUnsplashFeaturedQueries(summary = {}) {
+  const objetivoMap = {
+    ecommerce: 'tienda online,productos',
+    booking:   'reservas,servicios,agenda',
+    info:      'negocio local'
+  };
+  const objetivo = objetivoMap[String(summary.templateId || '').toLowerCase()] || 'negocio local';
+
+  const nombre = (summary.companyName || summary.name || summary.slug || '').toString().trim();
+
+  const descTop = (summary.description || '')
+    .toString()
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
+    .split(/\s+/).filter(Boolean).slice(0, 4).join(' ');
+
+  const terms = [objetivo, nombre, descTop].filter(Boolean).join(',');
+  const q = encodeURIComponent(terms);
+  const w = 1200, h = 800;
+
+  return [
+    `https://source.unsplash.com/featured/${w}x${h}/?${q}&sig=1`,
+    `https://source.unsplash.com/featured/${w}x${h}/?${q}&sig=2`,
+    `https://source.unsplash.com/featured/${w}x${h}/?${q}&sig=3`,
+  ];
+}
+
+async function resolveUnsplashFinalUrl(sourceUrl) {
+  try {
+    const res = await axios.get(sourceUrl, {
+      maxRedirects: 0,
+      validateStatus: (s) => s === 302 || (s >= 200 && s < 300),
+    });
+    return res.headers?.location || sourceUrl;
+  } catch {
+    try {
+      const res2 = await axios.head(sourceUrl, {
+        maxRedirects: 0,
+        validateStatus: (s) => s === 302 || (s >= 200 && s < 300),
+      });
+      return res2.headers?.location || sourceUrl;
+    } catch {
+      return sourceUrl;
+    }
+  }
+}
+
+async function getStockPhotoUrls(summary) {
+  const sources = buildUnsplashFeaturedQueries(summary);
+  const finals = [];
+  for (const u of sources) {
+    finals.push(await resolveUnsplashFinalUrl(u));
+  }
+  return finals.filter(Boolean);
+}
 
 function assertOpenAIKey() {
   if (!process.env.OPENAI_API_KEY) {
@@ -384,6 +442,7 @@ app.post('/api/whatsapp/mark-read', async (req, res) => {
 // ============== after-form (web) ==============
 // Acepta { leadId, leadPhone, summary, negocioId? }
 // ============== after-form (web) ==============
+// ============== after-form (web) ==============
 app.post('/api/web/after-form', async (req, res) => {
   try {
     const { leadId, leadPhone, summary, negocioId } = req.body || {};
@@ -395,7 +454,7 @@ app.post('/api/web/after-form', async (req, res) => {
     const finalLeadId = leadId || e164ToLeadId(e164);
     const leadPhoneDigits = e164.replace('+', '');
 
-    // 2) Verificar/crear lead  ✅ (NO guardar campos del negocio aquí)
+    // 2) Verificar/crear lead
     const leadRef  = db.collection('leads').doc(finalLeadId);
     const leadSnap = await leadRef.get();
     if (!leadSnap.exists) {
@@ -450,35 +509,15 @@ app.post('/api/web/after-form', async (req, res) => {
       console.error('[after-form] error subiendo assets:', e);
     }
 
-    // 3.6) ⚠️ Fallback de imágenes cuando NO se suben fotos
+    // 3.6) Fallback de imágenes cuando NO se suben fotos → buscar y guardar URL FINAL
     if (!uploadedPhotos || uploadedPhotos.length === 0) {
-      // Construir keyword desde objetivo (templateId) + nombre + primeras palabras de la descripción
-      const mapObjetivo = {
-        ecommerce: 'tienda online productos',
-        booking:   'reservas servicio agenda',
-        info:      'negocio local'
-      };
-      const objetivo = mapObjetivo[String(summary.templateId || '').toLowerCase()] || 'negocio local';
-      const nombre   = (summary.companyName || summary.name || summary.slug || '').toString().trim();
-      const descTop  = (summary.description || '')
-        .toString()
-        .replace(/https?:\/\/\S+/g, '')
-        .replace(/[^\p{L}\p{N}\s]/gu, '')
-        .split(/\s+/)
-        .filter(Boolean)
-        .slice(0, 4)                 // 3–4 palabras bastan para orientar la búsqueda
-        .join(' ');
-
-      const keyword = [objetivo, nombre, descTop].filter(Boolean).join(' ') || 'negocio local';
-      const k = encodeURIComponent(keyword);
-      const w = 1200, h = 800;
-
-      // Unsplash Source: sin API key, devuelve 1 imagen por query (variamos con %1, %2, %3)
-      uploadedPhotos = [
-        `https://source.unsplash.com/${w}x${h}/?${k}%201`,
-        `https://source.unsplash.com/${w}x${h}/?${k}%202`,
-        `https://source.unsplash.com/${w}x${h}/?${k}%203`,
-      ];
+      try {
+        uploadedPhotos = await getStockPhotoUrls(summary); // 👈 usa objetivo+nombre+desc
+      } catch (e) {
+        console.error('[after-form] stock photos error:', e);
+        // Último fallback (sin resolver redirects)
+        uploadedPhotos = buildUnsplashFeaturedQueries(summary);
+      }
     }
 
     // 4) Crear/actualizar Negocios — BLOQUEA duplicado por WhatsApp
@@ -500,14 +539,14 @@ app.post('/api/web/after-form', async (req, res) => {
         });
       }
 
-      // crear documento en Negocios  ✅
+      // crear documento en Negocios
       const ref = await db.collection('Negocios').add({
         leadId: finalLeadId,
         leadPhone: leadPhoneDigits,
         status: 'Sin procesar',
 
         companyInfo:     summary.companyName || summary.name || '',
-        businessSector:  '',                        // (sin businessType en este form)
+        businessSector:  '', // en esta versión no hay campo businessType en el form
         businessStory:   summary.description || '',
 
         templateId:      String(summary.templateId || 'info').toLowerCase(),
@@ -531,7 +570,7 @@ app.post('/api/web/after-form', async (req, res) => {
       finalSlug = summary.slug || '';
     }
 
-    // (empatía + respuesta) — derivar "giro" desde templateId
+    // Mensajes al lead (derivados del templateId)
     const first = (v = '') => String(v).trim().split(/\s+/)[0] || '';
     const nombreCorto = first(leadData?.nombre || summary?.contactName || '');
     const giroBase = (() => {
@@ -541,7 +580,6 @@ app.post('/api/web/after-form', async (req, res) => {
       return 'negocio';
     })();
 
-    // Si ya tienes humanizeGiro/pickOpportunityTriplet en tu server, puedes reutilizarlos:
     const giroHumano  = humanizeGiro ? humanizeGiro(giroBase) : giroBase;
     const [op1, op2, op3] = pickOpportunityTriplet
       ? pickOpportunityTriplet(giroHumano)
@@ -561,13 +599,13 @@ app.post('/api/web/after-form', async (req, res) => {
       etiquetas: admin.firestore.FieldValue.arrayUnion('FormOK')
     }, { merge: true });
 
-    // ✅ devuelve también el slug
     return res.json({ ok: true, negocioId: negocioDocId, slug: finalSlug });
   } catch (e) {
     console.error('/api/web/after-form error:', e);
     return res.status(500).json({ error: String(e?.message || e) });
   }
 });
+
 
 
 
