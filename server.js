@@ -381,6 +381,8 @@ app.post('/api/whatsapp/mark-read', async (req, res) => {
 // Acepta { leadId, leadPhone, summary, negocioId? }
 // ============== after-form (web) ==============
 // Acepta { leadId, leadPhone, summary, negocioId? }
+// ============== after-form (web) ==============
+// Acepta { leadId, leadPhone, summary, negocioId? }
 app.post('/api/web/after-form', async (req, res) => {
   try {
     const { leadId, leadPhone, summary, negocioId } = req.body || {};
@@ -447,6 +449,23 @@ app.post('/api/web/after-form', async (req, res) => {
       console.error('[after-form] error subiendo assets:', e);
     }
 
+    // 3.6) ⚠️ Fallback de imágenes si el usuario NO subió fotos
+    if (!uploadedPhotos || uploadedPhotos.length === 0) {
+      const keyword =
+        summary.businessType ||
+        summary.companyName ||
+        summary.slug ||
+        'negocio';
+      const k = encodeURIComponent(keyword);
+      const w = 1200, h = 800;
+      // Unsplash Source: sin API key, devuelve una imagen por query
+      uploadedPhotos = [
+        `https://source.unsplash.com/${w}x${h}/?${k}%201`,
+        `https://source.unsplash.com/${w}x${h}/?${k}%202`,
+        `https://source.unsplash.com/${w}x${h}/?${k}%203`,
+      ];
+    }
+
     // 4) Crear/actualizar Negocios — BLOQUEA duplicado por WhatsApp
     let negocioDocId = negocioId;
     let finalSlug = summary.slug || '';
@@ -486,6 +505,7 @@ app.post('/api/web/after-form', async (req, res) => {
         socialFacebook:  summary.socialFacebook || '',
         socialInstagram: summary.socialInstagram || '',
 
+        // Assets subidos + Fallback
         logoURL:   uploadedLogoURL || summary.logoURL || '',
         photoURLs: uploadedPhotos && uploadedPhotos.length ? uploadedPhotos : (summary.photoURLs || []),
 
@@ -522,6 +542,7 @@ app.post('/api/web/after-form', async (req, res) => {
     return res.status(500).json({ error: String(e?.message || e) });
   }
 });
+
 
 
 
