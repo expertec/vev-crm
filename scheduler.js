@@ -385,14 +385,12 @@ export async function generateSiteSchemas() {
     return;
   }
 
-  // Util para asegurar valores por si el brief viene incompleto
   const safe = (v, def = '') => (v === undefined || v === null ? def : v);
 
   for (const doc of snap.docs) {
     const id   = doc.id;
     const data = doc.data() || {};
 
-    // Insumos que ya guardas desde /api/web/after-form ó /api/web/sample-create
     const companyName   = safe(data.companyInfo, 'Tu Negocio');
     const businessStory = safe(data.businessStory, 'Descripción breve del negocio.');
     const templateId    = String(safe(data.templateId, 'info')).toLowerCase(); // 'ecommerce' | 'info' | 'booking'
@@ -406,19 +404,14 @@ export async function generateSiteSchemas() {
     const instagram     = safe(data.socialInstagram, '');
     const youtube       = safe(data.socialYoutube || data.socialYouTube, '');
 
-    // slug (ya viene del server y es único)
     const slug = safe(data.slug, id).toLowerCase();
 
-    // Ajustes por plantilla (secciones que exigiremos)
-    // — ecommerce: catálogo, beneficios, proceso de compra, testimonios, FAQ, contacto, CTA final
-    // — info/servicios: héroe, beneficios, servicios, proceso, casos/testimonios, FAQ, contacto, CTA final
-    // — booking: héroe con CTA a WhatsApp, servicios/paquetes, calendario simple (texto), proceso, testimonios, FAQ, contacto
-    const goal = (
+    const goal =
       templateId === 'ecommerce' ? 'ecommerce' :
       templateId === 'booking'   ? 'booking'   :
-      'services'
-    );
+      'services';
 
+    // ————— Prompt SIN placeholders tipo "string ..." (ejemplos ya entre comillas) —————
     const prompt = `
 Eres un director de UX/UI y copywriting 2025. Devuelve SOLO un JSON válido
 para renderizar un sitio web ${goal} profesional, moderno, responsive y mobile-first.
@@ -436,29 +429,29 @@ Contexto del negocio:
 Estructura requerida del JSON (usa exactamente estos nombres de claves):
 
 {
-  "slug": string,
+  "slug": "${slug}",
   "templateId": "${templateId}",
   "colors": {
-    "primary": string (usa ${primaryColor || (palette[0] || '#16a34a')}),
-    "secondary": string,
-    "accent": string,
+    "primary": "${primaryColor || (palette[0] || '#16A34A')}",
+    "secondary": "#FFFFFF",
+    "accent": "#F1F5F9",
     "text": "#222222"
   },
   "menu": [
-    { "id":"hero", "label":"Inicio" },
-    { "id":"benefits", "label":"Beneficios" },
-    ${goal === 'ecommerce' ? `{ "id":"products","label":"Productos" },` : `{ "id":"services","label":"Servicios" },`}
-    { "id":"process", "label":"Cómo Funciona" },
-    { "id":"testimonials", "label":"Opiniones" },
-    { "id":"faqs", "label":"Preguntas" },
-    { "id":"contact", "label":"Contacto" }
+    { "id": "hero", "label": "Inicio" },
+    { "id": "benefits", "label": "Beneficios" },
+    ${goal === 'ecommerce' ? `{ "id": "products", "label": "Productos" },` : `{ "id": "services", "label": "Servicios" },`}
+    { "id": "process", "label": "Cómo Funciona" },
+    { "id": "testimonials", "label": "Opiniones" },
+    { "id": "faqs", "label": "Preguntas" },
+    { "id": "contact", "label": "Contacto" }
   ],
 
   "hero": {
-    "title": string potente (máx 8 palabras),
-    "subtitle": string claro (máx 18 palabras),
+    "title": "Título breve y potente",
+    "subtitle": "Subtítulo claro de máximo 18 palabras.",
     "ctaText": "Escríbenos por WhatsApp",
-    "backgroundImageUrl": string (elige una de photoURLs o sugiere stock genérico),
+    "backgroundImageUrl": "${photoURLs[0] || ''}",
     "kpis": [
       { "label": "Clientes felices", "value": "500+" },
       { "label": "Años", "value": "5" }
@@ -468,9 +461,9 @@ Estructura requerida del JSON (usa exactamente estos nombres de claves):
   "benefits": {
     "title": "Beneficios",
     "items": [
-      { "icon":"CheckCircleOutlined", "title": string corto, "text": string 1-2 frases },
-      { "icon":"ThunderboltOutlined","title": string corto, "text": string 1-2 frases },
-      { "icon":"SafetyOutlined",     "title": string corto, "text": string 1-2 frases }
+      { "icon": "CheckCircleOutlined", "title": "Beneficio claro", "text": "Frase breve (1–2 líneas) que explique el beneficio." },
+      { "icon": "ThunderboltOutlined", "title": "Entrega rápida", "text": "Explica tu rapidez o SLA (1–2 frases)." },
+      { "icon": "SafetyOutlined", "title": "Confiable", "text": "Garantía o soporte (1–2 frases)." }
     ]
   },
 
@@ -478,17 +471,17 @@ Estructura requerida del JSON (usa exactamente estos nombres de claves):
     "title": "${goal === 'ecommerce' ? 'Nuestros Productos' : 'Nuestros Servicios'}",
     "items": [
       {
-        "title": string,
-        "text": string 1-2 frases,
+        "title": "Nombre del ${goal === 'ecommerce' ? 'producto' : 'servicio'}",
+        "text": "Descripción breve en 1–2 frases.",
         ${goal === 'ecommerce' ? `"price": 199.00,` : `"price": null,`}
-        "imageUrl": string (logoURL o alguna de photoURLs),
+        "imageUrl": "${photoURLs[0] || ''}",
         "buttonText": "${goal === 'ecommerce' ? 'Agregar' : 'Solicitar'}"
       },
       {
-        "title": string,
-        "text": string 1-2 frases,
+        "title": "Otra opción",
+        "text": "Otra descripción breve.",
         ${goal === 'ecommerce' ? `"price": 249.00,` : `"price": null,`}
-        "imageUrl": string,
+        "imageUrl": "${photoURLs[1] || ''}",
         "buttonText": "${goal === 'ecommerce' ? 'Agregar' : 'Solicitar'}"
       }
     ]
@@ -497,23 +490,23 @@ Estructura requerida del JSON (usa exactamente estos nombres de claves):
   "process": {
     "title": "Cómo funciona",
     "steps": [
-      { "icon":"NumberOutlined","title":"Elige",     "text":"Selecciona ${goal === 'ecommerce' ? 'productos' : 'tu servicio'}" },
-      { "icon":"MessageOutlined","title":"WhatsApp", "text":"Confirma por WhatsApp en 1 paso" },
-      { "icon":"SmileOutlined",  "title":"Disfruta",  "text":"Recibe y listo" }
+      { "icon": "NumberOutlined",  "title": "Elige",     "text": "Selecciona ${goal === 'ecommerce' ? 'productos' : 'tu servicio'}" },
+      { "icon": "MessageOutlined", "title": "WhatsApp",  "text": "Confirma por WhatsApp en 1 paso" },
+      { "icon": "SmileOutlined",   "title": "Disfruta",  "text": "Recibe y listo" }
     ]
   },
 
   "testimonials": {
     "title": "Lo que dicen",
     "items": [
-      { "text": "Excelente atención y resultados.", "author":"Cliente 1", "imageUrl": "" },
-      { "text": "Súper recomendado.",               "author":"Cliente 2", "imageUrl": "" }
+      { "text": "Excelente atención y resultados.", "author": "Cliente 1", "imageUrl": "" },
+      { "text": "Súper recomendado.",               "author": "Cliente 2", "imageUrl": "" }
     ]
   },
 
   "faqs": [
-    { "q":"¿Cómo hago el pedido?", "a":"Escríbenos al WhatsApp y te guiamos." },
-    { "q":"¿Tienen garantía?",     "a":"Sí, satisfacción garantizada." }
+    { "q": "¿Cómo hago el pedido?", "a": "Escríbenos al WhatsApp y te guiamos." },
+    { "q": "¿Tienen garantía?",     "a": "Sí, satisfacción garantizada." }
   ],
 
   "gallery": {
@@ -548,7 +541,7 @@ Consideraciones:
       const resultText = await chatCompletionCompat({
         model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
         messages: [
-          { role: 'system', content: 'Eres un generador de esquemas JSON de sitios web, preciso y estricto con el formato.' },
+          { role: 'system', content: 'Eres un generador de JSON estricto. Responde ÚNICAMENTE con un objeto JSON válido. Sin comentarios, sin texto fuera del JSON, sin placeholders como "string".' },
           { role: 'user', content: prompt }
         ],
         max_tokens: 1400,
@@ -557,45 +550,93 @@ Consideraciones:
 
       let schema = {};
       try {
-        // intentamos parsear; si viniera con basura, limpiarlo simple
-        const trimmed = (resultText || '').trim();
-        const start = trimmed.indexOf('{');
-        const end   = trimmed.lastIndexOf('}');
-        const json  = start >= 0 && end >= 0 ? trimmed.slice(start, end + 1) : trimmed;
-        schema = JSON.parse(json);
+        const trimmed  = (resultText || '').trim();
+        const unfenced = trimmed.replace(/```(?:json)?\s*([\s\S]*?)```/i, '$1').trim();
+        const start    = unfenced.indexOf('{');
+        const end      = unfenced.lastIndexOf('}');
+        const candidate = (start >= 0 && end >= 0 && end > start) ? unfenced.slice(start, end + 1) : unfenced;
+
+        // Repara JSON “casi válido” (comas colgantes, comillas simples, etc.)
+        const repaired = jsonrepair(candidate);
+        schema = JSON.parse(repaired);
       } catch (parseErr) {
         console.error('[generateSiteSchemas] JSON parse error:', parseErr);
-        // fallback mínimo
+
+        // Fallback mínimo para que NUNCA se quede en "Procesando"
         schema = {
           slug,
           templateId,
-          colors: { primary: palette[0] || '#16a34a', secondary: '#ffffff', accent: '#f4f6f8', text: '#222' },
-          hero: { title: companyName, subtitle: businessStory, ctaText: 'Escríbenos por WhatsApp', backgroundImageUrl: photoURLs[0] || '' },
-          menu: [{ id:'hero',label:'Inicio' }],
+          colors: { primary: (palette[0] || '#16a34a'), secondary: '#ffffff', accent: '#f4f6f8', text: '#222' },
+          hero: {
+            title: companyName,
+            subtitle: businessStory,
+            ctaText: 'Escríbenos por WhatsApp',
+            backgroundImageUrl: photoURLs[0] || ''
+          },
+          menu: [{ id:'hero', label:'Inicio' }],
         };
+
+        const preview = String(resultText || '').replace(/\s+/g, ' ').slice(0, 400);
+        console.error('[generateSiteSchemas] Raw preview (400c):', preview);
       }
 
-      // Normalizaciones + refuerzos
-      schema.slug = slug;
-      schema.templateId = templateId;
+      // ——— Normalizaciones críticas para que el front no truene ———
+      schema.slug = schema.slug || slug;
+      schema.templateId = schema.templateId || templateId;
+
       schema.colors = schema.colors || {};
-      schema.colors.primary = schema.colors.primary || palette[0] || '#16a34a';
+      schema.colors.primary   = schema.colors.primary   || (palette[0] || '#16a34a');
       schema.colors.secondary = schema.colors.secondary || '#ffffff';
-      schema.colors.accent = schema.colors.accent || '#f4f6f8';
-      schema.colors.text = schema.colors.text || '#222222';
+      schema.colors.accent    = schema.colors.accent    || '#f4f6f8';
+      schema.colors.text      = schema.colors.text      || '#222222';
+
+      schema.hero = schema.hero || {};
+      schema.hero.title  = schema.hero.title  || companyName;
+      schema.hero.subtitle = schema.hero.subtitle || businessStory;
+      schema.hero.ctaText  = schema.hero.ctaText  || 'Escríbenos por WhatsApp';
+      schema.hero.backgroundImageUrl = schema.hero.backgroundImageUrl || photoURLs[0] || '';
+
+      if (!Array.isArray(schema.menu) || !schema.menu.length) {
+        schema.menu = [{ id: 'hero', label: 'Inicio' }];
+      }
 
       schema.contact = schema.contact || {};
       schema.contact.whatsapp = schema.contact.whatsapp || whatsapp;
-      schema.contact.email = schema.contact.email || email;
+      schema.contact.email    = schema.contact.email    || email;
       schema.contact.facebook = schema.contact.facebook || facebook;
-      schema.contact.instagram = schema.contact.instagram || instagram;
-      schema.contact.youtube = schema.contact.youtube || youtube;
+      schema.contact.instagram= schema.contact.instagram|| instagram;
+      if (youtube) schema.contact.youtube = schema.contact.youtube || youtube;
 
-      // Persistimos el schema
+      if (templateId === 'ecommerce') {
+        schema.products = schema.products || { title: 'Nuestros Productos', items: [] };
+        schema.products.items = Array.isArray(schema.products.items) ? schema.products.items : [];
+      } else {
+        schema.services = schema.services || { title: 'Nuestros Servicios', items: [] };
+        schema.services.items = Array.isArray(schema.services.items) ? schema.services.items : [];
+      }
+
+      // Persistencia (guarda siteSchema + compat en schema)
       await db.collection('Negocios').doc(id).set({
         status: 'Procesado',
+        siteSchema: schema,
         schema,
-        lastGeneratedAt: new Date()
+        colors: schema.colors,
+        contact: {
+          whatsapp: schema.contact.whatsapp || '',
+          email:    schema.contact.email    || '',
+          facebook: schema.contact.facebook || '',
+          instagram:schema.contact.instagram|| '',
+          ...(schema.contact.youtube ? { youtube: schema.contact.youtube } : {})
+        },
+        hero: {
+          title: schema.hero.title,
+          subtitle: schema.hero.subtitle,
+          backgroundImageUrl: schema.hero.backgroundImageUrl || ''
+        },
+        products: templateId === 'ecommerce' ? (schema.products || null) : null,
+        services: templateId !== 'ecommerce' ? (schema.services || null) : null,
+        updatedAt: Timestamp.now(),
+        lastGeneratedAt: Timestamp.now()
       }, { merge: true });
 
       console.log(`[generateSiteSchemas] OK → ${id} (${slug})`);
@@ -608,6 +649,7 @@ Consideraciones:
     }
   }
 }
+
 
 
 
