@@ -1,4 +1,4 @@
-// server.js
+// server.js - COMPLETO CON SISTEMA DE PIN
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
@@ -11,7 +11,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import dayjs from 'dayjs';
 import slugify from 'slugify';
-import axios from 'axios'; // 👈 si ya lo tienes importado, omite esta línea
+import axios from 'axios';
 
 dotenv.config();
 
@@ -38,6 +38,9 @@ import {
   enviarSitiosPendientes,
 } from './scheduler.js';
 
+// ================ 🆕 SISTEMA DE PIN ================
+import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
+
 // (opcional) queue helpers
 let cancelSequences = null;
 let scheduleSequenceForLead = null;
@@ -52,7 +55,6 @@ import OpenAIImport from 'openai';
 const OpenAICtor = OpenAIImport?.OpenAI || OpenAIImport;
 
 import { classifyBusiness } from './utils/businessClassifier.js';
-
 
 function buildUnsplashFeaturedQueries(summary = {}) {
   const objetivoMap = {
@@ -101,15 +103,9 @@ async function resolveUnsplashFinalUrl(sourceUrl) {
   }
 }
 
-// Usa Pexels como fuente principal (requiere PEXELS_API_KEY) y
-// cae a Unsplash Source (resuelto a URL final) si Pexels falla o no hay resultados.
-// Usa el clasificador (LLM + heurístico) para armar keywords,
-// busca primero en Pexels y cae a Unsplash (resuelto a URL final) si falla.
 async function getStockPhotoUrls(summary, count = 3) {
-  // 1) Clasificar sector + keywords
   const { sector, keywords } = await classifyBusiness(summary);
 
-  // 2) Query robusto: sector + keywords + nombre + objetivo
   const objetivoMap = {
     ecommerce: 'tienda online productos',
     booking:   'reservas servicios agenda',
@@ -120,7 +116,6 @@ async function getStockPhotoUrls(summary, count = 3) {
 
   const query = [sector, keywords, objetivo, nombre].filter(Boolean).join(' ').trim();
 
-  // 3) PEXELS primero (si hay API key)
   const apiKey = process.env.PEXELS_API_KEY;
   if (apiKey) {
     try {
@@ -136,7 +131,6 @@ async function getStockPhotoUrls(summary, count = 3) {
     }
   }
 
-  // 4) Fallback: Unsplash Source → resolver 302 a URL final
   const termsForUnsplash = [sector, keywords, objetivo, nombre].filter(Boolean).join(',');
   const q = encodeURIComponent(termsForUnsplash);
   const w = 1200, h = 800;
@@ -150,21 +144,16 @@ async function getStockPhotoUrls(summary, count = 3) {
   return finals.filter(Boolean);
 }
 
-
-
-
-// === Helper: subir imagen base64 a Firebase Storage y devolver URL pública
 async function uploadBase64Image({ base64, folder = 'web-assets', filenamePrefix = 'img', contentType = 'image/png' }) {
   if (!base64) return null;
   try {
-    // base64 puede venir como "data:image/png;base64,AAAA..." o puro base64
     const matches = String(base64).match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/);
     const mime = matches ? matches[1] : (contentType || 'image/png');
     const b64  = matches ? matches[2] : base64;
 
     const buffer = Buffer.from(b64, 'base64');
     const ts = Date.now();
-    const fileName = `${folder}/${filenamePrefix}_${ts}.png`; // si quieres respeta extensión desde mime
+    const fileName = `${folder}/${filenamePrefix}_${ts}.png`;
     const file = admin.storage().bucket().file(fileName);
 
     await file.save(buffer, {
@@ -175,8 +164,7 @@ async function uploadBase64Image({ base64, folder = 'web-assets', filenamePrefix
       validation: false,
     });
 
-    // Asegura que sea público; en buckets con uniform access suele bastar el ACL default
-    try { await file.makePublic(); } catch { /* noop si ya es público */ }
+    try { await file.makePublic(); } catch { /* noop */ }
 
     return `https://storage.googleapis.com/${admin.storage().bucket().name}/${fileName}`;
   } catch (err) {
@@ -184,10 +172,6 @@ async function uploadBase64Image({ base64, folder = 'web-assets', filenamePrefix
     return null;
   }
 }
-
-
-
-
 
 async function chatCompletionCompat({ model, messages, max_tokens = 300, temperature = 0.55 }) {
   const { client, mode } = await getOpenAI();
@@ -209,7 +193,7 @@ import { parsePhoneNumberFromString } from 'libphonenumber-js';
 function toE164(num, defaultCountry = 'MX') {
   const raw = String(num || '').replace(/\D/g, '');
   const p = parsePhoneNumberFromString(raw, defaultCountry);
-  if (p && p.isValid()) return p.number; // +521...
+  if (p && p.isValid()) return p.number;
   if (/^\d{10}$/.test(raw)) return `+52${raw}`;
   if (/^\d{11,15}$/.test(raw) && raw.startsWith('521')) return `+${raw}`;
   if (/^\d{11,15}$/.test(raw) && raw.startsWith('52'))  return `+${raw}`;
@@ -223,7 +207,7 @@ function firstName(n = '') {
   return String(n).trim().split(/\s+/)[0] || '';
 }
 
-// ================== Personalización por giro (helpers ligeros) ==================
+// ================== Personalización por giro ==================
 const GIRO_ALIAS = {
   restaurantes: ['restaurante', 'cafetería', 'bar'],
   tiendaretail: ['tienda física', 'retail'],
@@ -253,11 +237,13 @@ const GIRO_ALIAS = {
   industria: ['industria', 'manufactura'],
   otros: ['negocio']
 };
+
 function humanizeGiro(code = '') {
   const c = String(code || '').toLowerCase();
   if (GIRO_ALIAS[c]) return GIRO_ALIAS[c][0];
   return c.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim() || 'negocio';
 }
+
 function pickOpportunityTriplet(giroHumano = '') {
   const base = giroHumano.toLowerCase();
   const common = [
@@ -302,19 +288,41 @@ const port = process.env.PORT || 3001;
 const upload = multer({ dest: path.resolve('./uploads') });
 
 app.use(cors());
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
-// ---------------- WhatsApp status / número ----------------
+// ============== 🆕 RUTAS DEL SISTEMA DE PIN ==============
+/**
+ * POST /api/activar-plan
+ * Activa un plan de pago y genera PIN para el cliente
+ */
+app.post('/api/activar-plan', activarPlan);
+
+/**
+ * POST /api/reenviar-pin
+ * Reenvía el PIN por WhatsApp si el cliente lo perdió
+ */
+app.post('/api/reenviar-pin', reenviarPIN);
+
+// ============== RUTAS EXISTENTES ==============
+
+// Ruta de bienvenida
+app.get('/', (req, res) => {
+  res.json({ message: 'Servidor activo y corriendo 🚀' });
+});
+
+// WhatsApp status / número
 app.get('/api/whatsapp/status', (_req, res) => {
   res.json({ status: getConnectionStatus(), qr: getLatestQR() });
 });
+
 app.get('/api/whatsapp/number', (_req, res) => {
   const phone = getSessionPhone();
   if (phone) return res.json({ phone });
   return res.status(503).json({ error: 'WhatsApp no conectado' });
 });
 
-// ---------------- Enviar mensaje manual ----------------
+// Enviar mensaje manual
 app.post('/api/whatsapp/send-message', async (req, res) => {
   const { leadId, message } = req.body;
   if (!leadId || !message) return res.status(400).json({ error: 'Faltan leadId o message' });
@@ -332,10 +340,9 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
   }
 });
 
-// ---------------- Enviar audio (convierte a M4A) ----------------
-// ---------------- Enviar audio (convierte a M4A pero manda en Opus/PTT si aplica) ----------------
+// Enviar audio
 app.post('/api/whatsapp/send-audio', upload.single('audio'), async (req, res) => {
-  const { phone, forwarded, ptt } = req.body; // ← NUEVO: banderas desde el front
+  const { phone, forwarded, ptt } = req.body;
   if (!phone || !req.file) {
     return res.status(400).json({ success: false, error: 'Faltan phone o archivo' });
   }
@@ -344,7 +351,6 @@ app.post('/api/whatsapp/send-audio', upload.single('audio'), async (req, res) =>
   const m4aPath = `${uploadPath}.m4a`;
 
   try {
-    // 1) Convertir el archivo subido (cualquier formato) a M4A (AAC)
     await new Promise((resolve, reject) => {
       ffmpeg(uploadPath)
         .outputOptions(['-c:a aac', '-vn'])
@@ -354,14 +360,11 @@ app.post('/api/whatsapp/send-audio', upload.single('audio'), async (req, res) =>
         .on('error', reject);
     });
 
-    // 2) Enviar el audio (whatsappService luego lo recodifica a OGG/Opus PTT si es necesario)
-    //    y aplica el banner "Reenviado" cuando forwarded === true
     await sendAudioMessage(phone, m4aPath, {
       ptt: String(ptt).toLowerCase() === 'true' || ptt === true,
       forwarded: String(forwarded).toLowerCase() === 'true' || forwarded === true,
     });
 
-    // 3) Limpieza local
     try { fs.unlinkSync(uploadPath); } catch {}
     try { fs.unlinkSync(m4aPath); } catch {}
 
@@ -374,8 +377,7 @@ app.post('/api/whatsapp/send-audio', upload.single('audio'), async (req, res) =>
   }
 });
 
-
-// ---------------- Crear usuario + bienvenida WA ----------------
+// Crear usuario + bienvenida WA
 app.post('/api/crear-usuario', async (req, res) => {
   const { email, negocioId } = req.body;
   if (!email || !negocioId) return res.status(400).json({ error: 'Faltan email o negocioId' });
@@ -407,6 +409,7 @@ app.post('/api/crear-usuario', async (req, res) => {
 `;
     if (isNewUser) mensaje += `🔑 Contraseña temporal: ${tempPassword}\n`;
     else mensaje += `🔄 Si no recuerdas tu contraseña, usa "¿Olvidaste tu contraseña?"\n`;
+    
     let fechaCorte = '-';
     const d = negocio.planRenewalDate;
     if (d?.toDate) fechaCorte = dayjs(d.toDate()).format('DD/MM/YYYY');
@@ -427,7 +430,7 @@ app.post('/api/crear-usuario', async (req, res) => {
   }
 });
 
-// ---------------- Marcar como leídos ----------------
+// Marcar como leídos
 app.post('/api/whatsapp/mark-read', async (req, res) => {
   const { leadId } = req.body;
   if (!leadId) return res.status(400).json({ error: 'Falta leadId' });
@@ -440,26 +443,17 @@ app.post('/api/whatsapp/mark-read', async (req, res) => {
   }
 });
 
-// ============== after-form (web) ==============
-// Acepta { leadId, leadPhone, summary, negocioId? }
-// ============== after-form (web) ==============
-// Acepta { leadId, leadPhone, summary, negocioId? }
-// ============== after-form (web) ==============
-// Acepta { leadId, leadPhone, summary, negocioId? }
-// ============== after-form (web) ==============
-// ============== after-form (web) ==============
+// after-form (web)
 app.post('/api/web/after-form', async (req, res) => {
   try {
     const { leadId, leadPhone, summary, negocioId } = req.body || {};
     if (!leadId && !leadPhone) return res.status(400).json({ error: 'Faltan leadId o leadPhone' });
-    if (!summary)              return res.status(400).json({ error: 'Falta summary' });
+    if (!summary) return res.status(400).json({ error: 'Falta summary' });
 
-    // 1) Resolver e164 y leadId
     const e164 = toE164(leadPhone || (leadId || '').split('@')[0]);
     const finalLeadId = leadId || e164ToLeadId(e164);
     const leadPhoneDigits = e164.replace('+', '');
 
-    // 2) Verificar/crear lead
     const leadRef  = db.collection('leads').doc(finalLeadId);
     const leadSnap = await leadRef.get();
     if (!leadSnap.exists) {
@@ -476,14 +470,12 @@ app.post('/api/web/after-form', async (req, res) => {
     }
     const leadData = (await leadRef.get()).data() || {};
 
-    // 3) Guardar brief en el lead
     await leadRef.set({
       briefWeb: summary || {},
       etiquetas: admin.firestore.FieldValue.arrayUnion('FormularioCompletado'),
       lastMessageAt: new Date(),
     }, { merge: true });
 
-    // 3.5) Subir assets (logo e imágenes) a Storage y obtener URLs
     let uploadedLogoURL = null;
     let uploadedPhotos = [];
     try {
@@ -514,18 +506,15 @@ app.post('/api/web/after-form', async (req, res) => {
       console.error('[after-form] error subiendo assets:', e);
     }
 
-    // 3.6) Fallback de imágenes cuando NO se suben fotos → buscar y guardar URL FINAL
     if (!uploadedPhotos || uploadedPhotos.length === 0) {
       try {
-        uploadedPhotos = await getStockPhotoUrls(summary); // 👈 usa objetivo+nombre+desc
+        uploadedPhotos = await getStockPhotoUrls(summary);
       } catch (e) {
         console.error('[after-form] stock photos error:', e);
-        // Último fallback (sin resolver redirects)
         uploadedPhotos = buildUnsplashFeaturedQueries(summary);
       }
     }
 
-    // 4) Crear/actualizar Negocios — BLOQUEA duplicado por WhatsApp
     let negocioDocId = negocioId;
     let finalSlug = summary.slug || '';
     if (!negocioDocId) {
@@ -544,48 +533,40 @@ app.post('/api/web/after-form', async (req, res) => {
         });
       }
 
-      // crear documento en Negocios
       const ref = await db.collection('Negocios').add({
         leadId: finalLeadId,
         leadPhone: leadPhoneDigits,
         status: 'Sin procesar',
-
-        companyInfo:     summary.companyName || summary.name || '',
-        businessSector:  '', // en esta versión no hay campo businessType en el form
-        businessStory:   summary.description || '',
-
-        templateId:      String(summary.templateId || 'info').toLowerCase(),
-        primaryColor:    summary.primaryColor || null,
-        palette:         summary.palette || (summary.primaryColor ? [summary.primaryColor] : []),
-        keyItems:        summary.keyItems || [],
-
+        companyInfo: summary.companyName || summary.name || '',
+        businessSector: '',
+        businessStory: summary.description || '',
+        templateId: String(summary.templateId || 'info').toLowerCase(),
+        primaryColor: summary.primaryColor || null,
+        palette: summary.palette || (summary.primaryColor ? [summary.primaryColor] : []),
+        keyItems: summary.keyItems || [],
         contactWhatsapp: summary.contactWhatsapp || '',
-        contactEmail:    summary.email || '',
-        socialFacebook:  summary.socialFacebook || '',
+        contactEmail: summary.email || '',
+        socialFacebook: summary.socialFacebook || '',
         socialInstagram: summary.socialInstagram || '',
-
-        // Assets subidos + Fallback
-        logoURL:   uploadedLogoURL || summary.logoURL || '',
+        logoURL: uploadedLogoURL || summary.logoURL || '',
         photoURLs: uploadedPhotos && uploadedPhotos.length ? uploadedPhotos : (summary.photoURLs || []),
-
-        slug:      summary.slug || '',
+        slug: summary.slug || '',
         createdAt: new Date()
       });
       negocioDocId = ref.id;
       finalSlug = summary.slug || '';
     }
 
-    // Mensajes al lead (derivados del templateId)
     const first = (v = '') => String(v).trim().split(/\s+/)[0] || '';
     const nombreCorto = first(leadData?.nombre || summary?.contactName || '');
     const giroBase = (() => {
       const t = String(summary?.templateId || '').toLowerCase();
       if (t === 'ecommerce') return 'tienda online';
-      if (t === 'booking')   return 'servicio con reservas';
+      if (t === 'booking') return 'servicio con reservas';
       return 'negocio';
     })();
 
-    const giroHumano  = humanizeGiro ? humanizeGiro(giroBase) : giroBase;
+    const giroHumano = humanizeGiro ? humanizeGiro(giroBase) : giroBase;
     const [op1, op2, op3] = pickOpportunityTriplet
       ? pickOpportunityTriplet(giroHumano)
       : ['clarificar propuesta de valor', 'CTA visible a WhatsApp', 'pruebas sociales (reseñas)'];
@@ -611,13 +592,7 @@ app.post('/api/web/after-form', async (req, res) => {
   }
 });
 
-
-
-
-
-
-// ============== Activar WebEnviada tras mandar link ==============
-// Acepta { leadId?, leadPhone?, link? } — activa 'WebEnviada' 15 min después
+// Activar WebEnviada tras mandar link
 app.post('/api/web/sample-sent', async (req, res) => {
   try {
     const { leadId, leadPhone } = req.body || {};
@@ -630,7 +605,7 @@ app.post('/api/web/sample-sent', async (req, res) => {
       return res.status(500).json({ error: 'scheduleSequenceForLead no disponible' });
     }
 
-    const startAt = new Date(Date.now() + 15 * 60 * 1000); // +15 min
+    const startAt = new Date(Date.now() + 15 * 60 * 1000);
     await scheduleSequenceForLead(finalLeadId, 'WebEnviada', startAt);
 
     await db.collection('leads').doc(finalLeadId).set({
@@ -645,14 +620,11 @@ app.post('/api/web/sample-sent', async (req, res) => {
   }
 });
 
-// ============== tracking: link abierto ==============
-// Acepta { leadId? , leadPhone? , slug? } — con cualquiera basta.
-// Si viene slug, lo resolvemos a phone → leadId.
+// tracking: link abierto
 app.post('/api/track/link-open', async (req, res) => {
   try {
     let { leadId, leadPhone, slug } = req.body || {};
 
-    // a) si vino slug, busca el negocio y toma su leadPhone
     if (slug && !leadPhone && !leadId) {
       const snap = await db.collection('Negocios').where('slug', '==', String(slug)).limit(1).get();
       if (!snap.empty) {
@@ -661,7 +633,6 @@ app.post('/api/track/link-open', async (req, res) => {
       }
     }
 
-    // b) normaliza a leadId
     if (!leadId && leadPhone) {
       const e164 = toE164(leadPhone);
       leadId = e164ToLeadId(e164);
@@ -672,19 +643,16 @@ app.post('/api/track/link-open', async (req, res) => {
     const leadSnap = await leadRef.get();
     if (!leadSnap.exists) return res.status(404).json({ error: 'Lead no encontrado' });
 
-    // Evita re-disparar si ya se marcó
     const leadData = leadSnap.data() || {};
     if (leadData.linkOpenedAt) {
       return res.json({ ok: true, already: true });
     }
 
-    // 1) Marca evento
     await leadRef.set({
       linkOpenedAt: new Date(),
       etiquetas: admin.firestore.FieldValue.arrayUnion('LinkAbierto')
     }, { merge: true });
 
-    // 2) Cambia secuencia: WebEnviada → LinkAbierto
     try {
       if (cancelSequences) {
         await cancelSequences(leadId, ['WebEnviada']);
@@ -703,8 +671,7 @@ app.post('/api/track/link-open', async (req, res) => {
   }
 });
 
-
-// ---------------- Enviar video note (PTV) ----------------
+// Enviar video note (PTV)
 app.post('/api/whatsapp/send-video-note', async (req, res) => {
   try {
     const { phone, url, seconds } = req.body || {};
@@ -726,12 +693,7 @@ app.post('/api/whatsapp/send-video-note', async (req, res) => {
   }
 });
 
-
-
-// ============== sample-create (nuevo, para el formulario turbo) ==============
-// Acepta { leadPhone, summary: { companyName, businessStory, slug } }
-// ============== sample-create (turbo, ahora con plantillas y assets) ==============
-// Acepta { leadPhone, summary: { companyName, businessStory, slug, templateId?, primaryColor?, assets? } }
+// sample-create (turbo)
 app.post('/api/web/sample-create', async (req, res) => {
   try {
     const { leadPhone, summary } = req.body || {};
@@ -740,12 +702,10 @@ app.post('/api/web/sample-create', async (req, res) => {
       return res.status(400).json({ error: 'Faltan companyName, businessStory o slug' });
     }
 
-    // Normaliza e164 y leadId
     const e164 = toE164(leadPhone || '');
     const finalLeadId = e164ToLeadId(e164);
     const leadPhoneDigits = e164.replace('+', '');
 
-    // 🔒 Duplicado por WhatsApp
     const existSnap = await db.collection('Negocios')
       .where('leadPhone', '==', leadPhoneDigits)
       .limit(1)
@@ -760,10 +720,8 @@ app.post('/api/web/sample-create', async (req, res) => {
       });
     }
 
-    // Asegura slug único en servidor
     const finalSlug = await ensureUniqueSlug(summary.slug || summary.companyName);
 
-    // Crea/asegura el lead
     const leadRef  = db.collection('leads').doc(finalLeadId);
     const leadSnap = await leadRef.get();
     if (!leadSnap.exists) {
@@ -779,7 +737,6 @@ app.post('/api/web/sample-create', async (req, res) => {
       }, { merge: true });
     }
 
-    // ⬆️ Subir assets (logo e imágenes) a Storage y obtener URLs
     let uploadedLogoURL = null;
     let uploadedPhotos = [];
     try {
@@ -810,38 +767,27 @@ app.post('/api/web/sample-create', async (req, res) => {
       console.error('[sample-create] error subiendo assets:', e);
     }
 
-    // Crea el Negocio con plantilla/color/urls
     const ref = await db.collection('Negocios').add({
       leadId: finalLeadId,
       leadPhone: leadPhoneDigits,
       status: 'Sin procesar',
-
-      companyInfo:     summary.companyName,
-      businessSector:  '',
-      businessStory:   summary.businessStory,
-
-      // Plantilla y color
-      templateId:      summary.templateId || 'info',           // 'ecommerce' | 'info' | 'booking'
-      primaryColor:    summary.primaryColor || null,
-      palette:         summary.primaryColor ? [summary.primaryColor] : [],
-
-      keyItems:        [],
-
-      // Contacto y redes
+      companyInfo: summary.companyName,
+      businessSector: '',
+      businessStory: summary.businessStory,
+      templateId: summary.templateId || 'info',
+      primaryColor: summary.primaryColor || null,
+      palette: summary.primaryColor ? [summary.primaryColor] : [],
+      keyItems: [],
       contactWhatsapp: summary.contactWhatsapp || '',
-      contactEmail:    summary.email || '',
-      socialFacebook:  summary.socialFacebook || '',
+      contactEmail: summary.email || '',
+      socialFacebook: summary.socialFacebook || '',
       socialInstagram: summary.socialInstagram || '',
-
-      // Assets subidos
-      logoURL:         uploadedLogoURL || summary.logoURL || '',
-      photoURLs:       uploadedPhotos && uploadedPhotos.length ? uploadedPhotos : (summary.photoURLs || []),
-
-      slug:            finalSlug,
-      createdAt:       new Date()
+      logoURL: uploadedLogoURL || summary.logoURL || '',
+      photoURLs: uploadedPhotos && uploadedPhotos.length ? uploadedPhotos : (summary.photoURLs || []),
+      slug: finalSlug,
+      createdAt: new Date()
     });
 
-    // (Opcional) guardar brief
     await leadRef.set({
       briefWeb: {
         companyName: summary.companyName,
@@ -862,10 +808,10 @@ app.post('/api/web/sample-create', async (req, res) => {
   }
 });
 
-
 // ============== Arranque servidor + WA ==============
 app.listen(port, () => {
-  console.log(`Servidor corriendo en el puerto ${port}`);
+  console.log(`🚀 Servidor corriendo en puerto ${port}`);
+  console.log(`✅ Sistema de PIN activado`);
   connectToWhatsApp().catch(err => console.error('Error al conectar WhatsApp en startup:', err));
 });
 
@@ -890,7 +836,7 @@ cron.schedule('0 * * * *', () => {
   archivarNegociosAntiguos().catch(err => console.error('Error en archivarNegociosAntiguos:', err));
 });
 
-/* ---------------- Helpers NUEVOS (al final para orden) ---------------- */
+// ============== Helpers ==============
 async function ensureUniqueSlug(input) {
   const base = slugify(String(input || ''), { lower: true, strict: true }).slice(0, 30) || 'sitio';
   let slug = base;
