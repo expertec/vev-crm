@@ -41,6 +41,9 @@ import {
 // ================ 🆕 SISTEMA DE PIN ================
 import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
 
+// ================ 🆕 AUTENTICACIÓN DE CLIENTE ================
+import { loginCliente, verificarSesion, logoutCliente } from './clienteAuthRoutes.js';
+
 // (opcional) queue helpers
 let cancelSequences = null;
 let scheduleSequenceForLead = null;
@@ -303,6 +306,25 @@ app.post('/api/activar-plan', activarPlan);
  * Reenvía el PIN por WhatsApp si el cliente lo perdió
  */
 app.post('/api/reenviar-pin', reenviarPIN);
+
+// ============== 🆕 RUTAS DE AUTENTICACIÓN DE CLIENTE ==============
+/**
+ * POST /api/cliente/login
+ * Autentica a un cliente con teléfono + PIN
+ */
+app.post('/api/cliente/login', loginCliente);
+
+/**
+ * POST /api/cliente/verificar-sesion
+ * Verifica si un token de sesión es válido
+ */
+app.post('/api/cliente/verificar-sesion', verificarSesion);
+
+/**
+ * POST /api/cliente/logout
+ * Cierra la sesión del cliente
+ */
+app.post('/api/cliente/logout', logoutCliente);
 
 // ============== RUTAS EXISTENTES ==============
 
@@ -812,6 +834,7 @@ app.post('/api/web/sample-create', async (req, res) => {
 app.listen(port, () => {
   console.log(`🚀 Servidor corriendo en puerto ${port}`);
   console.log(`✅ Sistema de PIN activado`);
+  console.log(`✅ Autenticación de cliente activada`);
   connectToWhatsApp().catch(err => console.error('Error al conectar WhatsApp en startup:', err));
 });
 
