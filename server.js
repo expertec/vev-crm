@@ -42,7 +42,7 @@ import {
 import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
 
 // ================ 🆕 AUTENTICACIÓN DE CLIENTE ================
-import { loginCliente, verificarSesion, logoutCliente } from './ClienteAuthRoutes.js';
+import { loginCliente, verificarSesion, logoutCliente } from './clienteRoutes.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
