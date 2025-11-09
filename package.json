@@ -39,6 +39,7 @@
     "puppeteer": "^24.6.0",
     "qrcode-terminal": "^0.12.0",
     "sharp": "^0.32.6",
-    "slugify": "^1.6.6"
+    "slugify": "^1.6.6",
+    "stripe": "^19.3.0"
   }
 }

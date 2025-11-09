@@ -1,4 +1,4 @@
-// clienteAuthRoutes.js - Sistema de autenticación para clientes
+// clienteAuthRoutes.js - Sistema de autenticación para clientes con soporte de suscripciones
 
 import { db } from './firebaseAdmin.js';
 import { normalizarTelefono } from './pinUtils.js';
@@ -7,25 +7,7 @@ import { normalizarTelefono } from './pinUtils.js';
  * POST /api/cliente/login
  * 
  * Autentica a un cliente usando teléfono + PIN
- * 
- * Body:
- * {
- *   phone: string,      // Teléfono del cliente
- *   pin: string         // PIN de 4 dígitos
- * }
- * 
- * Response:
- * {
- *   success: true,
- *   data: {
- *     negocioId: string,
- *     companyInfo: string,
- *     slug: string,
- *     plan: string,
- *     templateId: string,
- *     token: string      // Token de sesión (JWT simplificado)
- *   }
- * }
+ * Ahora soporta suscripciones de Stripe y trials
  */
 export async function loginCliente(req, res) {
   try {
@@ -89,26 +71,104 @@ export async function loginCliente(req, res) {
       });
     }
 
-    // Verificar que tenga un plan activo (no free)
-    const plan = negocioData.plan;
-    const planesActivos = ['basic', 'pro', 'premium'];
-    
-    if (!plan || !planesActivos.includes(String(plan).toLowerCase())) {
-      console.log(`⚠️ Negocio ${negocioId} no tiene plan activo`);
+    // NUEVA LÓGICA: Verificar acceso según tipo de plan
+    let hasAccess = false;
+    let accessReason = '';
+    let subscriptionInfo = {};
+
+    // 1. Verificar trial activo
+    if (negocioData.trialActive) {
+      const now = Date.now();
+      const trialEnd = negocioData.trialEndDate?.toMillis() || 0;
+      
+      if (now < trialEnd) {
+        hasAccess = true;
+        accessReason = 'trial';
+        subscriptionInfo.trialEndsAt = new Date(trialEnd).toISOString();
+        console.log(`✅ Acceso por trial activo hasta ${subscriptionInfo.trialEndsAt}`);
+      } else {
+        // Trial expirado, actualizar en BD
+        await negocioDoc.ref.update({
+          trialActive: false,
+          websiteArchived: true,
+          archivedReason: 'trial_expired'
+        });
+      }
+    }
+
+    // 2. Verificar suscripción de Stripe
+    if (!hasAccess && negocioData.subscriptionStatus === 'active') {
+      hasAccess = true;
+      accessReason = 'subscription';
+      subscriptionInfo.subscriptionType = 'stripe';
+      subscriptionInfo.nextPayment = negocioData.subscriptionCurrentPeriodEnd?.toDate();
+      console.log(`✅ Acceso por suscripción Stripe activa`);
+    }
+
+    // 3. Verificar plan manual (transferencia)
+    if (!hasAccess) {
+      const plan = negocioData.plan;
+      const planesActivos = ['basic', 'pro', 'premium'];
+      
+      if (plan && planesActivos.includes(String(plan).toLowerCase())) {
+        // Verificar fecha de renovación
+        const renewalDate = negocioData.planRenewalDate?.toMillis() || 0;
+        
+        if (renewalDate > Date.now()) {
+          hasAccess = true;
+          accessReason = 'manual';
+          subscriptionInfo.planType = plan;
+          subscriptionInfo.expiresAt = new Date(renewalDate).toISOString();
+          console.log(`✅ Acceso por plan manual ${plan} hasta ${subscriptionInfo.expiresAt}`);
+        }
+      }
+    }
+
+    // Verificar si el sitio está archivado
+    if (negocioData.websiteArchived) {
+      hasAccess = false;
+      console.log(`⚠️ Sitio archivado para negocio ${negocioId}`);
+    }
+
+    // Manejo de casos especiales
+    if (!hasAccess) {
+      // Caso: Suscripción con pago pendiente
+      if (negocioData.subscriptionStatus === 'past_due') {
+        return res.status(403).json({
+          success: false,
+          error: 'Tu suscripción tiene un pago pendiente. Por favor actualiza tu método de pago.',
+          needsPayment: true,
+          subscriptionId: negocioData.subscriptionId
+        });
+      }
+
+      // Caso: Trial expirado
+      if (negocioData.trialUsed && !negocioData.subscriptionId) {
+        return res.status(403).json({
+          success: false,
+          error: 'Tu período de prueba ha expirado. Suscríbete para continuar.',
+          trialExpired: true,
+          canSubscribe: true
+        });
+      }
+
+      // Caso general: Sin acceso
       return res.status(403).json({
         success: false,
-        error: 'Tu plan ha expirado. Contacta al administrador para renovar.'
+        error: 'Tu plan ha expirado. Contacta al administrador para renovar.',
+        canSubscribe: true
       });
     }
 
     // ✅ Login exitoso
-    console.log(`✅ Login exitoso - Negocio: ${negocioId} (${negocioData.companyInfo})`);
+    console.log(`✅ Login exitoso - Negocio: ${negocioId} (${negocioData.companyInfo}) - Acceso por: ${accessReason}`);
 
-    // Generar token de sesión (simplificado - base64 de negocioId + timestamp)
+    // Generar token de sesión
     const tokenData = {
       negocioId,
       phone: phoneDigits,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      accessType: accessReason
     };
     const token = Buffer.from(JSON.stringify(tokenData)).toString('base64');
 
@@ -131,7 +191,11 @@ export async function loginCliente(req, res) {
         logoURL: negocioData.logoURL || '',
         contactEmail: negocioData.contactEmail || '',
         contactWhatsapp: negocioData.contactWhatsapp || '',
-        planRenewalDate: negocioData.planRenewalDate?.toDate?.()?.toISOString() || null,
+        // Información de suscripción
+        subscriptionType: accessReason,
+        subscriptionStatus: negocioData.subscriptionStatus,
+        hasStripeSubscription: !!negocioData.subscriptionId,
+        ...subscriptionInfo,
         token
       }
     });
@@ -150,21 +214,7 @@ export async function loginCliente(req, res) {
  * POST /api/cliente/verificar-sesion
  * 
  * Verifica si un token de sesión es válido
- * 
- * Body:
- * {
- *   token: string
- * }
- * 
- * Response:
- * {
- *   success: true,
- *   data: {
- *     negocioId: string,
- *     companyInfo: string,
- *     ...
- *   }
- * }
+ * Actualizado para soportar suscripciones
  */
 export async function verificarSesion(req, res) {
   try {
@@ -212,14 +262,51 @@ export async function verificarSesion(req, res) {
 
     const negocioData = negocioDoc.data();
 
-    // Verificar que siga teniendo plan activo
-    const plan = negocioData.plan;
-    const planesActivos = ['basic', 'pro', 'premium'];
-    
-    if (!plan || !planesActivos.includes(String(plan).toLowerCase())) {
+    // Verificar acceso actual (misma lógica que login)
+    let hasAccess = false;
+    let subscriptionInfo = {};
+
+    // Trial activo
+    if (negocioData.trialActive) {
+      const now = Date.now();
+      const trialEnd = negocioData.trialEndDate?.toMillis() || 0;
+      if (now < trialEnd) {
+        hasAccess = true;
+        subscriptionInfo.trialEndsAt = new Date(trialEnd).toISOString();
+      }
+    }
+
+    // Suscripción Stripe activa
+    if (!hasAccess && negocioData.subscriptionStatus === 'active') {
+      hasAccess = true;
+      subscriptionInfo.subscriptionActive = true;
+      subscriptionInfo.nextPayment = negocioData.subscriptionCurrentPeriodEnd?.toDate();
+    }
+
+    // Plan manual activo
+    if (!hasAccess) {
+      const plan = negocioData.plan;
+      const planesActivos = ['basic', 'pro', 'premium'];
+      if (plan && planesActivos.includes(String(plan).toLowerCase())) {
+        const renewalDate = negocioData.planRenewalDate?.toMillis() || 0;
+        if (renewalDate > Date.now()) {
+          hasAccess = true;
+          subscriptionInfo.manualPlan = true;
+          subscriptionInfo.expiresAt = new Date(renewalDate).toISOString();
+        }
+      }
+    }
+
+    // Verificar si está archivado
+    if (negocioData.websiteArchived) {
+      hasAccess = false;
+    }
+
+    if (!hasAccess) {
       return res.status(403).json({
         success: false,
-        error: 'Tu plan ha expirado'
+        error: 'Tu plan ha expirado',
+        needsRenewal: true
       });
     }
 
@@ -235,7 +322,9 @@ export async function verificarSesion(req, res) {
         logoURL: negocioData.logoURL || '',
         contactEmail: negocioData.contactEmail || '',
         contactWhatsapp: negocioData.contactWhatsapp || '',
-        planRenewalDate: negocioData.planRenewalDate?.toDate?.()?.toISOString() || null
+        subscriptionStatus: negocioData.subscriptionStatus,
+        hasStripeSubscription: !!negocioData.subscriptionId,
+        ...subscriptionInfo
       }
     });
 
@@ -251,7 +340,7 @@ export async function verificarSesion(req, res) {
 /**
  * POST /api/cliente/logout
  * 
- * Cierra sesión del cliente (opcional, el frontend puede solo borrar el token)
+ * Cierra sesión del cliente
  */
 export async function logoutCliente(req, res) {
   try {

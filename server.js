@@ -307,6 +307,48 @@ app.post('/api/activar-plan', activarPlan);
  */
 app.post('/api/reenviar-pin', reenviarPIN);
 
+// ============== 🆕 RUTAS DE SUSCRIPCIÓN CON STRIPE ==============
+import subscriptionRoutes from './subscriptionRoutes.js';
+
+/**
+ * POST /api/subscription/create-checkout
+ * Crea una sesión de checkout para nueva suscripción
+ */
+app.post('/api/subscription/create-checkout', subscriptionRoutes.createCheckoutSession);
+
+/**
+ * POST /api/subscription/cancel  
+ * Cancela una suscripción activa
+ */
+app.post('/api/subscription/cancel', subscriptionRoutes.cancelSubscription);
+
+/**
+ * POST /api/subscription/portal
+ * Crea sesión del portal de Stripe
+ */
+app.post('/api/subscription/portal', subscriptionRoutes.createPortalSession);
+
+/**
+ * POST /api/subscription/trial
+ * Activa período de prueba gratuito de 24 horas
+ */
+app.post('/api/subscription/trial', subscriptionRoutes.activateTrial);
+
+/**
+ * GET /api/subscription/status/:negocioId
+ * Obtiene el estado actual de la suscripción
+ */
+app.get('/api/subscription/status/:negocioId', subscriptionRoutes.getSubscriptionStatus);
+
+/**
+ * POST /api/subscription/webhook
+ * Webhook de Stripe (requiere raw body)
+ */
+app.post('/api/subscription/webhook', 
+  express.raw({ type: 'application/json' }), 
+  subscriptionRoutes.stripeWebhook
+);
+
 // ============== 🆕 RUTAS DE AUTENTICACIÓN DE CLIENTE ==============
 /**
  * POST /api/cliente/login
@@ -857,6 +899,32 @@ cron.schedule('*/5 * * * *', () => {
 cron.schedule('0 * * * *', () => {
   console.log('⏱️ archivarNegociosAntiguos:', new Date().toISOString());
   archivarNegociosAntiguos().catch(err => console.error('Error en archivarNegociosAntiguos:', err));
+});
+
+// Verificar trials expirados cada hora
+cron.schedule('0 * * * *', async () => {
+  console.log('🔍 Verificando trials expirados...');
+  try {
+    const now = Timestamp.now();
+    const expiredTrials = await db.collection('Negocios')
+      .where('trialActive', '==', true)
+      .where('trialEndDate', '<=', now)
+      .get();
+
+    for (const doc of expiredTrials.docs) {
+      await doc.ref.update({
+        trialActive: false,
+        plan: 'expired',
+        websiteArchived: true,
+        archivedReason: 'trial_expired',
+        updatedAt: Timestamp.now()
+      });
+      
+      console.log(`⏰ Trial expirado para negocio: ${doc.id}`);
+    }
+  } catch (err) {
+    console.error('Error verificando trials expirados:', err);
+  }
 });
 
 // ============== Helpers ==============
