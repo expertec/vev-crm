@@ -19,12 +19,9 @@ export async function createCheckoutSession(req, res) {
     if (!phoneDigits || phoneDigits.length < 10) {
       return res.status(400).json({
         success: false,
-        error: 'Teléfono inválido'
+        error: 'Teléfono inválido',
       });
     }
-
-    // Si no viene PIN, generar uno nuevo
-    const finalPin = pin || generarPIN();
 
     // Buscar o crear negocio
     let negocioRef;
@@ -32,19 +29,20 @@ export async function createCheckoutSession(req, res) {
     let isNewNegocio = false;
 
     if (negocioId) {
-      // Negocio existente
+      // Negocio existente por ID
       negocioRef = db.collection('Negocios').doc(negocioId);
       const doc = await negocioRef.get();
       if (!doc.exists) {
         return res.status(404).json({
           success: false,
-          error: 'Negocio no encontrado'
+          error: 'Negocio no encontrado',
         });
       }
       negocioData = doc.data();
     } else {
       // Buscar por teléfono
-      const negociosSnap = await db.collection('Negocios')
+      const negociosSnap = await db
+        .collection('Negocios')
         .where('leadPhone', '==', phoneDigits)
         .limit(1)
         .get();
@@ -53,48 +51,95 @@ export async function createCheckoutSession(req, res) {
         negocioRef = negociosSnap.docs[0].ref;
         negocioData = negociosSnap.docs[0].data();
       } else {
-        // Crear nuevo negocio
+        // Crear nuevo negocio base
         isNewNegocio = true;
+
+        // PIN para nuevo negocio
+        const nuevoPin = pin || generarPIN();
+
         const newNegocioData = {
           leadPhone: phoneDigits,
           contactWhatsapp: phoneDigits,
           contactEmail: email || '',
-          pin: finalPin,
-          plan: 'trial', // Empezará como trial hasta confirmar pago
+          pin: nuevoPin,
+          plan: 'trial', // se actualiza al confirmar pago
           createdAt: Timestamp.now(),
           updatedAt: Timestamp.now(),
           subscriptionType: 'pending_stripe',
           trialUsed: false,
-          status: 'Sin procesar' // Para que genere el schema
+          status: 'Sin procesar', // para generación de schema
         };
-        
+
         const docRef = await db.collection('Negocios').add(newNegocioData);
         negocioRef = docRef;
         negocioData = newNegocioData;
       }
     }
 
+    // Determinar PIN final:
+    // - Si el negocio ya tiene PIN, lo respetamos.
+    // - Si se envía un PIN manual, lo usamos solo si no había uno.
+    // - Si no hay ninguno, generamos uno nuevo.
+    let finalPin;
+    if (negocioData && negocioData.pin) {
+      finalPin = String(negocioData.pin).trim();
+    } else if (pin) {
+      finalPin = String(pin).trim();
+    } else {
+      finalPin = generarPIN();
+    }
+
+    // Si es negocio existente (por phone o negocioId) y no es nuevo,
+    // podemos actualizar contacto/email sin tocar PIN existente.
+    if (!isNewNegocio) {
+      await negocioRef.update({
+        contactWhatsapp: negocioData.contactWhatsapp || phoneDigits,
+        contactEmail: email || negocioData.contactEmail || '',
+        updatedAt: Timestamp.now(),
+        // No sobrescribimos pin si ya existía
+      });
+    }
+
     // Crear o recuperar customer de Stripe
     let stripeCustomerId = negocioData.stripeCustomerId;
-    
+
     if (!stripeCustomerId) {
       const customer = await stripe.customers.create({
         phone: phoneDigits,
         email: email || negocioData.contactEmail || undefined,
         metadata: {
           negocioId: negocioRef.id,
-          phone: phoneDigits
-        }
+          phone: phoneDigits,
+        },
       });
-      
+
       stripeCustomerId = customer.id;
-      
+
       // Guardar customerId en Firebase
-      await negocioRef.update({
+      // Solo escribimos pin si el negocio aún no tenía uno
+      const updateData = {
         stripeCustomerId: stripeCustomerId,
-        pin: finalPin // Asegurar que tiene PIN
-      });
+        updatedAt: Timestamp.now(),
+      };
+      if (!negocioData.pin) {
+        updateData.pin = finalPin;
+      }
+
+      await negocioRef.update(updateData);
+
+      // Refrescar negocioData en memoria
+      negocioData = {
+        ...negocioData,
+        stripeCustomerId,
+        pin: negocioData.pin || finalPin,
+      };
     }
+
+    // URLs de retorno
+    const baseClientUrl = process.env.CLIENT_URL || 'https://negociosweb.mx';
+    const panelUrl =
+      process.env.CLIENT_PANEL_URL || `${baseClientUrl}/cliente-login`;
+    const suscripcionUrl = `${baseClientUrl}/suscripcion`;
 
     // Crear sesión de checkout
     const session = await stripe.checkout.sessions.create({
@@ -107,20 +152,21 @@ export async function createCheckoutSession(req, res) {
         },
       ],
       mode: 'subscription',
-      success_url: `${process.env.CLIENT_URL || 'https://negociosweb.mx'}/panel?success=true&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.CLIENT_URL || 'https://negociosweb.mx'}/suscripcion?canceled=true`,
+      success_url: `${panelUrl}?success=true&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${suscripcionUrl}?canceled=true`,
       metadata: {
         negocioId: negocioRef.id,
         phone: phoneDigits,
-        pin: finalPin
+        pin: finalPin,
       },
       subscription_data: {
         metadata: {
           negocioId: negocioRef.id,
-          phone: phoneDigits
-        }
+          phone: phoneDigits,
+        },
       },
-      locale: 'es-MX'
+      // Locale válido para Stripe (antes: es-MX -> error)
+      locale: 'es-419',
     });
 
     console.log(`✅ Sesión de checkout creada para negocio ${negocioRef.id}`);
@@ -129,15 +175,14 @@ export async function createCheckoutSession(req, res) {
       success: true,
       checkoutUrl: session.url,
       sessionId: session.id,
-      negocioId: negocioRef.id
+      negocioId: negocioRef.id,
     });
-
   } catch (error) {
     console.error('❌ Error creando sesión de checkout:', error);
     return res.status(500).json({
       success: false,
       error: 'Error al crear sesión de pago',
-      details: error.message
+      details: error.message,
     });
   }
 }
@@ -192,7 +237,6 @@ export async function stripeWebhook(req, res) {
     }
 
     res.json({ received: true });
-
   } catch (error) {
     console.error('❌ Error procesando webhook:', error);
     res.status(500).json({ error: 'Error procesando webhook' });
@@ -201,27 +245,31 @@ export async function stripeWebhook(req, res) {
 
 // Handlers de eventos de Stripe
 async function handleCheckoutCompleted(session) {
-  const { customer, subscription, metadata } = session;
-  const { negocioId, phone, pin } = metadata;
+  const { subscription, metadata } = session;
+  const { negocioId, phone, pin } = metadata || {};
 
   console.log(`✅ Checkout completado para negocio ${negocioId}`);
 
   const negocioRef = db.collection('Negocios').doc(negocioId);
-  
+
   // Obtener detalles de la suscripción
   const sub = await stripe.subscriptions.retrieve(subscription);
-  
+
+  const finalPin = pin || generarPIN();
+
   await negocioRef.update({
-    plan: 'basic', // Plan de $99
+    plan: 'basic', // Plan mensual
     subscriptionId: subscription,
     subscriptionStatus: sub.status,
-    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(sub.current_period_end * 1000),
+    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(
+      sub.current_period_end * 1000
+    ),
     subscriptionStartDate: Timestamp.now(),
     planActivatedAt: Timestamp.now(),
     paymentMethod: 'stripe',
-    pin: pin || generarPIN(), // Asegurar PIN
+    pin: finalPin,
     websiteArchived: false,
-    updatedAt: Timestamp.now()
+    updatedAt: Timestamp.now(),
   });
 
   // Enviar credenciales por WhatsApp
@@ -230,13 +278,13 @@ async function handleCheckoutCompleted(session) {
 ✅ Tu pago ha sido confirmado
 💳 Plan: Mensual $99 MXN
 📱 Teléfono: ${phone}
-🔐 PIN: ${pin}
+🔐 PIN: ${finalPin}
 
 🌐 Accede a tu panel:
 ${process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login'}
 
 Tu suscripción se renovará automáticamente cada mes.
-Para cancelar, ingresa a tu panel.
+Para cancelar o actualizar tu método de pago, entra a tu panel.
 
 ¡Gracias por confiar en nosotros! 🚀`;
 
@@ -252,15 +300,17 @@ Para cancelar, ingresa a tu panel.
     subscriptionId: subscription,
     amount: 99,
     currency: 'mxn',
-    timestamp: Timestamp.now()
+    timestamp: Timestamp.now(),
   });
 }
 
 async function handleSubscriptionUpdate(subscription) {
-  const { id, customer, status, current_period_end, cancel_at_period_end } = subscription;
+  const { id, customer, status, current_period_end, cancel_at_period_end } =
+    subscription;
 
   // Buscar negocio por customerId
-  const negociosSnap = await db.collection('Negocios')
+  const negociosSnap = await db
+    .collection('Negocios')
     .where('stripeCustomerId', '==', customer)
     .limit(1)
     .get();
@@ -271,20 +321,23 @@ async function handleSubscriptionUpdate(subscription) {
   }
 
   const negocioRef = negociosSnap.docs[0].ref;
-  const negocioData = negociosSnap.docs[0].data();
 
   // Determinar si el sitio debe archivarse
-  const shouldArchive = status !== SUBSCRIPTION_STATUS.ACTIVE && 
-                        status !== SUBSCRIPTION_STATUS.TRIALING;
+  const shouldArchive =
+    status !== SUBSCRIPTION_STATUS.ACTIVE &&
+    status !== SUBSCRIPTION_STATUS.TRIALING;
 
   await negocioRef.update({
     subscriptionId: id,
     subscriptionStatus: status,
-    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(current_period_end * 1000),
+    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(
+      current_period_end * 1000
+    ),
     subscriptionCancelAtPeriodEnd: cancel_at_period_end,
-    plan: status === SUBSCRIPTION_STATUS.ACTIVE ? 'basic' : 'suspended',
+    plan:
+      status === SUBSCRIPTION_STATUS.ACTIVE ? 'basic' : 'suspended',
     websiteArchived: shouldArchive,
-    updatedAt: Timestamp.now()
+    updatedAt: Timestamp.now(),
   });
 
   console.log(`📝 Suscripción actualizada: ${id} - Estado: ${status}`);
@@ -294,7 +347,8 @@ async function handleSubscriptionCanceled(subscription) {
   const { id, customer } = subscription;
 
   // Buscar negocio
-  const negociosSnap = await db.collection('Negocios')
+  const negociosSnap = await db
+    .collection('Negocios')
     .where('stripeCustomerId', '==', customer)
     .limit(1)
     .get();
@@ -311,7 +365,7 @@ async function handleSubscriptionCanceled(subscription) {
     plan: 'canceled',
     websiteArchived: true,
     archivedReason: 'subscription_canceled',
-    updatedAt: Timestamp.now()
+    updatedAt: Timestamp.now(),
   });
 
   // Mover a colección de archivados
@@ -319,17 +373,23 @@ async function handleSubscriptionCanceled(subscription) {
     await db.collection('ArchivedSites').doc(negocioRef.id).set({
       ...negocioData,
       archivedAt: Timestamp.now(),
-      archivedReason: 'subscription_canceled'
+      archivedReason: 'subscription_canceled',
     });
   }
 
   // Notificar por WhatsApp
   if (negocioData.leadPhone) {
     await enviarMensaje(
-      { telefono: negocioData.leadPhone, nombre: negocioData.companyInfo || 'Cliente' },
-      { 
-        type: 'texto', 
-        contenido: `Tu suscripción ha sido cancelada y tu sitio web ha sido archivado.\n\nPuedes reactivarlo en cualquier momento volviendo a suscribirte.\n\nGracias por haber confiado en nosotros.` 
+      {
+        telefono: negocioData.leadPhone,
+        nombre: negocioData.companyInfo || 'Cliente',
+      },
+      {
+        type: 'texto',
+        contenido:
+          `Tu suscripción ha sido cancelada y tu sitio web ha sido archivado.\n\n` +
+          `Puedes reactivarlo en cualquier momento volviendo a suscribirte.\n\n` +
+          `Gracias por haber confiado en nosotros.`,
       }
     );
   }
@@ -338,9 +398,10 @@ async function handleSubscriptionCanceled(subscription) {
 }
 
 async function handlePaymentFailed(invoice) {
-  const { customer, subscription } = invoice;
+  const { customer } = invoice;
 
-  const negociosSnap = await db.collection('Negocios')
+  const negociosSnap = await db
+    .collection('Negocios')
     .where('stripeCustomerId', '==', customer)
     .limit(1)
     .get();
@@ -357,16 +418,24 @@ async function handlePaymentFailed(invoice) {
     websiteArchived: true,
     archivedReason: 'payment_failed',
     lastPaymentFailed: Timestamp.now(),
-    updatedAt: Timestamp.now()
+    updatedAt: Timestamp.now(),
   });
 
   // Notificar por WhatsApp
   if (negocioData.leadPhone) {
     await enviarMensaje(
-      { telefono: negocioData.leadPhone, nombre: negocioData.companyInfo || 'Cliente' },
-      { 
-        type: 'texto', 
-        contenido: `⚠️ No pudimos procesar tu pago mensual.\n\nTu sitio web ha sido suspendido temporalmente.\n\nPor favor actualiza tu método de pago en:\n${process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login'}\n\nSi necesitas ayuda, contáctanos.` 
+      {
+        telefono: negocioData.leadPhone,
+        nombre: negocioData.companyInfo || 'Cliente',
+      },
+      {
+        type: 'texto',
+        contenido:
+          `⚠️ No pudimos procesar tu pago mensual.\n\n` +
+          `Tu sitio web ha sido suspendido temporalmente.\n\n` +
+          `Por favor actualiza tu método de pago en:\n` +
+          `${process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login'}\n\n` +
+          `Si necesitas ayuda, contáctanos.`,
       }
     );
   }
@@ -377,7 +446,8 @@ async function handlePaymentFailed(invoice) {
 async function handlePaymentSucceeded(invoice) {
   const { customer } = invoice;
 
-  const negociosSnap = await db.collection('Negocios')
+  const negociosSnap = await db
+    .collection('Negocios')
     .where('stripeCustomerId', '==', customer)
     .limit(1)
     .get();
@@ -387,24 +457,32 @@ async function handlePaymentSucceeded(invoice) {
   const negocioRef = negociosSnap.docs[0].ref;
   const negocioData = negociosSnap.docs[0].data();
 
-  // Reactivar si estaba suspendido por pago
-  if (negocioData.websiteArchived && negocioData.archivedReason === 'payment_failed') {
+  // Reactivar si estaba suspendido por pago fallido
+  if (
+    negocioData.websiteArchived &&
+    negocioData.archivedReason === 'payment_failed'
+  ) {
     await negocioRef.update({
       subscriptionStatus: 'active',
       plan: 'basic',
       websiteArchived: false,
       archivedReason: null,
       lastPaymentSuccess: Timestamp.now(),
-      updatedAt: Timestamp.now()
+      updatedAt: Timestamp.now(),
     });
 
-    // Restaurar de archivados si existe
-    const archivedDoc = await db.collection('ArchivedSites').doc(negocioRef.id).get();
+    // Borrar copia archivada si existía
+    const archivedDoc = await db
+      .collection('ArchivedSites')
+      .doc(negocioRef.id)
+      .get();
     if (archivedDoc.exists) {
       await archivedDoc.ref.delete();
     }
 
-    console.log(`✅ Sitio reactivado por pago exitoso: ${negocioRef.id}`);
+    console.log(
+      `✅ Sitio reactivado por pago exitoso: ${negocioRef.id}`
+    );
   }
 
   // Registrar pago exitoso
@@ -413,7 +491,7 @@ async function handlePaymentSucceeded(invoice) {
     event: 'payment_succeeded',
     amount: 99,
     currency: 'mxn',
-    timestamp: Timestamp.now()
+    timestamp: Timestamp.now(),
   });
 }
 
@@ -425,52 +503,55 @@ export async function cancelSubscription(req, res) {
   try {
     const { negocioId, phone, pin } = req.body;
 
-    // Validar credenciales
     const phoneDigits = normalizarTelefono(phone);
-    
+
     const negocioRef = db.collection('Negocios').doc(negocioId);
     const negocioDoc = await negocioRef.get();
 
     if (!negocioDoc.exists) {
       return res.status(404).json({
         success: false,
-        error: 'Negocio no encontrado'
+        error: 'Negocio no encontrado',
       });
     }
 
     const negocioData = negocioDoc.data();
 
-    // Verificar PIN
-    if (negocioData.pin !== pin || negocioData.leadPhone !== phoneDigits) {
+    // Verificar PIN y teléfono
+    if (
+      String(negocioData.pin).trim() !== String(pin).trim() ||
+      negocioData.leadPhone !== phoneDigits
+    ) {
       return res.status(401).json({
         success: false,
-        error: 'Credenciales inválidas'
+        error: 'Credenciales inválidas',
       });
     }
 
     if (!negocioData.subscriptionId) {
       return res.status(400).json({
         success: false,
-        error: 'No hay suscripción activa'
+        error: 'No hay suscripción activa',
       });
     }
 
-    // Cancelar en Stripe (inmediatamente)
+    // Cancelar en Stripe
     await stripe.subscriptions.cancel(negocioData.subscriptionId);
 
-    console.log(`🚫 Suscripción cancelada: ${negocioData.subscriptionId}`);
+    console.log(
+      `🚫 Suscripción cancelada: ${negocioData.subscriptionId}`
+    );
 
     return res.json({
       success: true,
-      message: 'Suscripción cancelada exitosamente'
+      message: 'Suscripción cancelada exitosamente',
     });
-
   } catch (error) {
     console.error('❌ Error cancelando suscripción:', error);
     return res.status(500).json({
       success: false,
       error: 'Error al cancelar suscripción',
-      details: error.message
+      details: error.message,
     });
   }
 }
@@ -483,11 +564,14 @@ export async function createPortalSession(req, res) {
   try {
     const { negocioId } = req.body;
 
-    const negocioDoc = await db.collection('Negocios').doc(negocioId).get();
+    const negocioDoc = await db
+      .collection('Negocios')
+      .doc(negocioId)
+      .get();
     if (!negocioDoc.exists) {
       return res.status(404).json({
         success: false,
-        error: 'Negocio no encontrado'
+        error: 'Negocio no encontrado',
       });
     }
 
@@ -495,26 +579,31 @@ export async function createPortalSession(req, res) {
     if (!stripeCustomerId) {
       return res.status(400).json({
         success: false,
-        error: 'No hay suscripción activa'
+        error: 'No hay suscripción activa',
       });
     }
 
     // Crear sesión del portal
-    const session = await stripe.billingPortal.sessions.create({
-      customer: stripeCustomerId,
-      return_url: `${process.env.CLIENT_URL || 'https://negociosweb.mx'}/panel`,
-    });
+    const session =
+      await stripe.billingPortal.sessions.create({
+        customer: stripeCustomerId,
+        return_url:
+          process.env.CLIENT_PANEL_URL ||
+          `${process.env.CLIENT_URL || 'https://negociosweb.mx'}/cliente-login`,
+      });
 
     return res.json({
       success: true,
-      url: session.url
+      url: session.url,
     });
-
   } catch (error) {
-    console.error('❌ Error creando sesión del portal:', error);
+    console.error(
+      '❌ Error creando sesión del portal:',
+      error
+    );
     return res.status(500).json({
       success: false,
-      error: 'Error al crear sesión del portal'
+      error: 'Error al crear sesión del portal',
     });
   }
 }
@@ -531,7 +620,8 @@ export async function activateTrial(req, res) {
     const finalPin = pin || generarPIN();
 
     // Buscar si ya existe
-    const negociosSnap = await db.collection('Negocios')
+    const negociosSnap = await db
+      .collection('Negocios')
       .where('leadPhone', '==', phoneDigits)
       .limit(1)
       .get();
@@ -547,7 +637,8 @@ export async function activateTrial(req, res) {
       if (negocioData.trialUsed) {
         return res.status(400).json({
           success: false,
-          error: 'Ya utilizaste tu período de prueba gratuito'
+          error:
+            'Ya utilizaste tu período de prueba gratuito',
         });
       }
     } else {
@@ -561,15 +652,19 @@ export async function activateTrial(req, res) {
         plan: 'trial',
         trialActive: true,
         trialStartDate: Timestamp.now(),
-        trialEndDate: Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000),
+        trialEndDate: Timestamp.fromMillis(
+          Date.now() + 24 * 60 * 60 * 1000
+        ),
         trialUsed: true,
         createdAt: Timestamp.now(),
         updatedAt: Timestamp.now(),
-        status: 'Sin procesar', // Para que genere el schema
-        websiteArchived: false
+        status: 'Sin procesar',
+        websiteArchived: false,
       };
 
-      const docRef = await db.collection('Negocios').add(newData);
+      const docRef = await db
+        .collection('Negocios')
+        .add(newData);
       negocioRef = docRef;
       negocioData = newData;
     }
@@ -579,18 +674,34 @@ export async function activateTrial(req, res) {
       plan: 'trial',
       trialActive: true,
       trialStartDate: Timestamp.now(),
-      trialEndDate: Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000),
+      trialEndDate: Timestamp.fromMillis(
+        Date.now() + 24 * 60 * 60 * 1000
+      ),
       trialUsed: true,
       pin: finalPin,
-      websiteArchived: false
+      websiteArchived: false,
+      updatedAt: Timestamp.now(),
     });
 
     // Enviar credenciales
     await enviarMensaje(
-      { telefono: phoneDigits, nombre: companyInfo || 'Cliente' },
-      { 
-        type: 'texto', 
-        contenido: `🎁 ¡Prueba Gratuita Activada!\n\n⏰ Válida por 24 horas\n📱 Teléfono: ${phoneDigits}\n🔐 PIN: ${finalPin}\n\n🌐 Accede a tu panel:\n${process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login'}\n\n¡Aprovecha para personalizar tu sitio!` 
+      {
+        telefono: phoneDigits,
+        nombre: companyInfo || 'Cliente',
+      },
+      {
+        type: 'texto',
+        contenido:
+          `🎁 ¡Prueba Gratuita Activada!\n\n` +
+          `⏰ Válida por 24 horas\n` +
+          `📱 Teléfono: ${phoneDigits}\n` +
+          `🔐 PIN: ${finalPin}\n\n` +
+          `🌐 Accede a tu panel:\n` +
+          `${
+            process.env.CLIENT_PANEL_URL ||
+            'https://negociosweb.mx/cliente-login'
+          }\n\n` +
+          `¡Aprovecha para personalizar tu sitio!`,
       }
     );
 
@@ -600,15 +711,19 @@ export async function activateTrial(req, res) {
       data: {
         negocioId: negocioRef.id,
         pin: finalPin,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-      }
+        expiresAt: new Date(
+          Date.now() + 24 * 60 * 60 * 1000
+        ).toISOString(),
+      },
     });
-
   } catch (error) {
-    console.error('❌ Error activando trial:', error);
+    console.error(
+      '❌ Error activando trial:',
+      error
+    );
     return res.status(500).json({
       success: false,
-      error: 'Error al activar prueba gratuita'
+      error: 'Error al activar prueba gratuita',
     });
   }
 }
@@ -621,75 +736,102 @@ export async function getSubscriptionStatus(req, res) {
   try {
     const { negocioId } = req.params;
 
-    const negocioDoc = await db.collection('Negocios').doc(negocioId).get();
+    const negocioDoc = await db
+      .collection('Negocios')
+      .doc(negocioId)
+      .get();
     if (!negocioDoc.exists) {
       return res.status(404).json({
         success: false,
-        error: 'Negocio no encontrado'
+        error: 'Negocio no encontrado',
       });
     }
 
     const data = negocioDoc.data();
-    
-    // Determinar estado actual
+
     let subscriptionInfo = {
       hasSubscription: !!data.subscriptionId,
       status: data.subscriptionStatus || 'none',
       plan: data.plan,
       isActive: false,
       canAccess: false,
-      message: ''
+      message: '',
     };
 
-    // Verificar trial
+    // Trial
     if (data.trialActive) {
       const now = Date.now();
-      const trialEnd = data.trialEndDate?.toMillis() || 0;
-      
+      const trialEnd =
+        data.trialEndDate?.toMillis() || 0;
+
       if (now < trialEnd) {
         subscriptionInfo.isActive = true;
         subscriptionInfo.canAccess = true;
-        subscriptionInfo.message = 'Período de prueba activo';
-        subscriptionInfo.trialEndsAt = new Date(trialEnd).toISOString();
+        subscriptionInfo.message =
+          'Período de prueba activo';
+        subscriptionInfo.trialEndsAt = new Date(
+          trialEnd
+        ).toISOString();
       } else {
-        subscriptionInfo.message = 'Período de prueba expirado';
+        subscriptionInfo.message =
+          'Período de prueba expirado';
       }
     }
-    
-    // Verificar suscripción
+
+    // Suscripción Stripe
     if (data.subscriptionStatus === 'active') {
       subscriptionInfo.isActive = true;
       subscriptionInfo.canAccess = true;
-      subscriptionInfo.message = 'Suscripción activa';
-      subscriptionInfo.nextPayment = data.subscriptionCurrentPeriodEnd?.toDate();
-    } else if (data.subscriptionStatus === 'past_due') {
-      subscriptionInfo.message = 'Pago pendiente - Sitio suspendido';
+      subscriptionInfo.message =
+        'Suscripción activa';
+      subscriptionInfo.nextPayment =
+        data.subscriptionCurrentPeriodEnd?.toDate();
+    } else if (
+      data.subscriptionStatus === 'past_due'
+    ) {
+      subscriptionInfo.message =
+        'Pago pendiente - Sitio suspendido';
       subscriptionInfo.needsPaymentUpdate = true;
-    } else if (data.subscriptionStatus === 'canceled') {
-      subscriptionInfo.message = 'Suscripción cancelada';
+    } else if (
+      data.subscriptionStatus === 'canceled'
+    ) {
+      subscriptionInfo.message =
+        'Suscripción cancelada';
     }
 
-    // Verificar plan manual (transferencia)
-    if (!subscriptionInfo.canAccess && ['basic', 'pro', 'premium'].includes(data.plan)) {
-      const renewalDate = data.planRenewalDate?.toMillis() || 0;
+    // Plan manual (transferencia)
+    if (
+      !subscriptionInfo.canAccess &&
+      ['basic', 'pro', 'premium'].includes(
+        String(data.plan || '').toLowerCase()
+      )
+    ) {
+      const renewalDate =
+        data.planRenewalDate?.toMillis() || 0;
       if (Date.now() < renewalDate) {
         subscriptionInfo.isActive = true;
         subscriptionInfo.canAccess = true;
-        subscriptionInfo.message = 'Plan activo (pago manual)';
-        subscriptionInfo.expiresAt = new Date(renewalDate).toISOString();
+        subscriptionInfo.message =
+          'Plan activo (pago manual)';
+        subscriptionInfo.expiresAt = new Date(
+          renewalDate
+        ).toISOString();
       }
     }
 
     return res.json({
       success: true,
-      subscription: subscriptionInfo
+      subscription: subscriptionInfo,
     });
-
   } catch (error) {
-    console.error('Error obteniendo estado de suscripción:', error);
+    console.error(
+      'Error obteniendo estado de suscripción:',
+      error
+    );
     return res.status(500).json({
       success: false,
-      error: 'Error al obtener estado de suscripción'
+      error:
+        'Error al obtener estado de suscripción',
     });
   }
 }
@@ -701,5 +843,5 @@ export default {
   cancelSubscription,
   createPortalSession,
   activateTrial,
-  getSubscriptionStatus
+  getSubscriptionStatus,
 };
