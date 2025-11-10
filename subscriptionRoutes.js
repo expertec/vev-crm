@@ -253,67 +253,114 @@ async function handleCheckoutCompleted(session) {
   }
 
   const negocioRef = db.collection('Negocios').doc(negocioId);
-  const negocioDoc = await negocioRef.get();
+  const negocioSnap = await negocioRef.get();
 
-  if (!negocioDoc.exists) {
+  if (!negocioSnap.exists) {
     console.error(`❌ Negocio ${negocioId} no existe en Firestore`);
     return;
   }
 
-  const negocioData = negocioDoc.data();
+  const negocioData = negocioSnap.data() || {};
 
-  // Obtener detalles de la suscripción
-  const sub = await stripe.subscriptions.retrieve(subscription);
+  // PIN y teléfono finales
+  const finalPin =
+    pin ||
+    negocioData.pin ||
+    generarPIN();
 
-  // Usar el PIN del metadata o el que ya existe en el negocio
-  const finalPin = pin || negocioData.pin || generarPIN();
-  const finalPhone = phone || negocioData.leadPhone;
+  const finalPhone =
+    phone ||
+    negocioData.leadPhone ||
+    negocioData.phone ||
+    null;
 
-  // Validar y convertir timestamp (Stripe envía en segundos, Firestore usa milisegundos)
-  const periodEndSeconds = parseInt(sub.current_period_end);
-  if (!periodEndSeconds || isNaN(periodEndSeconds)) {
-    throw new Error('Invalid subscription period end timestamp');
+  let sub = null;
+
+  // Intentar recuperar la suscripción de Stripe si viene el id
+  if (subscription) {
+    try {
+      sub = await stripe.subscriptions.retrieve(subscription);
+    } catch (err) {
+      console.error(
+        `❌ No se pudo obtener la suscripción ${subscription} desde Stripe:`,
+        err.message
+      );
+    }
   }
-  const periodEndMs = periodEndSeconds * 1000;
 
-  // 🔥 ACTUALIZAR A PLAN ACTIVO
-  await negocioRef.update({
-    plan: 'basic', // Plan mensual
-    subscriptionId: subscription,
-    subscriptionStatus: sub.status,
-    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(periodEndMs),
-    subscriptionStartDate: Timestamp.now(),
-    planActivatedAt: Timestamp.now(),
-    planStartDate: Timestamp.now(),
-    planRenewalDate: Timestamp.fromMillis(periodEndMs),
-    paymentMethod: 'stripe',
+  const updateData = {
     pin: finalPin,
     websiteArchived: false,
     trialActive: false,
     updatedAt: Timestamp.now(),
-  });
+  };
 
-  console.log(`✅ Plan activado para negocio ${negocioId} - PIN: ${finalPin}`);
+  if (sub) {
+    updateData.subscriptionId = sub.id;
+    updateData.subscriptionStatus = sub.status;
+    updateData.paymentMethod = 'stripe';
+    updateData.plan = updateData.plan || 'basic';
 
-  // Enviar credenciales por WhatsApp
+    const periodEndSeconds = parseInt(sub.current_period_end);
+
+    if (periodEndSeconds && !isNaN(periodEndSeconds)) {
+      const periodEndDate = new Date(periodEndSeconds * 1000);
+
+      updateData.subscriptionCurrentPeriodEnd =
+        Timestamp.fromDate(periodEndDate);
+
+      // Solo setear si no existen (para no pisar updates posteriores)
+      if (!negocioData.planStartDate) {
+        updateData.planStartDate = Timestamp.now();
+      }
+      if (!negocioData.planActivatedAt) {
+        updateData.planActivatedAt = Timestamp.now();
+      }
+      updateData.planRenewalDate =
+        Timestamp.fromDate(periodEndDate);
+    } else {
+      console.warn(
+        `⚠️ current_period_end vacío o inválido para sub ${sub.id} (status: ${sub.status}). ` +
+          `No rompemos el webhook; se completará con customer.subscription.updated / invoice.paid.`
+      );
+    }
+  } else {
+    console.warn(
+      `⚠️ No se pudo recuperar la suscripción asociada al checkout.session ${session.id}. ` +
+        `Esperaremos a los siguientes eventos de Stripe para completar los datos.`
+    );
+  }
+
+  // Guardar cambios en el negocio
+  await negocioRef.update(updateData);
+
+  console.log(
+    `✅ Datos de suscripción inicial guardados para negocio ${negocioId} - PIN: ${finalPin}`
+  );
+
+  // Enviar acceso por WhatsApp (si tenemos número)
   if (finalPhone) {
-    const companyName = negocioData.companyInfo || 'Tu Negocio';
-    const loginUrl = process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login';
+    const companyName =
+      negocioData.companyInfo ||
+      negocioData.companyName ||
+      'Tu Negocio';
+    const loginUrl =
+      process.env.CLIENT_PANEL_URL ||
+      `${process.env.CLIENT_URL || 'https://negociosweb.mx'}/cliente-login`;
 
-    const mensaje = `🎉 ¡Suscripción Activada!
+    const mensaje = `🎉 ¡Suscripción activada!
 
-✅ Tu pago ha sido confirmado
-💳 Plan: Mensual $99 MXN
+✅ Hemos recibido tu registro en el sistema.
+💳 Plan: Mensual
 📱 Teléfono: ${finalPhone}
-🔐 PIN: ${finalPin}
+🔐 PIN de acceso: ${finalPin}
 
-🌐 Accede a tu panel:
+🌐 Ingresa a tu panel:
 ${loginUrl}
 
-Tu suscripción se renovará automáticamente cada mes.
-Para cancelar o actualizar tu método de pago, entra a tu panel.
+Si tu banco aún está procesando el cobro, Stripe confirmará automáticamente y tu suscripción quedará en estado activo.
 
-¡Gracias por confiar en nosotros! 🚀`;
+Cualquier duda, respóndeme por aquí 🚀`;
 
     try {
       await enviarMensaje(
@@ -329,13 +376,13 @@ Para cancelar o actualizar tu método de pago, entra a tu panel.
   // Registrar en historial
   await db.collection('SubscriptionHistory').add({
     negocioId,
-    event: 'subscription_created',
-    subscriptionId: subscription,
-    amount: 99,
-    currency: 'mxn',
+    event: 'checkout_completed',
+    subscriptionId: (sub && sub.id) || subscription || null,
+    status: sub ? sub.status : null,
     timestamp: Timestamp.now(),
   });
 }
+
 
 async function handleSubscriptionUpdate(subscription) {
   const { metadata } = subscription;
