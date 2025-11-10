@@ -269,26 +269,23 @@ async function handleCheckoutCompleted(session) {
   const finalPin = pin || negocioData.pin || generarPIN();
   const finalPhone = phone || negocioData.leadPhone;
 
-  // Validar y convertir timestamp (Stripe envía en segundos)
+  // Validar y convertir timestamp (Stripe envía en segundos, Firestore usa milisegundos)
   const periodEndSeconds = parseInt(sub.current_period_end);
   if (!periodEndSeconds || isNaN(periodEndSeconds)) {
     throw new Error('Invalid subscription period end timestamp');
   }
-  
-  // ✅ CORRECCIÓN: Convertir a Date y luego a Timestamp
-  const periodEndDate = new Date(periodEndSeconds * 1000);
-  console.log(`📅 Fecha de renovación: ${periodEndDate.toISOString()}`);
+  const periodEndMs = periodEndSeconds * 1000;
 
   // 🔥 ACTUALIZAR A PLAN ACTIVO
   await negocioRef.update({
     plan: 'basic', // Plan mensual
     subscriptionId: subscription,
     subscriptionStatus: sub.status,
-    subscriptionCurrentPeriodEnd: Timestamp.fromDate(periodEndDate),
+    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(periodEndMs),
     subscriptionStartDate: Timestamp.now(),
     planActivatedAt: Timestamp.now(),
     planStartDate: Timestamp.now(),
-    planRenewalDate: Timestamp.fromDate(periodEndDate),
+    planRenewalDate: Timestamp.fromMillis(periodEndMs),
     paymentMethod: 'stripe',
     pin: finalPin,
     websiteArchived: false,
@@ -359,12 +356,14 @@ async function handleSubscriptionUpdate(subscription) {
     console.error('❌ Invalid subscription period end timestamp');
     return;
   }
-  const periodEndMs = periodEndSeconds * 1000;
+  
+  // ✅ CORRECCIÓN: Usar fromDate en lugar de fromMillis
+  const periodEndDate = new Date(periodEndSeconds * 1000);
 
   await negocioRef.update({
     subscriptionStatus: subscription.status,
-    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(periodEndMs),
-    planRenewalDate: Timestamp.fromMillis(periodEndMs),
+    subscriptionCurrentPeriodEnd: Timestamp.fromDate(periodEndDate),
+    planRenewalDate: Timestamp.fromDate(periodEndDate),
     websiteArchived: subscription.status !== 'active',
     updatedAt: Timestamp.now(),
   });
@@ -454,16 +453,15 @@ async function handlePaymentSucceeded(invoice) {
 
   const negocioRef = db.collection('Negocios').doc(negocioId);
 
+  // ✅ CORRECCIÓN: Convertir timestamp correctamente
+  const periodEndDate = new Date(sub.current_period_end * 1000);
+
   await negocioRef.update({
     subscriptionStatus: 'active',
     plan: 'basic',
     websiteArchived: false,
-    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(
-      sub.current_period_end * 1000
-    ),
-    planRenewalDate: Timestamp.fromMillis(
-      sub.current_period_end * 1000
-    ),
+    subscriptionCurrentPeriodEnd: Timestamp.fromDate(periodEndDate),
+    planRenewalDate: Timestamp.fromDate(periodEndDate),
     lastPaymentSucceeded: Timestamp.now(),
     updatedAt: Timestamp.now(),
   });
