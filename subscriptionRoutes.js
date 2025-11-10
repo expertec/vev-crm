@@ -269,18 +269,23 @@ async function handleCheckoutCompleted(session) {
   const finalPin = pin || negocioData.pin || generarPIN();
   const finalPhone = phone || negocioData.leadPhone;
 
+  // Validar y convertir timestamp (Stripe envía en segundos, Firestore usa milisegundos)
+  const periodEndSeconds = parseInt(sub.current_period_end);
+  if (!periodEndSeconds || isNaN(periodEndSeconds)) {
+    throw new Error('Invalid subscription period end timestamp');
+  }
+  const periodEndMs = periodEndSeconds * 1000;
+
   // 🔥 ACTUALIZAR A PLAN ACTIVO
   await negocioRef.update({
     plan: 'basic', // Plan mensual
     subscriptionId: subscription,
     subscriptionStatus: sub.status,
-    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(
-      sub.current_period_end * 1000
-    ),
+    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(periodEndMs),
     subscriptionStartDate: Timestamp.now(),
     planActivatedAt: Timestamp.now(),
     planStartDate: Timestamp.now(),
-    planRenewalDate: Timestamp.fromMillis(sub.current_period_end * 1000),
+    planRenewalDate: Timestamp.fromMillis(periodEndMs),
     paymentMethod: 'stripe',
     pin: finalPin,
     websiteArchived: false,
@@ -345,14 +350,18 @@ async function handleSubscriptionUpdate(subscription) {
 
   const negocioRef = db.collection('Negocios').doc(negocioId);
 
+  // Validar y convertir timestamp
+  const periodEndSeconds = parseInt(subscription.current_period_end);
+  if (!periodEndSeconds || isNaN(periodEndSeconds)) {
+    console.error('❌ Invalid subscription period end timestamp');
+    return;
+  }
+  const periodEndMs = periodEndSeconds * 1000;
+
   await negocioRef.update({
     subscriptionStatus: subscription.status,
-    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(
-      subscription.current_period_end * 1000
-    ),
-    planRenewalDate: Timestamp.fromMillis(
-      subscription.current_period_end * 1000
-    ),
+    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(periodEndMs),
+    planRenewalDate: Timestamp.fromMillis(periodEndMs),
     websiteArchived: subscription.status !== 'active',
     updatedAt: Timestamp.now(),
   });
