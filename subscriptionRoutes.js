@@ -208,30 +208,32 @@ export async function stripeWebhook(req, res) {
 
   try {
     switch (event.type) {
-      case 'checkout.session.completed':
-        await handleCheckoutCompleted(event.data.object);
-        break;
+  case 'checkout.session.completed':
+    await handleCheckoutCompleted(event.data.object);
+    break;
 
-      case 'customer.subscription.created':
-      case 'customer.subscription.updated':
-        await handleSubscriptionUpdate(event.data.object);
-        break;
+  case 'customer.subscription.created':
+  case 'customer.subscription.updated':
+    await handleSubscriptionUpdate(event.data.object);
+    break;
 
-      case 'customer.subscription.deleted':
-        await handleSubscriptionCanceled(event.data.object);
-        break;
+  case 'customer.subscription.deleted':
+    await handleSubscriptionCanceled(event.data.object);
+    break;
 
-      case 'invoice.payment_failed':
-        await handlePaymentFailed(event.data.object);
-        break;
+  case 'invoice.payment_failed':
+    await handlePaymentFailed(event.data.object);
+    break;
 
-      case 'invoice.payment_succeeded':
-        await handlePaymentSucceeded(event.data.object);
-        break;
+  case 'invoice.payment_succeeded':
+  case 'invoice.paid': // 👈 agregar esto
+    await handlePaymentSucceeded(event.data.object);
+    break;
 
-      default:
-        console.log(`Evento no manejado: ${event.type}`);
-    }
+  default:
+    console.log(`Evento no manejado: ${event.type}`);
+}
+
 
     res.json({ received: true });
   } catch (error) {
