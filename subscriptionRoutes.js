@@ -14,7 +14,7 @@ export async function createCheckoutSession(req, res) {
   try {
     const { phone, pin, email, negocioId } = req.body;
 
-    // Validaciones
+    // 1) Validar teléfono
     const phoneDigits = normalizarTelefono(phone);
     if (!phoneDigits || phoneDigits.length < 10) {
       return res.status(400).json({
@@ -23,13 +23,13 @@ export async function createCheckoutSession(req, res) {
       });
     }
 
-    // Buscar o crear negocio
+    // 2) Buscar o crear negocio
     let negocioRef;
     let negocioData;
     let isNewNegocio = false;
 
     if (negocioId) {
-      // Negocio existente por ID
+      // Negocio por ID
       negocioRef = db.collection('Negocios').doc(negocioId);
       const doc = await negocioRef.get();
       if (!doc.exists) {
@@ -53,8 +53,6 @@ export async function createCheckoutSession(req, res) {
       } else {
         // Crear nuevo negocio base
         isNewNegocio = true;
-
-        // PIN para nuevo negocio
         const nuevoPin = pin || generarPIN();
 
         const newNegocioData = {
@@ -62,12 +60,12 @@ export async function createCheckoutSession(req, res) {
           contactWhatsapp: phoneDigits,
           contactEmail: email || '',
           pin: nuevoPin,
-          plan: 'trial', // se actualiza al confirmar pago
+          plan: 'trial', // se ajusta a basic cuando se confirma el pago
           createdAt: Timestamp.now(),
           updatedAt: Timestamp.now(),
           subscriptionType: 'pending_stripe',
           trialUsed: false,
-          status: 'Sin procesar', // para generación de schema
+          status: 'Sin procesar', // para que genere el schema
         };
 
         const docRef = await db.collection('Negocios').add(newNegocioData);
@@ -76,10 +74,7 @@ export async function createCheckoutSession(req, res) {
       }
     }
 
-    // Determinar PIN final:
-    // - Si el negocio ya tiene PIN, lo respetamos.
-    // - Si se envía un PIN manual, lo usamos solo si no había uno.
-    // - Si no hay ninguno, generamos uno nuevo.
+    // 3) Determinar PIN final (no romper PIN existente)
     let finalPin;
     if (negocioData && negocioData.pin) {
       finalPin = String(negocioData.pin).trim();
@@ -89,18 +84,22 @@ export async function createCheckoutSession(req, res) {
       finalPin = generarPIN();
     }
 
-    // Si es negocio existente (por phone o negocioId) y no es nuevo,
-    // podemos actualizar contacto/email sin tocar PIN existente.
+    // Si es negocio existente, actualizamos contacto/email sin pisar PIN existente
     if (!isNewNegocio) {
-      await negocioRef.update({
+      const updateData = {
         contactWhatsapp: negocioData.contactWhatsapp || phoneDigits,
         contactEmail: email || negocioData.contactEmail || '',
         updatedAt: Timestamp.now(),
-        // No sobrescribimos pin si ya existía
-      });
+      };
+      // Solo escribimos pin si antes no tenía
+      if (!negocioData.pin) {
+        updateData.pin = finalPin;
+      }
+      await negocioRef.update(updateData);
+      negocioData = { ...negocioData, ...updateData };
     }
 
-    // Crear o recuperar customer de Stripe
+    // 4) Crear o recuperar customer de Stripe
     let stripeCustomerId = negocioData.stripeCustomerId;
 
     if (!stripeCustomerId) {
@@ -115,10 +114,8 @@ export async function createCheckoutSession(req, res) {
 
       stripeCustomerId = customer.id;
 
-      // Guardar customerId en Firebase
-      // Solo escribimos pin si el negocio aún no tenía uno
       const updateData = {
-        stripeCustomerId: stripeCustomerId,
+        stripeCustomerId,
         updatedAt: Timestamp.now(),
       };
       if (!negocioData.pin) {
@@ -126,22 +123,16 @@ export async function createCheckoutSession(req, res) {
       }
 
       await negocioRef.update(updateData);
-
-      // Refrescar negocioData en memoria
-      negocioData = {
-        ...negocioData,
-        stripeCustomerId,
-        pin: negocioData.pin || finalPin,
-      };
+      negocioData = { ...negocioData, ...updateData };
     }
 
-    // URLs de retorno
+    // 5) URLs de retorno
     const baseClientUrl = process.env.CLIENT_URL || 'https://negociosweb.mx';
     const panelUrl =
       process.env.CLIENT_PANEL_URL || `${baseClientUrl}/cliente-login`;
     const suscripcionUrl = `${baseClientUrl}/suscripcion`;
 
-    // Crear sesión de checkout
+    // 6) Crear sesión de checkout de Stripe
     const session = await stripe.checkout.sessions.create({
       customer: stripeCustomerId,
       payment_method_types: ['card'],
@@ -152,7 +143,8 @@ export async function createCheckoutSession(req, res) {
         },
       ],
       mode: 'subscription',
-      success_url: `${panelUrl}?success=true&session_id={CHECKOUT_SESSION_ID}`,
+      // Sin session_id en la URL para evitar problemas con ModSecurity
+      success_url: `${panelUrl}?success=true`,
       cancel_url: `${suscripcionUrl}?canceled=true`,
       metadata: {
         negocioId: negocioRef.id,
@@ -165,7 +157,7 @@ export async function createCheckoutSession(req, res) {
           phone: phoneDigits,
         },
       },
-      // Locale válido para Stripe (antes: es-MX -> error)
+      // Locale válido (antes: es-MX -> error)
       locale: 'es-419',
     });
 
@@ -186,6 +178,7 @@ export async function createCheckoutSession(req, res) {
     });
   }
 }
+
 
 /**
  * POST /api/subscription/webhook
