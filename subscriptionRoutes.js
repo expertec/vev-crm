@@ -269,23 +269,26 @@ async function handleCheckoutCompleted(session) {
   const finalPin = pin || negocioData.pin || generarPIN();
   const finalPhone = phone || negocioData.leadPhone;
 
-  // Validar y convertir timestamp (Stripe envía en segundos, Firestore usa milisegundos)
+  // Validar y convertir timestamp (Stripe envía en segundos)
   const periodEndSeconds = parseInt(sub.current_period_end);
   if (!periodEndSeconds || isNaN(periodEndSeconds)) {
     throw new Error('Invalid subscription period end timestamp');
   }
-  const periodEndMs = periodEndSeconds * 1000;
+  
+  // ✅ CORRECCIÓN: Convertir a Date y luego a Timestamp
+  const periodEndDate = new Date(periodEndSeconds * 1000);
+  console.log(`📅 Fecha de renovación: ${periodEndDate.toISOString()}`);
 
   // 🔥 ACTUALIZAR A PLAN ACTIVO
   await negocioRef.update({
     plan: 'basic', // Plan mensual
     subscriptionId: subscription,
     subscriptionStatus: sub.status,
-    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(periodEndMs),
+    subscriptionCurrentPeriodEnd: Timestamp.fromDate(periodEndDate),
     subscriptionStartDate: Timestamp.now(),
     planActivatedAt: Timestamp.now(),
     planStartDate: Timestamp.now(),
-    planRenewalDate: Timestamp.fromMillis(periodEndMs),
+    planRenewalDate: Timestamp.fromDate(periodEndDate),
     paymentMethod: 'stripe',
     pin: finalPin,
     websiteArchived: false,
