@@ -60,12 +60,13 @@ export async function createCheckoutSession(req, res) {
           contactWhatsapp: phoneDigits,
           contactEmail: email || '',
           pin: nuevoPin,
-          plan: 'trial', // se ajusta a basic cuando se confirma el pago
+          plan: 'pending', // se ajusta a basic cuando se confirma el pago
           createdAt: Timestamp.now(),
           updatedAt: Timestamp.now(),
           subscriptionType: 'pending_stripe',
           trialUsed: false,
           status: 'Sin procesar', // para que genere el schema
+          websiteArchived: false,
         };
 
         const docRef = await db.collection('Negocios').add(newNegocioData);
@@ -183,15 +184,18 @@ export async function createCheckoutSession(req, res) {
 /**
  * POST /api/subscription/webhook
  * Webhook de Stripe para manejar eventos de suscripción
+ * 
+ * ⚠️ IMPORTANTE: Este endpoint DEBE recibir el body RAW
+ * Se configura en server.js con: bodyParser.raw({ type: 'application/json' })
  */
 export async function stripeWebhook(req, res) {
   const sig = req.headers['stripe-signature'];
   let event;
 
   try {
-    // Verificar firma del webhook
+    // ✅ req.body aquí es un Buffer (raw body), no un objeto JSON
     event = stripe.webhooks.constructEvent(
-      req.rawBody || req.body, // Necesitas configurar rawBody en Express
+      req.body,
       sig,
       STRIPE_CONFIG.webhookSecret
     );
@@ -238,18 +242,34 @@ export async function stripeWebhook(req, res) {
 
 // Handlers de eventos de Stripe
 async function handleCheckoutCompleted(session) {
-  const { subscription, metadata } = session;
+  const { subscription, metadata, customer } = session;
   const { negocioId, phone, pin } = metadata || {};
 
   console.log(`✅ Checkout completado para negocio ${negocioId}`);
 
+  if (!negocioId) {
+    console.error('❌ No hay negocioId en metadata del checkout');
+    return;
+  }
+
   const negocioRef = db.collection('Negocios').doc(negocioId);
+  const negocioDoc = await negocioRef.get();
+
+  if (!negocioDoc.exists) {
+    console.error(`❌ Negocio ${negocioId} no existe en Firestore`);
+    return;
+  }
+
+  const negocioData = negocioDoc.data();
 
   // Obtener detalles de la suscripción
   const sub = await stripe.subscriptions.retrieve(subscription);
 
-  const finalPin = pin || generarPIN();
+  // Usar el PIN del metadata o el que ya existe en el negocio
+  const finalPin = pin || negocioData.pin || generarPIN();
+  const finalPhone = phone || negocioData.leadPhone;
 
+  // 🔥 ACTUALIZAR A PLAN ACTIVO
   await negocioRef.update({
     plan: 'basic', // Plan mensual
     subscriptionId: subscription,
@@ -259,32 +279,47 @@ async function handleCheckoutCompleted(session) {
     ),
     subscriptionStartDate: Timestamp.now(),
     planActivatedAt: Timestamp.now(),
+    planStartDate: Timestamp.now(),
+    planRenewalDate: Timestamp.fromMillis(sub.current_period_end * 1000),
     paymentMethod: 'stripe',
     pin: finalPin,
     websiteArchived: false,
+    trialActive: false,
     updatedAt: Timestamp.now(),
   });
 
+  console.log(`✅ Plan activado para negocio ${negocioId} - PIN: ${finalPin}`);
+
   // Enviar credenciales por WhatsApp
-  const mensaje = `🎉 ¡Suscripción Activada!
+  if (finalPhone) {
+    const companyName = negocioData.companyInfo || 'Tu Negocio';
+    const loginUrl = process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login';
+
+    const mensaje = `🎉 ¡Suscripción Activada!
 
 ✅ Tu pago ha sido confirmado
 💳 Plan: Mensual $99 MXN
-📱 Teléfono: ${phone}
+📱 Teléfono: ${finalPhone}
 🔐 PIN: ${finalPin}
 
 🌐 Accede a tu panel:
-${process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login'}
+${loginUrl}
 
 Tu suscripción se renovará automáticamente cada mes.
 Para cancelar o actualizar tu método de pago, entra a tu panel.
 
 ¡Gracias por confiar en nosotros! 🚀`;
 
-  await enviarMensaje(
-    { telefono: phone, nombre: 'Cliente' },
-    { type: 'texto', contenido: mensaje }
-  );
+    try {
+      await enviarMensaje(
+        { telefono: finalPhone, nombre: companyName },
+        { type: 'texto', contenido: mensaje }
+      );
+      console.log(`📤 Credenciales enviadas por WhatsApp a ${finalPhone}`);
+    } catch (waErr) {
+      console.error('❌ Error enviando WhatsApp:', waErr);
+    }
+  }
 
   // Registrar en historial
   await db.collection('SubscriptionHistory').add({
@@ -298,208 +333,151 @@ Para cancelar o actualizar tu método de pago, entra a tu panel.
 }
 
 async function handleSubscriptionUpdate(subscription) {
-  const { id, customer, status, current_period_end, cancel_at_period_end } =
-    subscription;
+  const { metadata } = subscription;
+  const { negocioId } = metadata || {};
 
-  // Buscar negocio por customerId
-  const negociosSnap = await db
-    .collection('Negocios')
-    .where('stripeCustomerId', '==', customer)
-    .limit(1)
-    .get();
-
-  if (negociosSnap.empty) {
-    console.warn(`No se encontró negocio para customer ${customer}`);
+  if (!negocioId) {
+    console.error('❌ No hay negocioId en metadata de suscripción');
     return;
   }
 
-  const negocioRef = negociosSnap.docs[0].ref;
+  console.log(`🔄 Actualizando suscripción para negocio ${negocioId}`);
 
-  // Determinar si el sitio debe archivarse
-  const shouldArchive =
-    status !== SUBSCRIPTION_STATUS.ACTIVE &&
-    status !== SUBSCRIPTION_STATUS.TRIALING;
+  const negocioRef = db.collection('Negocios').doc(negocioId);
 
   await negocioRef.update({
-    subscriptionId: id,
-    subscriptionStatus: status,
+    subscriptionStatus: subscription.status,
     subscriptionCurrentPeriodEnd: Timestamp.fromMillis(
-      current_period_end * 1000
+      subscription.current_period_end * 1000
     ),
-    subscriptionCancelAtPeriodEnd: cancel_at_period_end,
-    plan:
-      status === SUBSCRIPTION_STATUS.ACTIVE ? 'basic' : 'suspended',
-    websiteArchived: shouldArchive,
+    planRenewalDate: Timestamp.fromMillis(
+      subscription.current_period_end * 1000
+    ),
+    websiteArchived: subscription.status !== 'active',
     updatedAt: Timestamp.now(),
   });
 
-  console.log(`📝 Suscripción actualizada: ${id} - Estado: ${status}`);
+  // Registrar en historial
+  await db.collection('SubscriptionHistory').add({
+    negocioId,
+    event: 'subscription_updated',
+    subscriptionId: subscription.id,
+    status: subscription.status,
+    timestamp: Timestamp.now(),
+  });
 }
 
 async function handleSubscriptionCanceled(subscription) {
-  const { id, customer } = subscription;
+  const { metadata } = subscription;
+  const { negocioId } = metadata || {};
 
-  // Buscar negocio
-  const negociosSnap = await db
-    .collection('Negocios')
-    .where('stripeCustomerId', '==', customer)
-    .limit(1)
-    .get();
+  if (!negocioId) return;
 
-  if (negociosSnap.empty) return;
+  console.log(`❌ Suscripción cancelada para negocio ${negocioId}`);
 
-  const negocioRef = negociosSnap.docs[0].ref;
-  const negocioData = negociosSnap.docs[0].data();
+  const negocioRef = db.collection('Negocios').doc(negocioId);
 
-  // Archivar sitio inmediatamente
   await negocioRef.update({
     subscriptionStatus: 'canceled',
-    subscriptionCanceledAt: Timestamp.now(),
     plan: 'canceled',
     websiteArchived: true,
     archivedReason: 'subscription_canceled',
+    canceledAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
   });
 
-  // Mover a colección de archivados
-  if (negocioData.schema) {
-    await db.collection('ArchivedSites').doc(negocioRef.id).set({
-      ...negocioData,
-      archivedAt: Timestamp.now(),
-      archivedReason: 'subscription_canceled',
-    });
-  }
-
-  // Notificar por WhatsApp
-  if (negocioData.leadPhone) {
-    await enviarMensaje(
-      {
-        telefono: negocioData.leadPhone,
-        nombre: negocioData.companyInfo || 'Cliente',
-      },
-      {
-        type: 'texto',
-        contenido:
-          `Tu suscripción ha sido cancelada y tu sitio web ha sido archivado.\n\n` +
-          `Puedes reactivarlo en cualquier momento volviendo a suscribirte.\n\n` +
-          `Gracias por haber confiado en nosotros.`,
-      }
-    );
-  }
-
-  console.log(`❌ Suscripción cancelada y sitio archivado: ${id}`);
+  // Registrar en historial
+  await db.collection('SubscriptionHistory').add({
+    negocioId,
+    event: 'subscription_canceled',
+    subscriptionId: subscription.id,
+    timestamp: Timestamp.now(),
+  });
 }
 
 async function handlePaymentFailed(invoice) {
-  const { customer } = invoice;
+  const subscription = invoice.subscription;
+  
+  if (!subscription) return;
 
-  const negociosSnap = await db
-    .collection('Negocios')
-    .where('stripeCustomerId', '==', customer)
-    .limit(1)
-    .get();
+  const sub = await stripe.subscriptions.retrieve(subscription);
+  const { negocioId } = sub.metadata || {};
 
-  if (negociosSnap.empty) return;
+  if (!negocioId) return;
 
-  const negocioRef = negociosSnap.docs[0].ref;
-  const negocioData = negociosSnap.docs[0].data();
+  console.log(`⚠️ Pago fallido para negocio ${negocioId}`);
 
-  // Marcar como pago fallido y archivar
+  const negocioRef = db.collection('Negocios').doc(negocioId);
+
   await negocioRef.update({
     subscriptionStatus: 'past_due',
-    plan: 'suspended',
+    plan: 'past_due',
     websiteArchived: true,
     archivedReason: 'payment_failed',
     lastPaymentFailed: Timestamp.now(),
     updatedAt: Timestamp.now(),
   });
 
-  // Notificar por WhatsApp
-  if (negocioData.leadPhone) {
-    await enviarMensaje(
-      {
-        telefono: negocioData.leadPhone,
-        nombre: negocioData.companyInfo || 'Cliente',
-      },
-      {
-        type: 'texto',
-        contenido:
-          `⚠️ No pudimos procesar tu pago mensual.\n\n` +
-          `Tu sitio web ha sido suspendido temporalmente.\n\n` +
-          `Por favor actualiza tu método de pago en:\n` +
-          `${process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login'}\n\n` +
-          `Si necesitas ayuda, contáctanos.`,
-      }
-    );
-  }
-
-  console.log(`💳❌ Pago fallido para negocio ${negocioRef.id}`);
+  // Registrar en historial
+  await db.collection('SubscriptionHistory').add({
+    negocioId,
+    event: 'payment_failed',
+    invoiceId: invoice.id,
+    amount: invoice.amount_due,
+    timestamp: Timestamp.now(),
+  });
 }
 
 async function handlePaymentSucceeded(invoice) {
-  const { customer } = invoice;
+  const subscription = invoice.subscription;
+  
+  if (!subscription) return;
 
-  const negociosSnap = await db
-    .collection('Negocios')
-    .where('stripeCustomerId', '==', customer)
-    .limit(1)
-    .get();
+  const sub = await stripe.subscriptions.retrieve(subscription);
+  const { negocioId } = sub.metadata || {};
 
-  if (negociosSnap.empty) return;
+  if (!negocioId) return;
 
-  const negocioRef = negociosSnap.docs[0].ref;
-  const negocioData = negociosSnap.docs[0].data();
+  console.log(`✅ Pago exitoso para negocio ${negocioId}`);
 
-  // Reactivar si estaba suspendido por pago fallido
-  if (
-    negocioData.websiteArchived &&
-    negocioData.archivedReason === 'payment_failed'
-  ) {
-    await negocioRef.update({
-      subscriptionStatus: 'active',
-      plan: 'basic',
-      websiteArchived: false,
-      archivedReason: null,
-      lastPaymentSuccess: Timestamp.now(),
-      updatedAt: Timestamp.now(),
-    });
+  const negocioRef = db.collection('Negocios').doc(negocioId);
 
-    // Borrar copia archivada si existía
-    const archivedDoc = await db
-      .collection('ArchivedSites')
-      .doc(negocioRef.id)
-      .get();
-    if (archivedDoc.exists) {
-      await archivedDoc.ref.delete();
-    }
+  await negocioRef.update({
+    subscriptionStatus: 'active',
+    plan: 'basic',
+    websiteArchived: false,
+    subscriptionCurrentPeriodEnd: Timestamp.fromMillis(
+      sub.current_period_end * 1000
+    ),
+    planRenewalDate: Timestamp.fromMillis(
+      sub.current_period_end * 1000
+    ),
+    lastPaymentSucceeded: Timestamp.now(),
+    updatedAt: Timestamp.now(),
+  });
 
-    console.log(
-      `✅ Sitio reactivado por pago exitoso: ${negocioRef.id}`
-    );
-  }
-
-  // Registrar pago exitoso
+  // Registrar en historial
   await db.collection('SubscriptionHistory').add({
-    negocioId: negocioRef.id,
+    negocioId,
     event: 'payment_succeeded',
-    amount: 99,
-    currency: 'mxn',
+    invoiceId: invoice.id,
+    amount: invoice.amount_paid,
     timestamp: Timestamp.now(),
   });
 }
 
 /**
  * POST /api/subscription/cancel
- * Cancela una suscripción activa
+ * Cancela una suscripción
  */
 export async function cancelSubscription(req, res) {
   try {
-    const { negocioId, phone, pin } = req.body;
+    const { negocioId } = req.body;
 
-    const phoneDigits = normalizarTelefono(phone);
-
-    const negocioRef = db.collection('Negocios').doc(negocioId);
-    const negocioDoc = await negocioRef.get();
+    const negocioDoc = await db
+      .collection('Negocios')
+      .doc(negocioId)
+      .get();
 
     if (!negocioDoc.exists) {
       return res.status(404).json({
@@ -508,36 +486,24 @@ export async function cancelSubscription(req, res) {
       });
     }
 
-    const negocioData = negocioDoc.data();
+    const { subscriptionId } = negocioDoc.data();
 
-    // Verificar PIN y teléfono
-    if (
-      String(negocioData.pin).trim() !== String(pin).trim() ||
-      negocioData.leadPhone !== phoneDigits
-    ) {
-      return res.status(401).json({
-        success: false,
-        error: 'Credenciales inválidas',
-      });
-    }
-
-    if (!negocioData.subscriptionId) {
+    if (!subscriptionId) {
       return res.status(400).json({
         success: false,
         error: 'No hay suscripción activa',
       });
     }
 
-    // Cancelar en Stripe
-    await stripe.subscriptions.cancel(negocioData.subscriptionId);
+    // Cancelar suscripción en Stripe
+    const subscription = await stripe.subscriptions.cancel(subscriptionId);
 
-    console.log(
-      `🚫 Suscripción cancelada: ${negocioData.subscriptionId}`
-    );
+    console.log(`✅ Suscripción cancelada: ${subscriptionId}`);
 
     return res.json({
       success: true,
-      message: 'Suscripción cancelada exitosamente',
+      message: 'Suscripción cancelada',
+      endsAt: new Date(subscription.current_period_end * 1000).toISOString(),
     });
   } catch (error) {
     console.error('❌ Error cancelando suscripción:', error);
