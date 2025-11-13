@@ -198,8 +198,15 @@ export async function connectToWhatsApp() {
             continue;
           }
 
-          // Ignorar grupos/estados/newsletters
-          if (rawJid.endsWith('@g.us') || rawJid === 'status@broadcast' || rawJid.endsWith('@newsletter')) {
+          // Ignorar grupos/estados/newsletters/canales
+          if (rawJid.endsWith('@g.us') || rawJid === 'status@broadcast' || rawJid.endsWith('@newsletter') || rawJid.endsWith('@lid')) {
+            console.log(`[WA] ⏭️ Ignorando mensaje de: ${rawJid} (grupo/canal/newsletter)`);
+            continue;
+          }
+
+          // Verificar que el mensaje tenga contenido desencriptado
+          if (!msg.message || Object.keys(msg.message).length === 0) {
+            console.warn(`[WA] ⚠️ Mensaje sin contenido desencriptado (posible fallo en desencriptación) desde ${rawJid} - ID: ${msg.key.id}`);
             continue;
           }
 
