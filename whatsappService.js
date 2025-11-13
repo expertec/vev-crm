@@ -39,6 +39,7 @@ const STATIC_HASHTAG_MAP = {
   '#leadweb':      'LeadWeb',
   '#nuevolead':    'NuevoLeadWeb',
   '#planredes990': 'PlanRedes',
+    '#info':         'LeadWeb', 
 };
 
 // Si el trigger es LeadWeb, cancela estas (evita duplicidad)
@@ -278,10 +279,12 @@ if (inner.videoMessage) {
 
           // ---------- CAMBIO 1: branch fromMe NO toca 'nombre' ----------
           // ---------- fromMe: guardar mensaje y permitir comandos administrativos ----------
+// ---------- CAMBIO 1: branch fromMe NO toca 'nombre' ----------
+// ---------- fromMe: guardar mensaje y permitir comandos administrativos ----------
 if (sender === 'business') {
   const leadRef = db.collection('leads').doc(leadId);
 
-  // 1) Persistimos el mensaje propio en el hilo
+  // 1) Persistimos el mensaje propio en el hilo (y creamos lead si no existe)
   const msgData = {
     content,
     mediaType,
@@ -289,25 +292,26 @@ if (sender === 'business') {
     sender,
     timestamp: now(),
   };
+
   await leadRef.set({
-    telefono: normNum,
+    telefono: normNum,          // 👈 aquí aseguramos que el lead tenga telefono
     source: 'WhatsApp',
     lastMessageAt: msgData.timestamp,
   }, { merge: true });
+
   await leadRef.collection('messages').add(msgData);
 
-  // 2) Comando #ok → detener TODAS las secuencias y bloquear futuros envíos
+  // 2) Comandos administrativos desde el negocio
   const textLower = String(content || '').toLowerCase();
+
+  // 2.a) #ok = detener TODAS las secuencias y bloquear futuros envíos
   if (/\B#ok\b/.test(textLower)) {
     try {
-      // cancela TODO lo pendiente
       await cancelAllSequences(leadId);
-
-      // aplica "paro duro" para que la cola no envíe nada más en este lead
       await leadRef.set({
         stopSequences: true,
         hasActiveSequences: false,
-        etiquetas: FieldValue.arrayUnion('DetenerSecuencia')
+        etiquetas: FieldValue.arrayUnion('DetenerSecuencia'),
       }, { merge: true });
 
       console.log(`[WA] #ok → secuencias canceladas y bloqueo aplicado a ${leadId}`);
@@ -316,9 +320,49 @@ if (sender === 'business') {
     }
   }
 
+  // 2.b) #info = forzar secuencia manualmente (ej. LeadWeb)
+  if (/\B#info\b/.test(textLower)) {
+    try {
+      // opcional: leer defaultTrigger de config, por si lo cambias
+      const cfgSnap = await db.collection('config').doc('appConfig').get();
+      const cfg = cfgSnap.exists ? cfgSnap.data() : {};
+      const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';
+
+      // reutilizamos el mismo resolver de hashtags (#info usa STATIC_HASHTAG_MAP)
+      const rule = await resolveTriggerFromMessage(content, defaultTrigger);
+      const trigger = rule.trigger || defaultTrigger;
+      const toCancel = rule.cancel || [];
+
+      const leadSnap = await leadRef.get();
+      const leadData = leadSnap.exists ? leadSnap.data() : {};
+
+      // cancelar secuencias anteriores si aplica
+      if (toCancel.length) {
+        await cancelSequences(leadId, ...toCancel);
+      }
+
+      // respetar reglas de bloqueo (compró, form_submitted, etc.)
+      if (!shouldBlockSequences(leadData, trigger)) {
+        await leadRef.set({
+          etiquetas: FieldValue.arrayUnion(trigger),
+          hasActiveSequences: true,
+        }, { merge: true });
+
+        // 👇 aquí se programa la secuencia; replacePlaceholders ya podrá usar {{telefono}}
+        await scheduleSequenceForLead(leadId, trigger, now());
+        console.log(`[WA] #info → secuencia ${trigger} programada para ${leadId}`);
+      } else {
+        console.log(`[WA] #info → bloqueado por estado/etiquetas en lead ${leadId}`);
+      }
+    } catch (e) {
+      console.warn('[WA] error aplicando #info:', e?.message || e);
+    }
+  }
+
   console.log('[WA] (fromMe) Mensaje propio guardado →', leadId);
   continue;
 }
+
 
 
           // ------- config global + resolver trigger (hashtags > DB > estático > default) -------
