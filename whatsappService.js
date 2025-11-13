@@ -127,6 +127,39 @@ function shouldBlockSequences(leadData, nextTrigger) {
 }
 
 /* ---------------------------- conexión WA ---------------------------- */
+// Logger personalizado para Baileys que filtra errores de sesión esperados
+const createFilteredLogger = () => {
+  const baseLogger = Pino({ level: 'info' });
+
+  return {
+    ...baseLogger,
+    error: (...args) => {
+      // Filtrar errores de sesión comunes de WhatsApp Business API (@lid)
+      const errorMsg = typeof args[0] === 'string' ? args[0] :
+                      (args[0] && typeof args[0] === 'object' && args[0].msg) || '';
+
+      // Estos errores son esperados con @lid (Business API) y se manejan correctamente
+      const ignoredErrors = [
+        'failed to decrypt message',
+        'No session record',
+        'No matching sessions',
+        'Bad MAC',
+      ];
+
+      const shouldIgnore = ignoredErrors.some(pattern =>
+        errorMsg.toLowerCase().includes(pattern.toLowerCase())
+      );
+
+      if (shouldIgnore) {
+        // Degradar a nivel debug (no se mostrará con level: 'info')
+        return baseLogger.debug(...args);
+      }
+
+      return baseLogger.error(...args);
+    }
+  };
+};
+
 export async function connectToWhatsApp() {
   try {
     if (!fs.existsSync(localAuthFolder)) {
@@ -139,7 +172,7 @@ export async function connectToWhatsApp() {
     const { version } = await fetchLatestBaileysVersion();
     const sock = makeWASocket({
       auth: state,
-      logger: Pino({ level: 'info' }),
+      logger: createFilteredLogger(),
       printQRInTerminal: true,
       version,
     });
