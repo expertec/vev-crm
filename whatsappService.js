@@ -198,15 +198,67 @@ export async function connectToWhatsApp() {
             continue;
           }
 
-          // Ignorar grupos/estados/newsletters/canales
-          if (rawJid.endsWith('@g.us') || rawJid === 'status@broadcast' || rawJid.endsWith('@newsletter') || rawJid.endsWith('@lid')) {
+          // Ignorar grupos/estados/newsletters
+          if (rawJid.endsWith('@g.us') || rawJid === 'status@broadcast' || rawJid.endsWith('@newsletter')) {
             console.log(`[WA] ⏭️ Ignorando mensaje de: ${rawJid} (grupo/canal/newsletter)`);
             continue;
           }
 
+          // Manejar mensajes de Business API (@lid) que vienen de FB Ads
+          // Estos mensajes a veces fallan en desencriptación pero tienen el remitente real en participant
+          if (rawJid.endsWith('@lid')) {
+            console.log(`[WA] 📱 Mensaje de Business API detectado (@lid) - ID: ${msg.key.id}`);
+
+            // Intentar extraer el número real del participant
+            const realSender = msg.key.participant;
+
+            if (realSender && realSender.includes('@s.whatsapp.net')) {
+              console.log(`[WA] ✅ Remitente real extraído de @lid: ${realSender}`);
+              rawJid = realSender; // Usar el número real del lead
+            } else {
+              console.warn(`[WA] ⚠️ No se pudo extraer remitente real de mensaje @lid.`);
+              console.log('[WA] 🔍 msg.key:', JSON.stringify(msg.key, null, 2));
+              console.log('[WA] 🔍 msg.pushName:', msg.pushName);
+            }
+          }
+
           // Verificar que el mensaje tenga contenido desencriptado
           if (!msg.message || Object.keys(msg.message).length === 0) {
-            console.warn(`[WA] ⚠️ Mensaje sin contenido desencriptado (posible fallo en desencriptación) desde ${rawJid} - ID: ${msg.key.id}`);
+            console.warn(`[WA] ⚠️ Mensaje sin contenido desencriptado desde ${rawJid} - ID: ${msg.key.id}`);
+
+            // Para mensajes con remitente válido, intentar crear el lead de todas formas
+            if (rawJid.includes('@s.whatsapp.net')) {
+              console.log(`[WA] 🔄 Intentando crear/actualizar lead sin contenido de mensaje para ${rawJid}`);
+              const [jidUser] = rawJid.split('@');
+              const cleanUser = jidUser.split(':')[0].replace(/\s+/g, '');
+              const normNum = normalizePhoneForWA(cleanUser);
+              const leadId = `${normNum}@s.whatsapp.net`;
+
+              const leadRef = db.collection('leads').doc(leadId);
+              const leadSnap = await leadRef.get();
+
+              if (!leadSnap.exists) {
+                // Crear lead nuevo sin mensaje
+                await leadRef.set({
+                  telefono: normNum,
+                  nombre: msg.pushName || '',
+                  source: 'WhatsApp Business API',
+                  fecha_creacion: now(),
+                  estado: 'nuevo',
+                  etiquetas: ['MensajeNoDesencriptado', 'FacebookAds'],
+                  unreadCount: 1,
+                  lastMessageAt: now(),
+                });
+                console.log(`[WA] ✅ Lead creado desde mensaje no desencriptado: ${leadId}`);
+              } else {
+                await leadRef.update({
+                  lastMessageAt: now(),
+                  unreadCount: FieldValue.increment(1),
+                  etiquetas: FieldValue.arrayUnion('MensajeNoDesencriptado')
+                });
+                console.log(`[WA] ✅ Lead actualizado desde mensaje no desencriptado: ${leadId}`);
+              }
+            }
             continue;
           }
 
