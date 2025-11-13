@@ -205,12 +205,12 @@ export async function connectToWhatsApp() {
           }
 
           // Manejar mensajes de Business API (@lid) que vienen de FB Ads
-          // Estos mensajes a veces fallan en desencriptación pero tienen el remitente real en participant
+          // Estos mensajes tienen el remitente real en senderPn o participant
           if (rawJid.endsWith('@lid')) {
             console.log(`[WA] 📱 Mensaje de Business API detectado (@lid) - ID: ${msg.key.id}`);
 
-            // Intentar extraer el número real del participant
-            const realSender = msg.key.participant;
+            // Intentar extraer el número real (primero senderPn, luego participant)
+            const realSender = msg.key.senderPn || msg.key.participant;
 
             if (realSender && realSender.includes('@s.whatsapp.net')) {
               console.log(`[WA] ✅ Remitente real extraído de @lid: ${realSender}`);
