@@ -188,7 +188,13 @@ export async function connectToWhatsApp() {
 
     /* -------------------- recepción de mensajes -------------------- */
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify') return;
+  // Ahora procesamos mensajes nuevos (notify) y también los que llegan
+  // cuando se sincroniza historial después de una reconexión (append)
+  if (type !== 'notify' && type !== 'append') {
+    console.log('[WA] messages.upsert ignorado, tipo:', type);
+    return;
+  }
+
 
       for (const msg of messages) {
         try {
@@ -216,50 +222,59 @@ export async function connectToWhatsApp() {
           const sender   = msg.key.fromMe ? 'business' : 'lead';
 
           // ------- parseo de tipos (para leer hashtags del texto) -------
-          let content = '';
-          let mediaType = null;
-          let mediaUrl = null;
+         // ------- parseo de tipos (para leer hashtags del texto) -------
+let content = '';
+let mediaType = null;
+let mediaUrl = null;
 
-          if (msg.message?.videoMessage) {
-            mediaType = 'video';
-            const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
-            const fileRef = bucket.file(`videos/${normNum}-${Date.now()}.mp4`);
-            await fileRef.save(buffer, { contentType: 'video/mp4' });
-            const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
-            mediaUrl = url;
-          } else if (msg.message?.imageMessage) {
-            mediaType = 'image';
-            const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
-            const fileRef = bucket.file(`images/${normNum}-${Date.now()}.jpg`);
-            await fileRef.save(buffer, { contentType: 'image/jpeg' });
-            const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
-            mediaUrl = url;
-          } else if (msg.message?.audioMessage) {
-            mediaType = 'audio';
-            const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
-            const fileRef = bucket.file(`audios/${normNum}-${Date.now()}.ogg`);
-            await fileRef.save(buffer, { contentType: 'audio/ogg' });
-            const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
-            mediaUrl = url;
-          } else if (msg.message?.documentMessage) {
-            mediaType = 'document';
-            const { mimetype, fileName: origName } = msg.message.documentMessage;
-            const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
-            const ext = path.extname(origName || '') || '';
-            const fileRef = bucket.file(`docs/${normNum}-${Date.now()}${ext}`);
-            await fileRef.save(buffer, { contentType: mimetype || 'application/octet-stream' });
-            const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
-            mediaUrl = url;
-          } else if (msg.message?.conversation) {
-            mediaType = 'text';
-            content = msg.message.conversation.trim();
-          } else if (msg.message?.extendedTextMessage?.text) {
-            mediaType = 'text';
-            content = msg.message.extendedTextMessage.text.trim();
-          } else {
-            mediaType = 'unknown';
-            content = '';
-          }
+// Mensaje "desenvuelto": si viene en ephemeral/viewOnce/deviceSent lo sacamos de ahí
+const baseMessage = msg.message || {};
+const inner =
+  baseMessage?.ephemeralMessage?.message ||
+  baseMessage?.viewOnceMessage?.message ||
+  baseMessage?.deviceSentMessage?.message ||
+  baseMessage;
+
+if (inner.videoMessage) {
+  mediaType = 'video';
+  const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
+  const fileRef = bucket.file(`videos/${normNum}-${Date.now()}.mp4`);
+  await fileRef.save(buffer, { contentType: 'video/mp4' });
+  const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
+  mediaUrl = url;
+} else if (inner.imageMessage) {
+  mediaType = 'image';
+  const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
+  const fileRef = bucket.file(`images/${normNum}-${Date.now()}.jpg`);
+  await fileRef.save(buffer, { contentType: 'image/jpeg' });
+  const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
+  mediaUrl = url;
+} else if (inner.audioMessage) {
+  mediaType = 'audio';
+  const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
+  const fileRef = bucket.file(`audios/${normNum}-${Date.now()}.ogg`);
+  await fileRef.save(buffer, { contentType: 'audio/ogg' });
+  const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
+  mediaUrl = url;
+} else if (inner.documentMessage) {
+  mediaType = 'document';
+  const { mimetype, fileName: origName } = inner.documentMessage;
+  const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
+  const ext = path.extname(origName || '') || '';
+  const fileRef = bucket.file(`docs/${normNum}-${Date.now()}${ext}`);
+  await fileRef.save(buffer, { contentType: mimetype || 'application/octet-stream' });
+  const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
+  mediaUrl = url;
+} else if (inner.conversation) {
+  mediaType = 'text';
+  content = inner.conversation.trim();
+} else if (inner.extendedTextMessage?.text) {
+  mediaType = 'text';
+  content = inner.extendedTextMessage.text.trim();
+} else {
+  mediaType = 'unknown';
+  content = '';
+}
 
           // ---------- CAMBIO 1: branch fromMe NO toca 'nombre' ----------
           // ---------- fromMe: guardar mensaje y permitir comandos administrativos ----------
