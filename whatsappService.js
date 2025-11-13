@@ -1,5 +1,6 @@
 // whatsappService.js - VERSIÓN CORREGIDA
-// 🔧 FIX APLICADO: Ahora detecta todos los mensajes entrantes
+// 🔧 FIX APLICADO: Listener corregido para procesar solo mensajes 'notify' (nuevos entrantes)
+// Según documentación oficial de Baileys: https://baileys.wiki/docs/socket/receiving-updates/
 
 import {
   makeWASocket,
@@ -175,14 +176,18 @@ export async function connectToWhatsApp() {
 
     /* -------------------- 🔧 FIX: recepción de mensajes -------------------- */
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      // ✅ FIX APLICADO: Solo ignorar historial antiguo explícito
-      if (type === 'prepend') {
-        console.log('[WA] Ignorando mensajes antiguos (prepend)');
+      // ✅ CORRECCIÓN: Solo procesar mensajes nuevos (notify) según documentación oficial de Baileys
+      // https://baileys.wiki/docs/socket/receiving-updates/
+      // type === 'notify': mensajes NUEVOS entrantes (lo que necesitamos)
+      // type === 'append': historial/sincronización (ignorar)
+      // type === 'prepend': historial antiguo (ignorar)
+      if (type !== 'notify') {
+        console.log(`[WA] ⏭️ Ignorando mensajes tipo '${type || 'undefined'}' (solo se procesan 'notify')`);
         return;
       }
 
       // ✅ Log de debugging mejorado
-      console.log(`[WA] 📩 Procesando ${messages.length} mensaje(s) | tipo: ${type || 'sin tipo'} | ${new Date().toISOString()}`);
+      console.log(`[WA] 📩 Procesando ${messages.length} mensaje(s) NUEVOS | tipo: ${type} | ${new Date().toISOString()}`);
 
       for (const msg of messages) {
         try {
