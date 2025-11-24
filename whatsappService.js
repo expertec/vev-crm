@@ -36,8 +36,8 @@ const bucket = admin.storage().bucket();
 /* ------------------------------ helpers ------------------------------ */
 // alias → trigger (en minúsculas)
 const STATIC_HASHTAG_MAP = {
-  '#promoweb990':  'LeadWeb',
-  '#miwebgratis':  'LeadWeb',
+  '#WebPro990':  'LeadWeb',
+  '#miweb':  'LeadWeb',
   '#leadweb':      'LeadWeb',
   '#nuevolead':    'NuevoLeadWeb',
   '#planredes990': 'PlanRedes',

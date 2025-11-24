@@ -457,6 +457,142 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
     console.error('Error enviando WhatsApp:', error);
     return res.status(500).json({ error: error.message });
   }
+// Enviar mensajes masivos (secuencia)
+app.post('/api/whatsapp/send-bulk-message', async (req, res) => {
+  const { phones, messages } = req.body;
+  if (!phones || !Array.isArray(phones) || phones.length === 0 || !messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: 'Faltan phones (array), messages (array)' });
+  }
+
+  const results = [];
+  for (const phone of phones) {
+    try {
+      let delayAccum = 0;
+      for (const msg of messages) {
+        setTimeout(async () => {
+          try {
+            if (msg.type === 'texto') {
+              await sendMessageToLead(phone, msg.contenido);
+            } else if (msg.type === 'imagen') {
+              const sock = getWhatsAppSock();
+              if (!sock) throw new Error('No hay conexión activa con WhatsApp');
+              const num = normalizePhoneForWA(phone);
+              const jid = `${num}@s.whatsapp.net`;
+              await sock.sendMessage(jid, {
+                image: { url: msg.contenido },
+                caption: msg.caption || ''
+              });
+            } else if (msg.type === 'audio') {
+              await sendAudioMessage(phone, msg.contenido, { ptt: true });
+            } else if (msg.type === 'video') {
+              const sock = getWhatsAppSock();
+              if (!sock) throw new Error('No hay conexión activa con WhatsApp');
+              const num = normalizePhoneForWA(phone);
+              const jid = `${num}@s.whatsapp.net`;
+              await sock.sendMessage(jid, {
+                video: { url: msg.contenido },
+                caption: msg.caption || ''
+              });
+            }
+          } catch (err) {
+            console.error(`Error enviando ${msg.type} a ${phone}:`, err);
+          }
+        }, delayAccum);
+        delayAccum += (msg.delay || 0) * 60 * 1000; // delay en minutos
+      }
+      results.push({ phone, success: true });
+    } catch (error) {
+      console.error(`Error programando para ${phone}:`, error);
+      results.push({ phone, success: false, error: error.message });
+    }
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  const failCount = results.length - successCount;
+
+  return res.json({
+    total: results.length,
+    success: successCount,
+    failed: failCount,
+    results
+  });
+});
+// Enviar secuencia masiva
+app.post('/api/whatsapp/send-bulk-sequence', async (req, res) => {
+  const { phones, sequenceId } = req.body;
+  if (!phones || !Array.isArray(phones) || phones.length === 0 || !sequenceId) {
+    return res.status(400).json({ error: 'Faltan phones (array), sequenceId' });
+  }
+
+  try {
+    const seqDoc = await db.collection('secuencias').doc(sequenceId).get();
+    if (!seqDoc.exists) {
+      return res.status(404).json({ error: 'Secuencia no encontrada' });
+    }
+    const sequence = seqDoc.data();
+    const messages = sequence.messages || [];
+
+    const results = [];
+    for (const phone of phones) {
+      try {
+        let delayAccum = 0;
+        for (const msg of messages) {
+          setTimeout(async () => {
+            try {
+              if (msg.type === 'texto') {
+                await sendMessageToLead(phone, msg.contenido);
+              } else if (msg.type === 'imagen') {
+                const sock = getWhatsAppSock();
+                if (!sock) throw new Error('No hay conexión activa con WhatsApp');
+                const num = normalizePhoneForWA(phone);
+                const jid = `${num}@s.whatsapp.net`;
+                await sock.sendMessage(jid, {
+                  image: { url: msg.contenido },
+                  caption: msg.caption || ''
+                });
+              } else if (msg.type === 'audio') {
+                await sendAudioMessage(phone, msg.contenido, { ptt: true });
+              } else if (msg.type === 'video') {
+                const sock = getWhatsAppSock();
+                if (!sock) throw new Error('No hay conexión activa con WhatsApp');
+                const num = normalizePhoneForWA(phone);
+                const jid = `${num}@s.whatsapp.net`;
+                await sock.sendMessage(jid, {
+                  video: { url: msg.contenido },
+                  caption: msg.caption || ''
+                });
+              } else if (msg.type === 'videonota') {
+                await sendVideoNote(phone, msg.contenido, msg.seconds || null);
+              } else if (msg.type === 'formulario') {
+                await sendMessageToLead(phone, msg.contenido);
+              }
+            } catch (err) {
+              console.error(`Error enviando ${msg.type} a ${phone}:`, err);
+            }
+          }, delayAccum);
+          delayAccum += (msg.delay || 0) * 60 * 1000; // delay en minutos
+        }
+        results.push({ phone, success: true });
+      } catch (error) {
+        console.error(`Error programando para ${phone}:`, error);
+        results.push({ phone, success: false, error: error.message });
+      }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const failCount = results.length - successCount;
+
+    return res.json({
+      total: results.length,
+      success: successCount,
+      failed: failCount,
+      results
+    });
+  } catch (error) {
+    console.error('Error obteniendo secuencia:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
 });
 
 // Enviar audio
