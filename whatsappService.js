@@ -41,7 +41,9 @@ const STATIC_HASHTAG_MAP = {
   '#leadweb':      'LeadWeb',
   '#nuevolead':    'NuevoLeadWeb',
   '#planredes990': 'PlanRedes',
-  '#info':         'LeadWeb', 
+  '#info':         'LeadWeb',
+  '#WebPromo':     'nuevoLead',
+
 };
 
 // Si el trigger es LeadWeb, cancela estas (evita duplicidad)
