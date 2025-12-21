@@ -148,23 +148,26 @@ export async function enviarMensaje(lead, mensaje) {
     const sock = getWhatsAppSock();
     if (!sock) return;
 
-    const e164 = toE164(lead.telefono);
-    const jid = e164ToJid(e164);
+    const { jid, phone } = Q.resolveLeadJidAndPhone(lead);
+    if (!jid) {
+      console.warn('[enviarMensaje] No se pudo resolver JID para lead', lead?.id || lead?.telefono);
+      return;
+    }
 
     switch ((mensaje?.type || 'texto').toLowerCase()) {
       case 'texto': {
         const text = replacePlaceholders(mensaje.contenido, lead).trim();
-        if (text) await sock.sendMessage(jid, { text, linkPreview: false });
+        if (text) await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
         break;
       }
       case 'formulario': {
         const raw = String(mensaje.contenido || '');
         const text = raw
-          .replace('{{telefono}}', e164.replace(/\D/g, ''))
+          .replace('{{telefono}}', String(phone || '').replace(/\D/g, ''))
           .replace('{{nombre}}', encodeURIComponent(lead.nombre || ''))
           .replace(/\r?\n/g, ' ')
           .trim();
-        if (text) await sock.sendMessage(jid, { text, linkPreview: false });
+        if (text) await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
         break;
       }
       case 'audio': {
@@ -181,7 +184,7 @@ export async function enviarMensaje(lead, mensaje) {
       }
       case 'video': {
         const url = replacePlaceholders(mensaje.contenido, lead).trim();
-        if (url) await sock.sendMessage(jid, { video: { url } });
+        if (url) await sock.sendMessage(jid, { video: { url } }, { timeoutMs: 120_000 });
         break;
       }
       default:
@@ -347,15 +350,15 @@ export async function archivarNegociosAntiguos() {
 // =============== SECUENCIAS ===============
 
 export async function processSequences() {
-  const fn =
-    typeof Q.processDueSequenceJobs === 'function'
-      ? Q.processDueSequenceJobs
-      : (typeof Q.processQueue === 'function' ? Q.processQueue : null);
-
-  if (!fn) {
-    console.warn('⚠️ No hay función de proceso de cola exportada.');
-    return 0;
+  if (typeof Q.processSequenceLeadsBatch === 'function') {
+    return await Q.processSequenceLeadsBatch({ limit: 25 });
   }
-  
-  return await fn({ batchSize: 200 });
+  if (typeof Q.processDueSequenceJobs === 'function') {
+    return await Q.processDueSequenceJobs({ limit: 25 });
+  }
+  if (typeof Q.processQueue === 'function') {
+    return await Q.processQueue({ batchSize: 200 });
+  }
+  console.warn('⚠️ No hay función de proceso de cola exportada.');
+  return 0;
 }

@@ -21,7 +21,7 @@ import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // Cola de secuencias
-import { scheduleSequenceForLead, cancelSequences, cancelAllSequences } from './queue.js';
+import { scheduleSequenceForLead, cancelSequences, cancelAllSequences, normalizeJid, hasSameTrigger } from './queue.js';
 
 
 let latestQR = null;
@@ -241,21 +241,23 @@ export async function connectToWhatsApp() {
 
               if (!leadSnap.exists) {
                 // Crear lead nuevo sin mensaje
-                await leadRef.set({
-                  telefono: normNum,
-                  nombre: msg.pushName || '',
-                  source: 'WhatsApp Business API',
-                  fecha_creacion: now(),
-                  estado: 'nuevo',
-                  etiquetas: ['MensajeNoDesencriptado', 'FacebookAds'],
-                  unreadCount: 1,
-                  lastMessageAt: now(),
-                });
+              await leadRef.set({
+                telefono: normNum,
+                nombre: msg.pushName || '',
+                jid: normalizeJid(rawJid),
+                source: 'WhatsApp Business API',
+                fecha_creacion: now(),
+                estado: 'nuevo',
+                etiquetas: ['MensajeNoDesencriptado', 'FacebookAds'],
+                unreadCount: 1,
+                lastMessageAt: now(),
+              });
                 console.log(`[WA] ✅ Lead creado desde mensaje no desencriptado: ${leadId}`);
               } else {
                 await leadRef.update({
                   lastMessageAt: now(),
                   unreadCount: FieldValue.increment(1),
+                  jid: normalizeJid(rawJid),
                   etiquetas: FieldValue.arrayUnion('MensajeNoDesencriptado')
                 });
                 console.log(`[WA] ✅ Lead actualizado desde mensaje no desencriptado: ${leadId}`);
@@ -266,7 +268,8 @@ export async function connectToWhatsApp() {
 
           const [jidUser, jidDomain] = rawJid.split('@');
           const cleanUser = jidUser.split(':')[0].replace(/\s+/g, '');
-          const jid = `${cleanUser}@${jidDomain}`;
+          const normalizedJid = normalizeJid(rawJid);
+          const jid = normalizedJid || `${cleanUser}@${jidDomain}`;
           if (jidDomain !== 's.whatsapp.net') continue;
 
           const waNumber = cleanUser;
@@ -418,6 +421,7 @@ export async function connectToWhatsApp() {
           const baseLead = {
             telefono: normNum,
             nombre: msg.pushName || '',
+            jid: jid,
             source: 'WhatsApp',
           };
 
@@ -444,7 +448,7 @@ export async function connectToWhatsApp() {
           } else {
             // Lead existente
             const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
-            await leadRef.update({ lastMessageAt: now() });
+            await leadRef.update({ lastMessageAt: now(), jid });
 
             if (!current.nombre && msg.pushName) {
               await leadRef.set({ nombre: msg.pushName }, { merge: true });
@@ -455,8 +459,9 @@ export async function connectToWhatsApp() {
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
 
             const blocked = shouldBlockSequences(current, trigger);
+            const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
 
-            if (!blocked && (rule.source === 'hashtag' || rule.source === 'db')) {
+            if (!blocked && !alreadyHas && (rule.source === 'hashtag' || rule.source === 'db')) {
               await scheduleSequenceForLead(leadId, trigger, now());
               console.log('[WA] ✅ Lead ACTUALIZADO (reprogramado):', { leadId, trigger, source: rule.source });
             } else {
@@ -465,7 +470,7 @@ export async function connectToWhatsApp() {
                 trigger,
                 source: rule.source,
                 blocked,
-                reason: blocked ? 'bloqueado' : 'trigger=default'
+                reason: blocked ? 'bloqueado' : (alreadyHas ? 'ya-activo' : 'trigger=default')
               });
             }
           }
@@ -508,17 +513,24 @@ export function getSessionPhone() { return sessionPhone; }
 export async function sendMessageToLead(phone, messageContent) {
   if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
   const num = normalizePhoneForWA(phone);
-  const jid = `${num}@s.whatsapp.net`;
+
+  let leadId = null;
+  let targetJid = `${num}@s.whatsapp.net`;
+  const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
+  if (!q.empty) {
+    leadId = q.docs[0].id;
+    const data = q.docs[0].data() || {};
+    if (data.jid) targetJid = normalizeJid(data.jid) || targetJid;
+    else if (leadId) targetJid = normalizeJid(leadId) || targetJid;
+  }
 
   await whatsappSock.sendMessage(
-    jid,
+    targetJid,
     { text: messageContent, linkPreview: false },
     { timeoutMs: 60_000 }
   );
 
-  const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
-  if (!q.empty) {
-    const leadId = q.docs[0].id;
+  if (leadId) {
     const outMsg = { content: messageContent, sender: 'business', timestamp: now() };
     await db.collection('leads').doc(leadId).collection('messages').add(outMsg);
     await db.collection('leads').doc(leadId).update({ lastMessageAt: outMsg.timestamp });
