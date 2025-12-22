@@ -36,14 +36,17 @@ const bucket = admin.storage().bucket();
 /* ------------------------------ helpers ------------------------------ */
 // alias → trigger (en minúsculas)
 const STATIC_HASHTAG_MAP = {
-  '#WebPro990':  'LeadWeb',
-  '#webPro990':  'LeadWeb',
+  '#WebPro990':    'LeadWeb',
+  '#webPro990':    'LeadWeb',
   '#leadweb':      'LeadWeb',
   '#nuevolead':    'NuevoLeadWeb',
   '#planredes990': 'PlanRedes',
   '#info':         'LeadWeb',
   '#infoweb':      'NuevoLead',
-  '#WebPromo':     'NuevoLead',
+  '#WebPromo':     'WebPromo',       // ✅ CORREGIDO: trigger específico para campañas de Meta Ads
+  '#webpromo':     'WebPromo',       // ✅ AGREGADO: variante en minúsculas
+  '#webPromo':     'WebPromo',       // ✅ AGREGADO: variante camelCase
+  '#WEBPROMO':     'WebPromo',       // ✅ AGREGADO: variante mayúsculas
 
 };
 
@@ -130,29 +133,57 @@ function shouldBlockSequences(leadData, nextTrigger) {
 }
 
 function resolveSenderFromLid(msg) {
-  const candidates = [
-    msg?.key?.senderPn,
-    msg?.key?.participant,
-    msg?.participant,
-    msg?.message?.extendedTextMessage?.contextInfo?.participant,
-    msg?.message?.senderKeyDistributionMessage?.groupId,
-    msg?.key?.remoteJid?.replace('@lid', '')
-  ].filter(Boolean);
+  // Prioridad 1: key.participant (más confiable para mensajes de Business API)
+  if (msg?.key?.participant && msg.key.participant.includes('@s.whatsapp.net')) {
+    console.log(`[resolveSenderFromLid] ✅ Usando key.participant: ${msg.key.participant}`);
+    return msg.key.participant;
+  }
 
-  for (const cand of candidates) {
-    const clean = normalizePhoneForWA(cand);
-    if (clean && /^\d{10,15}$/.test(clean.replace(/\D/g, ''))) {
-      return `${clean}@s.whatsapp.net`;
+  // Prioridad 2: key.remoteJid si ya es @s.whatsapp.net (raro pero posible)
+  if (msg?.key?.remoteJid && msg.key.remoteJid.includes('@s.whatsapp.net')) {
+    console.log(`[resolveSenderFromLid] ✅ remoteJid ya es válido: ${msg.key.remoteJid}`);
+    return msg.key.remoteJid;
+  }
+
+  // Prioridad 3: Extraer de remoteJid antes del @lid
+  const remoteJid = String(msg?.key?.remoteJid || '');
+  if (remoteJid.endsWith('@lid')) {
+    const phoneDigits = remoteJid.replace('@lid', '').replace(/\D/g, '');
+    if (phoneDigits.length >= 10) {
+      const normalized = normalizePhoneForWA(phoneDigits);
+      const jid = `${normalized}@s.whatsapp.net`;
+      console.log(`[resolveSenderFromLid] ✅ Extraído de remoteJid: ${remoteJid} → ${jid}`);
+      return jid;
     }
   }
 
-  // fallback: si remoteJid trae solo números con @lid, intentar usarlo como teléfono
-  const raw = String(msg?.key?.remoteJid || '');
-  const digits = raw.replace(/\D/g, '');
-  if (digits.length >= 10) {
-    const norm = normalizePhoneForWA(digits);
-    if (norm) return `${norm}@s.whatsapp.net`;
+  // Prioridad 4: Buscar en otros campos
+  const candidates = [
+    msg?.key?.senderPn,
+    msg?.participant,
+    msg?.message?.extendedTextMessage?.contextInfo?.participant,
+  ].filter(Boolean);
+
+  for (const cand of candidates) {
+    if (String(cand).includes('@s.whatsapp.net')) {
+      console.log(`[resolveSenderFromLid] ✅ Encontrado en candidates: ${cand}`);
+      return cand;
+    }
+
+    const digits = String(cand).replace(/\D/g, '');
+    if (digits.length >= 10) {
+      const normalized = normalizePhoneForWA(digits);
+      const jid = `${normalized}@s.whatsapp.net`;
+      console.log(`[resolveSenderFromLid] ✅ Normalizado de candidate: ${cand} → ${jid}`);
+      return jid;
+    }
   }
+
+  console.warn(`[resolveSenderFromLid] ❌ No se pudo resolver sender desde:`, {
+    remoteJid: msg?.key?.remoteJid,
+    participant: msg?.key?.participant,
+    senderPn: msg?.key?.senderPn
+  });
 
   return null;
 }
@@ -238,27 +269,42 @@ export async function connectToWhatsApp() {
           // Manejar mensajes de Business API (@lid) que vienen de FB Ads
           // Estos mensajes tienen el remitente real en senderPn o participant
           if (rawJid.endsWith('@lid')) {
-            console.log(`[WA] 📱 Mensaje de Business API detectado (@lid) - ID: ${msg.key.id}`);
+            console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+            console.log(`[WA] 📱 MENSAJE DE FACEBOOK ADS DETECTADO (@lid)`);
+            console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+            console.log(`   🆔 Message ID: ${msg.key.id}`);
+            console.log(`   📍 Remote JID original: ${rawJid}`);
+            console.log(`   👤 Push Name: ${msg.pushName || 'N/A'}`);
+            console.log(`   🔍 Key.participant: ${msg.key.participant || 'N/A'}`);
+            console.log(`   🔍 Key.senderPn: ${msg.key.senderPn || 'N/A'}`);
 
-            // Intentar extraer el número real (primero senderPn, luego participant)
-            const realSender = msg.key.senderPn || msg.key.participant || resolveSenderFromLid(msg);
+            // 🔧 CORRECCIÓN CRÍTICA: Resolver el JID real del usuario
+            const realSender = resolveSenderFromLid(msg);
 
             if (realSender && realSender.includes('@s.whatsapp.net')) {
-              console.log(`[WA] ✅ Remitente real extraído de @lid: ${realSender}`);
-              rawJid = realSender; // Usar el número real del lead
-            } else if (realSender) {
-              const normNum = normalizePhoneForWA(realSender);
-              if (normNum) {
-                rawJid = `${normNum}@s.whatsapp.net`;
-                console.log(`[WA] ✅ Remitente real normalizado desde @lid: ${rawJid}`);
-              } else {
-                console.warn(`[WA] ⚠️ No se pudo normalizar remitente real de mensaje @lid.`);
-              }
+              console.log(`   ✅ JID real extraído correctamente: ${realSender}`);
+              rawJid = realSender; // ✅ Usar el número real del lead
             } else {
-              console.warn(`[WA] ⚠️ No se pudo extraer remitente real de mensaje @lid.`);
-              console.log('[WA] 🔍 msg.key:', JSON.stringify(msg.key, null, 2));
-              console.log('[WA] 🔍 msg.pushName:', msg.pushName);
+              // ⚠️ FALLBACK: Si no se puede resolver, intentar extraer del remoteJid
+              const phoneDigits = rawJid.replace('@lid', '').replace(/\D/g, '');
+              if (phoneDigits.length >= 10) {
+                const normalized = normalizePhoneForWA(phoneDigits);
+                rawJid = `${normalized}@s.whatsapp.net`;
+                console.log(`   ⚠️ FALLBACK: Usando dígitos del remoteJid: ${rawJid}`);
+              } else {
+                console.error(`   ❌ NO SE PUDO RESOLVER JID REAL - Mensaje será ignorado`);
+                console.log(`   🔍 Estructura completa del mensaje:`);
+                console.log(JSON.stringify({
+                  key: msg.key,
+                  pushName: msg.pushName,
+                  hasMessage: !!msg.message
+                }, null, 2));
+                console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+                continue; // ❌ Saltar este mensaje si no se puede resolver el JID
+              }
             }
+            console.log(`   ✅ JID final a usar: ${rawJid}`);
+            console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
           }
 
           // Verificar que el mensaje tenga contenido desencriptado
@@ -276,27 +322,83 @@ export async function connectToWhatsApp() {
               const leadRef = db.collection('leads').doc(leadId);
               const leadSnap = await leadRef.get();
 
+              // 🔍 NUEVO: Intentar detectar trigger desde el ID del mensaje o metadata
+              const cfgSnap = await db.collection('config').doc('appConfig').get();
+              const cfg = cfgSnap.exists ? cfgSnap.data() : {};
+              const defaultTrigger = cfg.defaultTriggerMetaAds || 'WebPromo'; // ✅ Usar WebPromo por defecto para Meta Ads
+
+              // 🔍 Buscar hashtags en el pushName o en metadata del mensaje
+              let detectedTrigger = defaultTrigger;
+              const pushNameTags = extractHashtags(msg.pushName || '');
+
+              if (pushNameTags.length > 0) {
+                // Intentar resolver trigger desde hashtag en pushName
+                for (const tag of pushNameTags) {
+                  const trg = STATIC_HASHTAG_MAP[tag];
+                  if (trg) {
+                    detectedTrigger = trg;
+                    console.log(`[WA] ✅ Hashtag detectado en pushName: ${tag} → trigger: ${detectedTrigger}`);
+                    break;
+                  }
+                }
+              }
+
+              const baseEtiquetas = ['FacebookAds', detectedTrigger];
+              if (!msg.message) baseEtiquetas.push('MensajeNoDesencriptado');
+
+              // 🔧 CRÍTICO: Verificar que rawJid sea válido antes de guardar
+              const finalJid = rawJid.includes('@s.whatsapp.net') ? rawJid : leadId;
+              console.log(`[WA] 📝 Guardando lead con JID: ${finalJid}`);
+
               if (!leadSnap.exists) {
-                // Crear lead nuevo sin mensaje
-              await leadRef.set({
-                telefono: normNum,
-                nombre: msg.pushName || '',
-                jid: normalizeJid(rawJid),
-                source: 'WhatsApp Business API',
-                fecha_creacion: now(),
-                estado: 'nuevo',
-                etiquetas: ['MensajeNoDesencriptado', 'FacebookAds'],
-                unreadCount: 1,
-                lastMessageAt: now(),
-              });
-                console.log(`[WA] ✅ Lead creado desde mensaje no desencriptado: ${leadId}`);
+                // Crear lead nuevo sin mensaje pero CON trigger detectado
+                await leadRef.set({
+                  telefono: normNum,
+                  nombre: msg.pushName || '',
+                  jid: finalJid, // ✅ USAR JID VALIDADO
+                  source: 'WhatsApp Business API',
+                  fecha_creacion: now(),
+                  estado: 'nuevo',
+                  etiquetas: baseEtiquetas,
+                  unreadCount: 1,
+                  lastMessageAt: now(),
+                });
+
+                // ✅ ACTIVAR SECUENCIA para lead nuevo de Meta Ads
+                console.log(`[WA] ✅ Lead creado desde Meta Ads: ${leadId} - Programando secuencia: ${detectedTrigger}`);
+
+                try {
+                  await scheduleSequenceForLead(leadId, detectedTrigger, now());
+                  console.log(`[WA] 🎯 Secuencia ${detectedTrigger} programada para ${leadId}`);
+                } catch (seqErr) {
+                  console.error(`[WA] ❌ Error programando secuencia: ${seqErr?.message || seqErr}`);
+                }
               } else {
+                // Lead existente: actualizar y verificar si necesita secuencia
+                const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
+
                 await leadRef.update({
                   lastMessageAt: now(),
                   unreadCount: FieldValue.increment(1),
-                  jid: normalizeJid(rawJid),
-                  etiquetas: FieldValue.arrayUnion('MensajeNoDesencriptado')
+                  jid: finalJid, // ✅ USAR JID VALIDADO
+                  etiquetas: FieldValue.arrayUnion(...baseEtiquetas)
                 });
+
+                // ✅ ACTIVAR SECUENCIA si no la tiene activa
+                const alreadyHas = hasSameTrigger(current.secuenciasActivas, detectedTrigger);
+                const blocked = shouldBlockSequences(current, detectedTrigger);
+
+                if (!blocked && !alreadyHas) {
+                  try {
+                    await scheduleSequenceForLead(leadId, detectedTrigger, now());
+                    console.log(`[WA] 🎯 Secuencia ${detectedTrigger} programada para lead existente ${leadId}`);
+                  } catch (seqErr) {
+                    console.error(`[WA] ❌ Error programando secuencia: ${seqErr?.message || seqErr}`);
+                  }
+                } else {
+                  console.log(`[WA] ⏭️ Secuencia NO programada para ${leadId}: blocked=${blocked}, alreadyHas=${alreadyHas}`);
+                }
+
                 console.log(`[WA] ✅ Lead actualizado desde mensaje no desencriptado: ${leadId}`);
               }
             }
