@@ -42,6 +42,7 @@ const STATIC_HASHTAG_MAP = {
   '#nuevolead':    'NuevoLeadWeb',
   '#planredes990': 'PlanRedes',
   '#info':         'LeadWeb',
+  '#infoweb':      'NuevoLead',
   '#WebPromo':     'NuevoLead',
 
 };
@@ -144,6 +145,15 @@ function resolveSenderFromLid(msg) {
       return `${clean}@s.whatsapp.net`;
     }
   }
+
+  // fallback: si remoteJid trae solo números con @lid, intentar usarlo como teléfono
+  const raw = String(msg?.key?.remoteJid || '');
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length >= 10) {
+    const norm = normalizePhoneForWA(digits);
+    if (norm) return `${norm}@s.whatsapp.net`;
+  }
+
   return null;
 }
 
