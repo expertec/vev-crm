@@ -42,7 +42,7 @@ const STATIC_HASHTAG_MAP = {
   '#nuevolead':    'NuevoLeadWeb',
   '#planredes990': 'PlanRedes',
   '#info':         'LeadWeb',
-  '#WebPromo':     'nuevoLead',
+  '#WebPromo':     'NuevoLead',
 
 };
 
@@ -126,6 +126,25 @@ function shouldBlockSequences(leadData, nextTrigger) {
     if (['LeadWeb', 'NuevoLead', 'NuevoLeadWeb'].includes(nextTrigger)) return true;
   }
   return false;
+}
+
+function resolveSenderFromLid(msg) {
+  const candidates = [
+    msg?.key?.senderPn,
+    msg?.key?.participant,
+    msg?.participant,
+    msg?.message?.extendedTextMessage?.contextInfo?.participant,
+    msg?.message?.senderKeyDistributionMessage?.groupId,
+    msg?.key?.remoteJid?.replace('@lid', '')
+  ].filter(Boolean);
+
+  for (const cand of candidates) {
+    const clean = normalizePhoneForWA(cand);
+    if (clean && /^\d{10,15}$/.test(clean.replace(/\D/g, ''))) {
+      return `${clean}@s.whatsapp.net`;
+    }
+  }
+  return null;
 }
 
 /* ---------------------------- conexión WA ---------------------------- */
@@ -212,11 +231,19 @@ export async function connectToWhatsApp() {
             console.log(`[WA] 📱 Mensaje de Business API detectado (@lid) - ID: ${msg.key.id}`);
 
             // Intentar extraer el número real (primero senderPn, luego participant)
-            const realSender = msg.key.senderPn || msg.key.participant;
+            const realSender = msg.key.senderPn || msg.key.participant || resolveSenderFromLid(msg);
 
             if (realSender && realSender.includes('@s.whatsapp.net')) {
               console.log(`[WA] ✅ Remitente real extraído de @lid: ${realSender}`);
               rawJid = realSender; // Usar el número real del lead
+            } else if (realSender) {
+              const normNum = normalizePhoneForWA(realSender);
+              if (normNum) {
+                rawJid = `${normNum}@s.whatsapp.net`;
+                console.log(`[WA] ✅ Remitente real normalizado desde @lid: ${rawJid}`);
+              } else {
+                console.warn(`[WA] ⚠️ No se pudo normalizar remitente real de mensaje @lid.`);
+              }
             } else {
               console.warn(`[WA] ⚠️ No se pudo extraer remitente real de mensaje @lid.`);
               console.log('[WA] 🔍 msg.key:', JSON.stringify(msg.key, null, 2));
