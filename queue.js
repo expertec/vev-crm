@@ -151,11 +151,23 @@ async function sendWithRetry(sock, jid, message, opts = {}, attempts = 3) {
 
 /* ----------------------- definición de secuencias ----------------------- */
 const _sequenceDefCache = new Map();
+const _sequenceDefCacheTime = new Map();
+const SEQUENCE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+
+const isSeqCacheFresh = (key) => {
+  const ts = _sequenceDefCacheTime.get(key);
+  return typeof ts === 'number' && (Date.now() - ts) < SEQUENCE_CACHE_TTL_MS;
+};
+const setSeqCache = (key, value) => {
+  _sequenceDefCache.set(key, value);
+  _sequenceDefCacheTime.set(key, Date.now());
+  return value;
+};
 
 async function getSequenceDefinition(trigger) {
   if (!trigger) return null;
   const key = String(trigger);
-  if (_sequenceDefCache.has(key)) return _sequenceDefCache.get(key);
+  if (_sequenceDefCache.has(key) && isSeqCacheFresh(key)) return _sequenceDefCache.get(key);
 
   let seqDoc = await db.collection('secuencias').doc(key).get();
   if (!seqDoc.exists) {
@@ -167,14 +179,12 @@ async function getSequenceDefinition(trigger) {
   }
   if (!seqDoc.exists) {
     console.warn(`[getSequenceDefinition] No existe secuencias/${key}`);
-    _sequenceDefCache.set(key, null);
-    return null;
+    return setSeqCache(key, null);
   }
   const data = seqDoc.data() || {};
   const messages = Array.isArray(data.messages) ? data.messages : [];
   const def = { id: seqDoc.id, trigger: data.trigger || key, active: data.active !== false, messages };
-  _sequenceDefCache.set(key, def);
-  return def;
+  return setSeqCache(key, def);
 }
 
 function computeSequenceStepRun(trigger, startTime, index = 0) {
@@ -736,7 +746,7 @@ export async function hydrateNextSequenceRun({ limit = 50 } = {}) {
     const secuencias = normalizeSecuencias(data.secuenciasActivas);
     if (!secuencias.length) continue;
     for (const seq of secuencias) {
-      if (!_sequenceDefCache.has(seq.trigger)) {
+      if (!_sequenceDefCache.has(seq.trigger) || !isSeqCacheFresh(seq.trigger)) {
         await getSequenceDefinition(seq.trigger);
       }
     }
