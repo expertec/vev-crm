@@ -587,6 +587,31 @@ export async function connectToWhatsApp() {
               }
             }
 
+            // #WebPromo = reactivar secuencia manualmente (funciona con @lid)
+            try {
+              const tags = extractHashtags(content || '');
+              const hasWebPromo = tags.some(t => t === '#webpromo' || t === 'webpromo');
+              if (hasWebPromo && leadId) {
+                const trigger = 'NuevoLead';
+                console.log(`[WA] #WebPromo detectado. Activando secuencia '${trigger}' para ${leadId}`);
+
+                await leadRef.set({
+                  estado: 'nuevo',
+                  etiquetas: FieldValue.arrayUnion(trigger, 'NuevoLead'),
+                  hasActiveSequences: true
+                }, { merge: true });
+
+                const scheduled = await scheduleSequenceForLead(leadId, trigger, now());
+                if (scheduled > 0) {
+                  console.log(`[WA] ✅ #WebPromo → Secuencia programada (${scheduled} pasos) para ${leadId}`);
+                } else {
+                  console.error(`[WA] ❌ #WebPromo → No se pudo programar secuencia para ${leadId}`);
+                }
+              }
+            } catch (webPromoErr) {
+              console.error('[WA] Error procesando #WebPromo:', webPromoErr?.message || webPromoErr);
+            }
+
             console.log('[WA] (fromMe) Mensaje propio guardado →', leadId);
             continue;
           }
