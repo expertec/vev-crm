@@ -21,7 +21,14 @@ import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // Cola de secuencias
-import { scheduleSequenceForLead, cancelSequences, cancelAllSequences, normalizeJid, hasSameTrigger } from './queue.js';
+import {
+  scheduleSequenceForLead,
+  cancelSequences,
+  cancelAllSequences,
+  normalizeJid,
+  hasSameTrigger,
+  phoneFromJid
+} from './queue.js';
 
 
 let latestQR = null;
@@ -133,6 +140,12 @@ function shouldBlockSequences(leadData, nextTrigger) {
 }
 
 function resolveSenderFromLid(msg) {
+  const remoteJidAlt = normalizeJid(msg?.key?.remoteJidAlt);
+  if (remoteJidAlt && remoteJidAlt.includes('@s.whatsapp.net')) {
+    console.log(`[resolveSenderFromLid] ✅ remoteJidAlt detectado: ${remoteJidAlt}`);
+    return remoteJidAlt;
+  }
+
   // Prioridad 1: key.participant (más confiable para mensajes de Business API)
   if (msg?.key?.participant && msg.key.participant.includes('@s.whatsapp.net')) {
     console.log(`[resolveSenderFromLid] ✅ Usando key.participant: ${msg.key.participant}`);
@@ -249,75 +262,108 @@ export async function connectToWhatsApp() {
       }
 
       // ✅ Log de debugging mejorado
-      console.log(`[WA] 📩 Procesando ${messages.length} mensaje(s) NUEVOS | tipo: ${type} | ${new Date().toISOString()}`);
+        console.log(`[WA] 📩 Procesando ${messages.length} mensaje(s) NUEVOS | tipo: ${type} | ${new Date().toISOString()}`);
 
-      for (const msg of messages) {
-        try {
-          // Validación de JID
+        for (const msg of messages) {
+          try {
+            // Validación de JID
           let rawJid = (msg?.key?.remoteJid || '').trim();
-          if (!rawJid) {
-            console.warn('[WA] mensaje sin remoteJid, se ignora');
+          const remoteJidAltRaw = msg?.key?.remoteJidAlt;
+          const remoteJidAlt = normalizeJid(remoteJidAltRaw);
+          const addressingMode = msg?.key?.addressingMode || 'pn';
+
+          if (!rawJid && !remoteJidAlt) {
+            console.warn('[WA] mensaje sin remoteJid ni remoteJidAlt, se ignora');
             continue;
           }
 
           // Ignorar grupos/estados/newsletters
-          if (rawJid.endsWith('@g.us') || rawJid === 'status@broadcast' || rawJid.endsWith('@newsletter')) {
+          if ((rawJid || '').endsWith('@g.us') || rawJid === 'status@broadcast' || (rawJid || '').endsWith('@newsletter')) {
             console.log(`[WA] ⏭️ Ignorando mensaje de: ${rawJid} (grupo/canal/newsletter)`);
             continue;
           }
 
+          const isLidRemote = (rawJid || '').endsWith('@lid') || addressingMode === 'lid';
+          let jidToUse = normalizeJid(remoteJidAlt || rawJid);
+
+          if (remoteJidAlt && remoteJidAlt.includes('@s.whatsapp.net')) {
+            console.log(`[WA] ✅ Usando remoteJidAlt (número real): ${remoteJidAlt}`);
+            jidToUse = remoteJidAlt;
+          }
+
           // Manejar mensajes de Business API (@lid) que vienen de FB Ads
           // Estos mensajes tienen el remitente real en senderPn o participant
-          if (rawJid.endsWith('@lid')) {
+          if (isLidRemote) {
             console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
             console.log(`[WA] 📱 MENSAJE DE FACEBOOK ADS DETECTADO (@lid)`);
             console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
             console.log(`   🆔 Message ID: ${msg.key.id}`);
-            console.log(`   📍 Remote JID original: ${rawJid}`);
+            console.log(`   📍 Remote JID original: ${rawJid || 'N/A'}`);
             console.log(`   👤 Push Name: ${msg.pushName || 'N/A'}`);
             console.log(`   🔍 Key.participant: ${msg.key.participant || 'N/A'}`);
             console.log(`   🔍 Key.senderPn: ${msg.key.senderPn || 'N/A'}`);
+            console.log(`   🔍 addressingMode: ${addressingMode}`);
+            console.log(`   🔍 remoteJidAlt: ${remoteJidAlt || 'N/A'}`);
 
             // 🔧 CORRECCIÓN CRÍTICA: Resolver el JID real del usuario
-            const realSender = resolveSenderFromLid(msg);
+            if (!remoteJidAlt) {
+              const realSender = resolveSenderFromLid(msg);
 
-            if (realSender && realSender.includes('@s.whatsapp.net')) {
-              console.log(`   ✅ JID real extraído correctamente: ${realSender}`);
-              rawJid = realSender; // ✅ Usar el número real del lead
-            } else {
-              // ⚠️ FALLBACK: Si no se puede resolver, intentar extraer del remoteJid
-              const phoneDigits = rawJid.replace('@lid', '').replace(/\D/g, '');
-              if (phoneDigits.length >= 10) {
-                const normalized = normalizePhoneForWA(phoneDigits);
-                rawJid = `${normalized}@s.whatsapp.net`;
-                console.log(`   ⚠️ FALLBACK: Usando dígitos del remoteJid: ${rawJid}`);
+              if (realSender && realSender.includes('@s.whatsapp.net')) {
+                console.log(`   ✅ JID real extraído correctamente: ${realSender}`);
+                jidToUse = realSender; // ✅ Usar el número real del lead
               } else {
-                console.error(`   ❌ NO SE PUDO RESOLVER JID REAL - Mensaje será ignorado`);
-                console.log(`   🔍 Estructura completa del mensaje:`);
-                console.log(JSON.stringify({
-                  key: msg.key,
-                  pushName: msg.pushName,
-                  hasMessage: !!msg.message
-                }, null, 2));
-                console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
-                continue; // ❌ Saltar este mensaje si no se puede resolver el JID
+                // ⚠️ FALLBACK: Si no se puede resolver, intentar extraer del remoteJid
+                const phoneDigits = String(rawJid || '').replace('@lid', '').replace(/\D/g, '');
+                if (phoneDigits.length >= 10) {
+                  const normalized = normalizePhoneForWA(phoneDigits);
+                  jidToUse = `${normalized}@s.whatsapp.net`;
+                  console.log(`   ⚠️ FALLBACK: Usando dígitos del remoteJid: ${jidToUse}`);
+                } else {
+                  console.error(`   ❌ NO SE PUDO RESOLVER JID REAL - Mensaje será ignorado`);
+                  console.log(`   🔍 Estructura completa del mensaje:`);
+                  console.log(JSON.stringify({
+                    key: msg.key,
+                    pushName: msg.pushName,
+                    hasMessage: !!msg.message
+                  }, null, 2));
+                  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+                  continue; // ❌ Saltar este mensaje si no se puede resolver el JID
+                }
               }
+            } else {
+              jidToUse = remoteJidAlt;
             }
-            console.log(`   ✅ JID final a usar: ${rawJid}`);
+            console.log(`   ✅ JID final a usar: ${jidToUse}`);
             console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
           }
 
+          const finalJid = normalizeJid(jidToUse);
+          const lidJid = isLidRemote ? normalizeJid(rawJid) : null;
+          const jidResolved = normalizeJid(remoteJidAlt || finalJid);
+
+          if (!finalJid) {
+            console.warn('[WA] mensaje sin JID final válido, se ignora');
+            continue;
+          }
+
+          const [jidUser, jidDomain] = finalJid.split('@');
+          const cleanUser = (jidUser || '').split(':')[0].replace(/\s+/g, '');
+          if (!['s.whatsapp.net', 'lid'].includes(jidDomain)) continue;
+
+          const phoneFromResolved = phoneFromJid(jidResolved);
+          const normNum  = phoneFromResolved || normalizePhoneForWA(cleanUser);
+          const leadId   = jidResolved || `${normNum}@s.whatsapp.net`;
+          const sender   = msg.key.fromMe ? 'business' : 'lead';
+          const jid      = finalJid;
+
           // Verificar que el mensaje tenga contenido desencriptado
           if (!msg.message || Object.keys(msg.message).length === 0) {
-            console.warn(`[WA] ⚠️ Mensaje sin contenido desencriptado desde ${rawJid} - ID: ${msg.key.id}`);
+            console.warn(`[WA] ⚠️ Mensaje sin contenido desencriptado desde ${finalJid} - ID: ${msg.key.id}`);
 
             // Para mensajes con remitente válido, intentar crear el lead de todas formas
-            if (rawJid.includes('@s.whatsapp.net')) {
-              console.log(`[WA] 🔄 Intentando crear/actualizar lead sin contenido de mensaje para ${rawJid}`);
-              const [jidUser] = rawJid.split('@');
-              const cleanUser = jidUser.split(':')[0].replace(/\s+/g, '');
-              const normNum = normalizePhoneForWA(cleanUser);
-              const leadId = `${normNum}@s.whatsapp.net`;
+            if (finalJid) {
+              console.log(`[WA] 🔄 Intentando crear/actualizar lead sin contenido de mensaje para ${finalJid}`);
 
               const leadRef = db.collection('leads').doc(leadId);
               const leadSnap = await leadRef.get();
@@ -346,22 +392,29 @@ export async function connectToWhatsApp() {
               const baseEtiquetas = ['FacebookAds', detectedTrigger];
               if (!msg.message) baseEtiquetas.push('MensajeNoDesencriptado');
 
-              // 🔧 CRÍTICO: Verificar que rawJid sea válido antes de guardar
-              const finalJid = rawJid.includes('@s.whatsapp.net') ? rawJid : leadId;
-              console.log(`[WA] 📝 Guardando lead con JID: ${finalJid}`);
+              // 🔧 CRÍTICO: Guardar ambos JID para futuras resoluciones
+              const finalJidToPersist = jidResolved || finalJid;
+              console.log(`[WA] 📝 Guardando lead con JID: ${finalJidToPersist}`);
+
+              const leadPayload = {
+                telefono: normNum,
+                nombre: msg.pushName || '',
+                jid: finalJidToPersist,
+                resolvedJid: jidResolved,
+                lidJid,
+                addressingMode,
+                source: 'WhatsApp Business API',
+                lastMessageAt: now(),
+              };
 
               if (!leadSnap.exists) {
                 // Crear lead nuevo sin mensaje pero CON trigger detectado
                 await leadRef.set({
-                  telefono: normNum,
-                  nombre: msg.pushName || '',
-                  jid: finalJid, // ✅ USAR JID VALIDADO
-                  source: 'WhatsApp Business API',
+                  ...leadPayload,
                   fecha_creacion: now(),
                   estado: 'nuevo',
                   etiquetas: baseEtiquetas,
                   unreadCount: 1,
-                  lastMessageAt: now(),
                 });
 
                 // ✅ ACTIVAR SECUENCIA para lead nuevo de Meta Ads
@@ -378,9 +431,8 @@ export async function connectToWhatsApp() {
                 const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
 
                 await leadRef.update({
-                  lastMessageAt: now(),
+                  ...leadPayload,
                   unreadCount: FieldValue.increment(1),
-                  jid: finalJid, // ✅ USAR JID VALIDADO
                   etiquetas: FieldValue.arrayUnion(...baseEtiquetas)
                 });
 
@@ -404,17 +456,6 @@ export async function connectToWhatsApp() {
             }
             continue;
           }
-
-          const [jidUser, jidDomain] = rawJid.split('@');
-          const cleanUser = jidUser.split(':')[0].replace(/\s+/g, '');
-          const normalizedJid = normalizeJid(rawJid);
-          const jid = normalizedJid || `${cleanUser}@${jidDomain}`;
-          if (jidDomain !== 's.whatsapp.net') continue;
-
-          const waNumber = cleanUser;
-          const normNum  = normalizePhoneForWA(waNumber);
-          const leadId   = `${normNum}@s.whatsapp.net`;
-          const sender   = msg.key.fromMe ? 'business' : 'lead';
 
           // Parseo de contenido
           let content = '';
@@ -483,6 +524,10 @@ export async function connectToWhatsApp() {
 
             await leadRef.set({
               telefono: normNum,
+              jid,
+              resolvedJid: jidResolved,
+              lidJid,
+              addressingMode,
               source: 'WhatsApp',
               lastMessageAt: msgData.timestamp,
             }, { merge: true });
@@ -560,7 +605,10 @@ export async function connectToWhatsApp() {
           const baseLead = {
             telefono: normNum,
             nombre: msg.pushName || '',
-            jid: jid,
+            jid,
+            resolvedJid: jidResolved,
+            lidJid,
+            addressingMode,
             source: 'WhatsApp',
           };
 
@@ -587,7 +635,14 @@ export async function connectToWhatsApp() {
           } else {
             // Lead existente
             const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
-            await leadRef.update({ lastMessageAt: now(), jid });
+            await leadRef.update({
+              lastMessageAt: now(),
+              jid,
+              resolvedJid: jidResolved,
+              lidJid,
+              telefono: normNum,
+              addressingMode
+            });
 
             if (!current.nombre && msg.pushName) {
               await leadRef.set({ nombre: msg.pushName }, { merge: true });
@@ -649,19 +704,40 @@ export function getConnectionStatus() { return connectionStatus; }
 export function getWhatsAppSock() { return whatsappSock; }
 export function getSessionPhone() { return sessionPhone; }
 
-export async function sendMessageToLead(phone, messageContent) {
+export async function sendMessageToLead(phoneOrJid, messageContent) {
   if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
-  const num = normalizePhoneForWA(phone);
 
-  let leadId = null;
-  let targetJid = `${num}@s.whatsapp.net`;
-  const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
-  if (!q.empty) {
-    leadId = q.docs[0].id;
-    const data = q.docs[0].data() || {};
-    if (data.jid) targetJid = normalizeJid(data.jid) || targetJid;
-    else if (leadId) targetJid = normalizeJid(leadId) || targetJid;
+  const raw = String(phoneOrJid || '');
+  const isJidInput = raw.includes('@');
+  const normalizedInputJid = isJidInput ? normalizeJid(raw) : null;
+  const num = isJidInput ? phoneFromJid(normalizedInputJid) : normalizePhoneForWA(raw);
+
+  let leadId = normalizedInputJid || null;
+  let targetJid = normalizedInputJid || (num ? `${num}@s.whatsapp.net` : null);
+  let leadData = null;
+
+  if (normalizedInputJid) {
+    const snap = await db.collection('leads').doc(normalizedInputJid).get();
+    if (snap.exists) {
+      leadId = snap.id;
+      leadData = snap.data() || {};
+    }
   }
+
+  if (!leadData && num) {
+    const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
+    if (!q.empty) {
+      leadId = q.docs[0].id;
+      leadData = q.docs[0].data() || {};
+    }
+  }
+
+  if (leadData) {
+    const candidateJid = normalizeJid(leadData.resolvedJid || leadData.jid || leadId);
+    if (candidateJid) targetJid = candidateJid;
+  }
+
+  if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
   await whatsappSock.sendMessage(
     targetJid,

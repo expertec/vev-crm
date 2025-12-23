@@ -34,7 +34,8 @@ function toDateSafe(v) {
 
 function replacePlaceholders(template, lead) {
   if (!template) return '';
-  const telFromJid = String(lead.jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+  const leadJid = extractJidFromLead(lead);
+  const telFromJid = phoneFromJid(leadJid);
   const tel = telFromJid || String(lead.telefono || '').replace(/\D/g, '');
   const nameFirst = firstName(lead.nombre || '');
   return String(template).replace(/\{\{(\w+)\}\}/g, (_, key) => {
@@ -79,36 +80,45 @@ function e164ToJid(e164) {
   return `${normalizePhoneForWA(digits)}@s.whatsapp.net`;
 }
 
+function phoneFromJid(jid) {
+  if (!jid) return null;
+  const [user] = String(jid || '').split('@');
+  const cleanUser = user.split(':')[0].replace(/\D/g, '');
+  if (!cleanUser) return null;
+  return normalizePhoneForWA(cleanUser);
+}
+
+function extractJidFromLead(lead) {
+  const candidates = [
+    lead?.resolvedJid,
+    lead?.jid,
+    lead?.id,
+    lead?.leadId
+  ];
+
+  for (const cand of candidates) {
+    const normalized = normalizeJid(cand);
+    if (normalized) return normalized;
+  }
+
+  return null;
+}
+
 function resolveLeadJidAndPhone(lead) {
   const phoneRaw = lead?.telefono || '';
-  let jidCandidate =
-    normalizeJid(lead?.jid) ||
-    normalizeJid(lead?.id) ||
+  const jidCandidate = extractJidFromLead(lead);
+  const normalizedPhone =
+    normalizePhoneForWA(phoneRaw) ||
+    phoneFromJid(jidCandidate) ||
+    phoneFromJid(lead?.resolvedJid) ||
     null;
 
-  // 🔧 CRÍTICO: Validar que el JID NO sea @lid
-  if (jidCandidate && jidCandidate.includes('@lid')) {
-    console.warn(`[resolveLeadJidAndPhone] ⚠️ JID inválido (@lid) detectado: ${jidCandidate} - Reconstruyendo desde teléfono`);
-    jidCandidate = null; // Forzar reconstrucción desde teléfono
-  }
-
-  // 🔧 Validar que el JID sea @s.whatsapp.net
-  if (jidCandidate && !jidCandidate.includes('@s.whatsapp.net')) {
-    console.warn(`[resolveLeadJidAndPhone] ⚠️ JID sin dominio correcto: ${jidCandidate} - Reconstruyendo`);
-    jidCandidate = null;
-  }
-
-  const normalizedPhone = normalizePhoneForWA(phoneRaw);
-
   if (jidCandidate) {
-    console.log(`[resolveLeadJidAndPhone] ✅ Usando JID existente: ${jidCandidate}`);
     return { jid: jidCandidate, phone: normalizedPhone };
   }
 
   if (normalizedPhone) {
-    const constructedJid = `${normalizedPhone}@s.whatsapp.net`;
-    console.log(`[resolveLeadJidAndPhone] 🔧 JID construido desde teléfono: ${constructedJid}`);
-    return { jid: constructedJid, phone: normalizedPhone };
+    return { jid: `${normalizedPhone}@s.whatsapp.net`, phone: normalizedPhone };
   }
 
   console.error(`[resolveLeadJidAndPhone] ❌ No se pudo resolver JID ni teléfono para lead:`, {
@@ -821,6 +831,8 @@ export const processDueSequenceJobs = processSequenceLeadsBatch;
 
 export {
   normalizeJid,
+  phoneFromJid,
+  extractJidFromLead,
   resolveLeadJidAndPhone,
   computeSequenceStepRun,
   computeNextRunForLead,
