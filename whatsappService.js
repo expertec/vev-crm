@@ -62,6 +62,8 @@ const STATIC_CANCEL_BY_TRIGGER = {
   LeadWeb: ['NuevoLeadWeb', 'NuevoLead'],
 };
 
+const WEBPROMO_TRIGGER = 'NuevoLead';
+
 function firstName(n = '') {
   return String(n).trim().split(/\s+/)[0] || '';
 }
@@ -592,12 +594,12 @@ export async function connectToWhatsApp() {
               const tags = extractHashtags(content || '');
               const hasWebPromo = tags.some(t => t === '#webpromo' || t === 'webpromo');
               if (hasWebPromo && leadId) {
-                const trigger = 'NuevoLead';
+                const trigger = WEBPROMO_TRIGGER;
                 console.log(`[WA] #WebPromo detectado. Activando secuencia '${trigger}' para ${leadId}`);
 
                 await leadRef.set({
                   estado: 'nuevo',
-                  etiquetas: FieldValue.arrayUnion(trigger, 'NuevoLead'),
+                  etiquetas: FieldValue.arrayUnion(trigger, WEBPROMO_TRIGGER),
                   hasActiveSequences: true
                 }, { merge: true });
 
@@ -621,8 +623,23 @@ export async function connectToWhatsApp() {
           const cfg = cfgSnap.exists ? cfgSnap.data() : {};
           const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';
           const rule = await resolveTriggerFromMessage(content, defaultTrigger);
-          const trigger = rule.trigger;
+          let trigger = rule.trigger;
           const toCancel = rule.cancel || [];
+
+          const incomingHashtags = extractHashtags(content || '');
+          const hasWebPromo = incomingHashtags.some((tag) => tag.replace('#', '').toLowerCase() === 'webpromo');
+
+          if (hasWebPromo) {
+            const forcedTrigger = WEBPROMO_TRIGGER;
+            if (trigger !== forcedTrigger) {
+              console.log(`[WA] #WebPromo entrante detectado. Forzando trigger '${forcedTrigger}' para ${leadId}`);
+            } else {
+              console.log(`[WA] #WebPromo entrante detectado. Trigger ya '${forcedTrigger}' para ${leadId}`);
+            }
+            trigger = forcedTrigger;
+          }
+
+          const etiquetaUnion = hasWebPromo ? [trigger, 'WebPromo'] : [trigger];
 
           const leadRef = db.collection('leads').doc(leadId);
           const leadSnap = await leadRef.get();
@@ -643,7 +660,7 @@ export async function connectToWhatsApp() {
               ...baseLead,
               fecha_creacion: now(),
               estado: 'nuevo',
-              etiquetas: [trigger],
+              etiquetas: etiquetaUnion,
               unreadCount: 0,
               lastMessageAt: now(),
             });
@@ -673,7 +690,11 @@ export async function connectToWhatsApp() {
               await leadRef.set({ nombre: msg.pushName }, { merge: true });
             }
 
-            await leadRef.set({ etiquetas: FieldValue.arrayUnion(trigger) }, { merge: true });
+            await leadRef.set({ etiquetas: FieldValue.arrayUnion(...etiquetaUnion) }, { merge: true });
+
+            if (hasWebPromo) {
+              await leadRef.set({ estado: 'nuevo', hasActiveSequences: true }, { merge: true });
+            }
 
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
 

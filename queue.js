@@ -192,6 +192,10 @@ async function sendWithRetry(sock, jid, message, opts = {}, attempts = 3) {
 const _sequenceDefCache = new Map();
 const _sequenceDefCacheTime = new Map();
 const SEQUENCE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+const TRIGGER_FALLBACK = {
+  WebPromo: 'NuevoLead',
+  webpromo: 'NuevoLead'
+};
 
 const isSeqCacheFresh = (key) => {
   const ts = _sequenceDefCacheTime.get(key);
@@ -217,6 +221,15 @@ async function getSequenceDefinition(trigger) {
     if (!q.empty) seqDoc = q.docs[0];
   }
   if (!seqDoc.exists) {
+    const fallback = TRIGGER_FALLBACK[key];
+    if (fallback) {
+      console.warn(`[getSequenceDefinition] No existe secuencias/${key}. Usando fallback → ${fallback}`);
+      const fb = await getSequenceDefinition(fallback);
+      if (fb) {
+        const aliasDef = { ...fb, trigger: key, aliasOf: fallback };
+        return setSeqCache(key, aliasDef);
+      }
+    }
     console.warn(`[getSequenceDefinition] No existe secuencias/${key}`);
     return setSeqCache(key, null);
   }
