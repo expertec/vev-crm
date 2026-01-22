@@ -889,7 +889,10 @@ export async function getSubscriptionStatus(req, res) {
       )
     ) {
       const renewalDate =
-        data.planRenewalDate?.toMillis() || 0;
+        data.planRenewalDate?.toMillis() ||
+        data.planExpiresAt?.toMillis() ||
+        data.expiresAt?.toMillis() ||
+        0;
       if (Date.now() < renewalDate) {
         subscriptionInfo.isActive = true;
         subscriptionInfo.canAccess = true;
@@ -1052,9 +1055,12 @@ async function handleOneTimePaymentCompleted(session) {
   await negocioRef.update({
     plan: planId,
     planNombre: planNombre,
+    subscriptionStatus: 'active', // Para que el panel lo considere activo
+    planStartDate: negocioData.planStartDate || Timestamp.now(),
     planActivatedAt: Timestamp.now(),
     planExpiresAt: Timestamp.fromDate(expiresAt),
     planRenewalDate: Timestamp.fromDate(expiresAt),
+    expiresAt: Timestamp.fromDate(expiresAt), // nombre alterno que usa el panel
     trialActive: false,
     websiteArchived: false,
     pin: finalPin,
