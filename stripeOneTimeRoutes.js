@@ -145,6 +145,17 @@ router.post('/create-checkout', async (req, res) => {
     // Crear o recuperar customer de Stripe
     let stripeCustomerId = negocioData.stripeCustomerId;
 
+    // Verificar si el customer existe en Stripe (puede no existir si cambiaron claves)
+    if (stripeCustomerId) {
+      try {
+        await stripe.customers.retrieve(stripeCustomerId);
+      } catch (err) {
+        // Customer no existe (probablemente cambio de claves test/prod)
+        console.log(`⚠️ Customer ${stripeCustomerId} no existe, creando nuevo...`);
+        stripeCustomerId = null;
+      }
+    }
+
     if (!stripeCustomerId) {
       const customer = await stripe.customers.create({
         phone: phoneDigits,
