@@ -105,14 +105,18 @@ export async function loginCliente(req, res) {
       console.log(`✅ Acceso por suscripción Stripe activa`);
     }
 
-    // 3. Verificar plan manual (transferencia)
+    // 3. Verificar plan manual (transferencia / pago único)
     if (!hasAccess) {
       const plan = negocioData.plan;
-      const planesActivos = ['basic', 'pro', 'premium'];
+      const planesActivos = ['basic', 'basico', 'pro', 'premium'];
       
       if (plan && planesActivos.includes(String(plan).toLowerCase())) {
         // Verificar fecha de renovación
-        const renewalDate = negocioData.planRenewalDate?.toMillis() || 0;
+        const renewalDate =
+          negocioData.planRenewalDate?.toMillis() ||
+          negocioData.planExpiresAt?.toMillis() ||
+          negocioData.expiresAt?.toMillis() ||
+          0;
         
         if (renewalDate > Date.now()) {
           hasAccess = true;
@@ -195,6 +199,13 @@ export async function loginCliente(req, res) {
         subscriptionType: accessReason,
         subscriptionStatus: negocioData.subscriptionStatus,
         hasStripeSubscription: !!negocioData.subscriptionId,
+        expiresAt:
+          negocioData.planRenewalDate?.toDate?.() ||
+          negocioData.planExpiresAt?.toDate?.() ||
+          negocioData.expiresAt?.toDate?.() ||
+          null,
+        planRenewalDate: negocioData.planRenewalDate?.toDate?.() || null,
+        planExpiresAt: negocioData.planExpiresAt?.toDate?.() || null,
         ...subscriptionInfo,
         token
       }
@@ -283,12 +294,16 @@ export async function verificarSesion(req, res) {
       subscriptionInfo.nextPayment = negocioData.subscriptionCurrentPeriodEnd?.toDate();
     }
 
-    // Plan manual activo
+    // Plan manual / pago único activo
     if (!hasAccess) {
       const plan = negocioData.plan;
-      const planesActivos = ['basic', 'pro', 'premium'];
+      const planesActivos = ['basic', 'basico', 'pro', 'premium'];
       if (plan && planesActivos.includes(String(plan).toLowerCase())) {
-        const renewalDate = negocioData.planRenewalDate?.toMillis() || 0;
+        const renewalDate =
+          negocioData.planRenewalDate?.toMillis() ||
+          negocioData.planExpiresAt?.toMillis() ||
+          negocioData.expiresAt?.toMillis() ||
+          0;
         if (renewalDate > Date.now()) {
           hasAccess = true;
           subscriptionInfo.manualPlan = true;
@@ -324,6 +339,13 @@ export async function verificarSesion(req, res) {
         contactWhatsapp: negocioData.contactWhatsapp || '',
         subscriptionStatus: negocioData.subscriptionStatus,
         hasStripeSubscription: !!negocioData.subscriptionId,
+        expiresAt:
+          negocioData.planRenewalDate?.toDate?.() ||
+          negocioData.planExpiresAt?.toDate?.() ||
+          negocioData.expiresAt?.toDate?.() ||
+          null,
+        planRenewalDate: negocioData.planRenewalDate?.toDate?.() || null,
+        planExpiresAt: negocioData.planExpiresAt?.toDate?.() || null,
         ...subscriptionInfo
       }
     });

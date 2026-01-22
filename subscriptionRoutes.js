@@ -233,7 +233,17 @@ export async function stripeWebhook(req, res) {
     }
   } catch (err) {
     console.error('❌ Webhook signature verification failed:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    // Fallback opcional para entorno de prueba en Render
+    if (process.env.ALLOW_WEBHOOK_FALLBACK === 'true') {
+      try {
+        event = JSON.parse(req.body.toString());
+        console.warn('⚠️ Fallback de webhook SIN verificación de firma aplicado (solo prueba)');
+      } catch (parseErr) {
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+      }
+    } else {
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
   }
 
   console.log(`📨 Webhook recibido: ${event.type}`);
