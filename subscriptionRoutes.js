@@ -209,7 +209,13 @@ export async function stripeWebhook(req, res) {
   try {
     switch (event.type) {
   case 'checkout.session.completed':
-    await handleCheckoutCompleted(event.data.object);
+    const session = event.data.object;
+    // Detectar si es pago único o suscripción
+    if (session.mode === 'payment' && session.metadata?.paymentType === 'one_time') {
+      await handleOneTimePaymentCompleted(session);
+    } else {
+      await handleCheckoutCompleted(session);
+    }
     break;
 
   case 'customer.subscription.created':
@@ -852,6 +858,115 @@ export async function getSubscriptionStatus(req, res) {
         'Error al obtener estado de suscripción',
     });
   }
+}
+
+/**
+ * Handler para pago único completado (Stripe Checkout mode: payment)
+ */
+async function handleOneTimePaymentCompleted(session) {
+  const { metadata, payment_intent, amount_total } = session;
+  const { negocioId, phone, planId, planNombre, duracionDias } = metadata || {};
+
+  console.log(`✅ Pago único completado para negocio ${negocioId}`);
+
+  if (!negocioId) {
+    console.error('❌ No hay negocioId en metadata del checkout');
+    return;
+  }
+
+  const negocioRef = db.collection('Negocios').doc(negocioId);
+  const negocioSnap = await negocioRef.get();
+
+  if (!negocioSnap.exists) {
+    console.error(`❌ Negocio ${negocioId} no existe en Firestore`);
+    return;
+  }
+
+  const negocioData = negocioSnap.data() || {};
+
+  // Calcular fecha de expiración
+  const dias = parseInt(duracionDias) || 30;
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + dias);
+
+  // PIN final
+  const finalPin = negocioData.pin || generarPIN();
+
+  // Actualizar negocio
+  await negocioRef.update({
+    plan: planId,
+    planNombre: planNombre,
+    planActivatedAt: Timestamp.now(),
+    planExpiresAt: Timestamp.fromDate(expiresAt),
+    planRenewalDate: Timestamp.fromDate(expiresAt),
+    trialActive: false,
+    websiteArchived: false,
+    pin: finalPin,
+    lastPaymentId: payment_intent,
+    lastPaymentAmount: amount_total / 100,
+    lastPaymentDate: Timestamp.now(),
+    paymentMethod: 'stripe_onetime',
+    updatedAt: Timestamp.now()
+  });
+
+  console.log(`✅ Plan actualizado: negocio=${negocioId}, plan=${planId}, expira=${expiresAt.toISOString()}`);
+
+  // Actualizar registro de pago si existe
+  const pagoSnap = await db.collection('pagos_stripe')
+    .where('sessionId', '==', session.id)
+    .limit(1)
+    .get();
+
+  if (!pagoSnap.empty) {
+    await pagoSnap.docs[0].ref.update({
+      paymentIntentId: payment_intent,
+      status: 'completed',
+      processedAt: Timestamp.now(),
+      updatedAt: Timestamp.now()
+    });
+  }
+
+  // Enviar confirmación por WhatsApp
+  const finalPhone = phone || negocioData.leadPhone;
+  if (finalPhone) {
+    const loginUrl = process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login';
+
+    const mensaje = `🎉 ¡Pago recibido exitosamente!
+
+✅ Plan: ${planNombre}
+💰 Monto: $${amount_total / 100} MXN
+📅 Válido hasta: ${expiresAt.toLocaleDateString('es-MX')}
+
+🔐 Tu PIN de acceso: ${finalPin}
+
+🌐 Ingresa a tu panel:
+${loginUrl}
+
+¡Gracias por tu confianza! 🚀`;
+
+    try {
+      await enviarMensaje(
+        { telefono: finalPhone, nombre: negocioData.companyInfo || 'Cliente' },
+        { type: 'texto', contenido: mensaje }
+      );
+      console.log(`📤 Confirmación enviada por WhatsApp a ${finalPhone}`);
+    } catch (waErr) {
+      console.error('❌ Error enviando WhatsApp:', waErr);
+    }
+  }
+
+  // Registrar en historial
+  await db.collection('PaymentHistory').add({
+    negocioId,
+    event: 'one_time_payment_completed',
+    sessionId: session.id,
+    paymentIntentId: payment_intent,
+    planId,
+    amount: amount_total / 100,
+    currency: 'mxn',
+    expiresAt: Timestamp.fromDate(expiresAt),
+    timestamp: Timestamp.now()
+  });
 }
 
 // Exportar todas las funciones

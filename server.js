@@ -37,6 +37,9 @@ import subscriptionRoutes from './subscriptionRoutes.js';
 // ================ MERCADO PAGO CHECKOUT PRO ================
 import mercadopagoRoutes from './mercadopagoRoutes.js';
 
+// ================ STRIPE PAGOS ÚNICOS ================
+import stripeOneTimeRoutes from './stripeOneTimeRoutes.js';
+
 // ================ Secuencias / Scheduler (web) ================
 import {
   processSequences,
@@ -420,6 +423,9 @@ app.get(
 
 // ============== 🆕 RUTAS DE MERCADO PAGO ==============
 app.use('/api/mp', mercadopagoRoutes);
+
+// ============== 🆕 RUTAS DE STRIPE PAGOS ÚNICOS ==============
+app.use('/api/stripe-onetime', stripeOneTimeRoutes);
 
 // ============== 🆕 RUTAS DE AUTENTICACIÓN DE CLIENTE ==============
 app.post('/api/cliente/login', loginCliente);
@@ -1412,6 +1418,7 @@ app.listen(port, () => {
   console.log(`✅ Autenticación de cliente activada`);
   console.log(`✅ Webhook de Stripe configurado con raw body`);
   console.log(`✅ Mercado Pago Checkout Pro activado`);
+  console.log(`✅ Stripe Pagos Únicos activado`);
   connectToWhatsApp().catch((err) =>
     console.error(
       'Error al conectar WhatsApp en startup:',
