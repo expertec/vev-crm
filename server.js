@@ -34,6 +34,9 @@ import {
 // ================ SUSCRIPCIONES STRIPE ================
 import subscriptionRoutes from './subscriptionRoutes.js';
 
+// ================ MERCADO PAGO CHECKOUT PRO ================
+import mercadopagoRoutes from './mercadopagoRoutes.js';
+
 // ================ Secuencias / Scheduler (web) ================
 import {
   processSequences,
@@ -414,6 +417,9 @@ app.get(
   '/api/subscription/status/:negocioId',
   subscriptionRoutes.getSubscriptionStatus
 );
+
+// ============== 🆕 RUTAS DE MERCADO PAGO ==============
+app.use('/api/mp', mercadopagoRoutes);
 
 // ============== 🆕 RUTAS DE AUTENTICACIÓN DE CLIENTE ==============
 app.post('/api/cliente/login', loginCliente);
@@ -1405,6 +1411,7 @@ app.listen(port, () => {
   console.log(`✅ Sistema de PIN activado`);
   console.log(`✅ Autenticación de cliente activada`);
   console.log(`✅ Webhook de Stripe configurado con raw body`);
+  console.log(`✅ Mercado Pago Checkout Pro activado`);
   connectToWhatsApp().catch((err) =>
     console.error(
       'Error al conectar WhatsApp en startup:',
