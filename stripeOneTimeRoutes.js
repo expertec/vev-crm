@@ -30,7 +30,7 @@ const PLANES = {
     precioCentavos: 39700,
     currency: 'mxn',
     descripcion: 'Página web profesional con todas las funciones básicas',
-    duracionDias: 30,
+    duracionDias: 365, // 1 año de vigencia
     features: [
       'Página web profesional',
       'Dominio personalizado',
@@ -46,7 +46,7 @@ const PLANES = {
     precioCentavos: 99700,
     currency: 'mxn',
     descripcion: 'Página web premium con funciones avanzadas y prioridad',
-    duracionDias: 30,
+    duracionDias: 365, // 1 año de vigencia
     features: [
       'Todo lo del Plan Básico',
       'Diseño premium personalizado',
