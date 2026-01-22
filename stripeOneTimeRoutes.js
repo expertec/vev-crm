@@ -8,6 +8,19 @@ import { enviarMensaje } from './scheduler.js';
 
 const router = express.Router();
 
+// Helpers para obtener las URLs base (soporta local y prod)
+const getClientUrl = (req) =>
+  process.env.CLIENT_URL ||
+  req.headers.origin ||
+  `http://${req.headers.host || 'localhost:3000'}`;
+
+const getApiBaseUrl = (req) => {
+  if (process.env.API_BASE_URL) return process.env.API_BASE_URL;
+  const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3001';
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  return `${proto}://${host}`;
+};
+
 // Planes disponibles para pago único
 const PLANES = {
   basico: {
@@ -64,6 +77,17 @@ router.get('/planes', (req, res) => {
     success: true,
     planes: planesArray
   });
+});
+
+// Redirecciones Stripe: limpian session_id y mandan al cliente
+router.get('/redirect-success', (req, res) => {
+  const clientUrl = getClientUrl(req);
+  return res.redirect(`${clientUrl}/pago?status=success`);
+});
+
+router.get('/redirect-cancel', (req, res) => {
+  const clientUrl = getClientUrl(req);
+  return res.redirect(`${clientUrl}/pago?status=canceled`);
 });
 
 /**
@@ -174,8 +198,9 @@ router.post('/create-checkout', async (req, res) => {
       });
     }
 
-    // URLs de retorno
-    const baseUrl = process.env.CLIENT_URL || 'https://negociosweb.mx';
+    // URLs de retorno (local friendly)
+    const clientUrl = getClientUrl(req);
+    const apiBaseUrl = getApiBaseUrl(req);
 
     // Determinar métodos de pago
     let paymentMethodTypes;
@@ -189,6 +214,9 @@ router.post('/create-checkout', async (req, res) => {
     }
 
     // Crear sesión de checkout para PAGO ÚNICO
+    // ⚠️ ModSecurity en cPanel bloquea querystrings con `session_id`.
+    // Usamos URLs que apuntan al backend (Render) para limpiar la query
+    // y luego redirigir al frontend.
     const session = await stripe.checkout.sessions.create({
       customer: stripeCustomerId,
       payment_method_types: paymentMethodTypes,
@@ -206,8 +234,9 @@ router.post('/create-checkout', async (req, res) => {
         },
       ],
       mode: 'payment', // Pago único, NO suscripción
-      success_url: `${baseUrl}/pago?status=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}/pago?status=canceled`,
+      // Pasamos por el backend para limpiar session_id
+      success_url: `${apiBaseUrl}/api/stripe-onetime/redirect-success`,
+      cancel_url: `${apiBaseUrl}/api/stripe-onetime/redirect-cancel`,
       // Para OXXO, agregar URL de pending
       ...(paymentMethodTypes.includes('oxxo') && {
         // OXXO payments go to pending first, then success after payment

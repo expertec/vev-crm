@@ -32,7 +32,7 @@ import {
 } from './whatsappService.js';
 
 // ================ SUSCRIPCIONES STRIPE ================
-import subscriptionRoutes from './subscriptionRoutes.js';
+import subscriptionRoutes, { subscriptionRedirectSuccess, subscriptionRedirectCancel } from './subscriptionRoutes.js';
 
 // ================ MERCADO PAGO CHECKOUT PRO ================
 import mercadopagoRoutes from './mercadopagoRoutes.js';
@@ -389,6 +389,10 @@ app.post(
   express.raw({ type: 'application/json' }),
   subscriptionRoutes.stripeWebhook
 );
+
+// Redirecciones para limpiar session_id y evitar ModSecurity
+app.get('/api/subscription/redirect-success', subscriptionRedirectSuccess);
+app.get('/api/subscription/redirect-cancel', subscriptionRedirectCancel);
 
 /**
  * 3) Body parsers para el resto de rutas

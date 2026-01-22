@@ -6,6 +6,19 @@ import { normalizarTelefono, generarPIN } from './pinUtils.js';
 import { enviarMensaje } from './scheduler.js';
 import dayjs from 'dayjs';
 
+// Helpers para URLs base (soporta local y prod sin tocar código)
+const getClientUrl = (req) =>
+  process.env.CLIENT_URL ||
+  req.headers.origin ||
+  `http://${req.headers.host || 'localhost:3000'}`;
+
+const getApiBaseUrl = (req) => {
+  if (process.env.API_BASE_URL) return process.env.API_BASE_URL;
+  const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3001';
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  return `${proto}://${host}`;
+};
+
 /**
  * POST /api/subscription/create-checkout
  * Crea una sesión de checkout de Stripe para nueva suscripción
@@ -127,8 +140,9 @@ export async function createCheckoutSession(req, res) {
       negocioData = { ...negocioData, ...updateData };
     }
 
-    // 5) URLs de retorno
-    const baseClientUrl = process.env.CLIENT_URL || 'https://negociosweb.mx';
+    // 5) URLs de retorno (local friendly)
+    const baseClientUrl = getClientUrl(req);
+    const apiBaseUrl = getApiBaseUrl(req);
     const panelUrl =
       process.env.CLIENT_PANEL_URL || `${baseClientUrl}/cliente-login`;
     const suscripcionUrl = `${baseClientUrl}/suscripcion`;
@@ -144,9 +158,9 @@ export async function createCheckoutSession(req, res) {
         },
       ],
       mode: 'subscription',
-      // Sin session_id en la URL para evitar problemas con ModSecurity
-      success_url: `${panelUrl}?success=true`,
-      cancel_url: `${suscripcionUrl}?canceled=true`,
+      // Pasamos por backend para limpiar session_id y evitar ModSecurity
+      success_url: `${apiBaseUrl}/api/subscription/redirect-success`,
+      cancel_url: `${apiBaseUrl}/api/subscription/redirect-cancel`,
       metadata: {
         negocioId: negocioRef.id,
         phone: phoneDigits,
@@ -162,11 +176,11 @@ export async function createCheckoutSession(req, res) {
       locale: 'es-419',
     });
 
-    console.log(`✅ Sesión de checkout creada para negocio ${negocioRef.id}`);
+  console.log(`✅ Sesión de checkout creada para negocio ${negocioRef.id}`);
 
-    return res.json({
-      success: true,
-      checkoutUrl: session.url,
+  return res.json({
+    success: true,
+    checkoutUrl: session.url,
       sessionId: session.id,
       negocioId: negocioRef.id,
     });
@@ -178,6 +192,19 @@ export async function createCheckoutSession(req, res) {
       details: error.message,
     });
   }
+}
+
+// Redirecciones para limpiar session_id y evitar ModSecurity
+export function subscriptionRedirectSuccess(req, res) {
+  const clientPanelUrl =
+    process.env.CLIENT_PANEL_URL ||
+    `${getClientUrl(req)}/cliente-login`;
+  return res.redirect(`${clientPanelUrl}?success=true`);
+}
+
+export function subscriptionRedirectCancel(req, res) {
+  const clientBase = getClientUrl(req);
+  return res.redirect(`${clientBase}/suscripcion?canceled=true`);
 }
 
 
