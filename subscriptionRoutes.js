@@ -221,11 +221,16 @@ export async function stripeWebhook(req, res) {
 
   try {
     // ✅ req.body aquí es un Buffer (raw body), no un objeto JSON
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      STRIPE_CONFIG.webhookSecret
-    );
+    if (!STRIPE_CONFIG.webhookSecret) {
+      console.warn('⚠️ STRIPE_WEBHOOK_SECRET no configurado, se omite validación de firma (solo recomendado en local/test)');
+      event = JSON.parse(req.body.toString()); // Stripe CLI envía JSON
+    } else {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        STRIPE_CONFIG.webhookSecret
+      );
+    }
   } catch (err) {
     console.error('❌ Webhook signature verification failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -879,7 +884,7 @@ export async function getSubscriptionStatus(req, res) {
     // Plan manual (transferencia)
     if (
       !subscriptionInfo.canAccess &&
-      ['basic', 'pro', 'premium'].includes(
+      ['basic', 'basico', 'pro', 'premium'].includes(
         String(data.plan || '').toLowerCase()
       )
     ) {
