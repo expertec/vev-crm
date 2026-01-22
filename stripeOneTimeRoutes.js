@@ -69,17 +69,26 @@ router.get('/planes', (req, res) => {
 /**
  * POST /api/stripe-onetime/create-checkout
  * Crea una sesión de checkout para pago único
- * Body: { planId, phone, email?, negocioId? }
+ * Body: { planId, phone, email?, negocioId?, paymentMethod? }
+ * paymentMethod: 'card' | 'oxxo' | 'all' (default: 'all')
  */
 router.post('/create-checkout', async (req, res) => {
   try {
-    const { planId, phone, email, negocioId } = req.body;
+    const { planId, phone, email, negocioId, paymentMethod = 'all' } = req.body;
 
     // Validaciones
     if (!planId || !phone) {
       return res.status(400).json({
         success: false,
         error: 'Faltan campos requeridos: planId y phone son obligatorios'
+      });
+    }
+
+    // OXXO requiere email
+    if (paymentMethod === 'oxxo' && !email) {
+      return res.status(400).json({
+        success: false,
+        error: 'El email es obligatorio para pagos en OXXO'
       });
     }
 
@@ -157,10 +166,21 @@ router.post('/create-checkout', async (req, res) => {
     // URLs de retorno
     const baseUrl = process.env.CLIENT_URL || 'https://negociosweb.mx';
 
+    // Determinar métodos de pago
+    let paymentMethodTypes;
+    if (paymentMethod === 'card') {
+      paymentMethodTypes = ['card'];
+    } else if (paymentMethod === 'oxxo') {
+      paymentMethodTypes = ['oxxo'];
+    } else {
+      // 'all' - mostrar todas las opciones
+      paymentMethodTypes = ['card', 'oxxo'];
+    }
+
     // Crear sesión de checkout para PAGO ÚNICO
     const session = await stripe.checkout.sessions.create({
       customer: stripeCustomerId,
-      payment_method_types: ['card'],
+      payment_method_types: paymentMethodTypes,
       line_items: [
         {
           price_data: {
@@ -177,6 +197,10 @@ router.post('/create-checkout', async (req, res) => {
       mode: 'payment', // Pago único, NO suscripción
       success_url: `${baseUrl}/pago?status=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${baseUrl}/pago?status=canceled`,
+      // Para OXXO, agregar URL de pending
+      ...(paymentMethodTypes.includes('oxxo') && {
+        // OXXO payments go to pending first, then success after payment
+      }),
       metadata: {
         negocioId: negocioRef.id,
         phone: phoneDigits,
@@ -186,6 +210,8 @@ router.post('/create-checkout', async (req, res) => {
         paymentType: 'one_time', // Identificador para el webhook
       },
       locale: 'es-419',
+      // Email requerido para OXXO
+      ...(email && { customer_email: email }),
     });
 
     console.log(`✅ Sesión de pago único creada: ${session.id} para negocio ${negocioRef.id}`);

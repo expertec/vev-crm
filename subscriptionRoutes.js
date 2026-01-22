@@ -212,9 +212,35 @@ export async function stripeWebhook(req, res) {
     const session = event.data.object;
     // Detectar si es pago único o suscripción
     if (session.mode === 'payment' && session.metadata?.paymentType === 'one_time') {
-      await handleOneTimePaymentCompleted(session);
+      // Para pagos con tarjeta, payment_status es 'paid'
+      // Para OXXO, payment_status es 'unpaid' hasta que paguen
+      if (session.payment_status === 'paid') {
+        await handleOneTimePaymentCompleted(session);
+      } else {
+        console.log(`⏳ Pago pendiente (OXXO): ${session.id} - esperando confirmación`);
+        // Guardar como pendiente
+        await handleOxxoPending(session);
+      }
     } else {
       await handleCheckoutCompleted(session);
+    }
+    break;
+
+  case 'checkout.session.async_payment_succeeded':
+    // Este evento se dispara cuando un pago OXXO se completa
+    const asyncSession = event.data.object;
+    if (asyncSession.metadata?.paymentType === 'one_time') {
+      console.log(`✅ Pago OXXO confirmado: ${asyncSession.id}`);
+      await handleOneTimePaymentCompleted(asyncSession);
+    }
+    break;
+
+  case 'checkout.session.async_payment_failed':
+    // Pago OXXO falló (expiró sin pagar)
+    const failedSession = event.data.object;
+    if (failedSession.metadata?.paymentType === 'one_time') {
+      console.log(`❌ Pago OXXO expirado/fallido: ${failedSession.id}`);
+      await handleOxxoFailed(failedSession);
     }
     break;
 
@@ -857,6 +883,104 @@ export async function getSubscriptionStatus(req, res) {
       error:
         'Error al obtener estado de suscripción',
     });
+  }
+}
+
+/**
+ * Handler para pago OXXO pendiente
+ */
+async function handleOxxoPending(session) {
+  const { metadata } = session;
+  const { negocioId, phone, planId, planNombre } = metadata || {};
+
+  if (!negocioId) return;
+
+  // Actualizar registro de pago como pendiente
+  const pagoSnap = await db.collection('pagos_stripe')
+    .where('sessionId', '==', session.id)
+    .limit(1)
+    .get();
+
+  if (!pagoSnap.empty) {
+    await pagoSnap.docs[0].ref.update({
+      status: 'pending_oxxo',
+      paymentMethod: 'oxxo',
+      updatedAt: Timestamp.now()
+    });
+  }
+
+  // Enviar instrucciones por WhatsApp
+  const negocioRef = db.collection('Negocios').doc(negocioId);
+  const negocioSnap = await negocioRef.get();
+  const negocioData = negocioSnap.exists ? negocioSnap.data() : {};
+
+  const finalPhone = phone || negocioData.leadPhone;
+  if (finalPhone) {
+    const mensaje = `📋 ¡Casi listo! Tu pago en OXXO está pendiente.
+
+💳 Plan: ${planNombre}
+📍 Ve a cualquier OXXO y realiza el pago
+
+⏰ Tienes hasta 3 días para completar el pago antes de que expire.
+
+Una vez que pagues, recibirás tu confirmación automáticamente por WhatsApp.
+
+¡Gracias por tu preferencia! 🙌`;
+
+    try {
+      await enviarMensaje(
+        { telefono: finalPhone, nombre: negocioData.companyInfo || 'Cliente' },
+        { type: 'texto', contenido: mensaje }
+      );
+    } catch (waErr) {
+      console.error('❌ Error enviando WhatsApp OXXO pending:', waErr);
+    }
+  }
+}
+
+/**
+ * Handler para pago OXXO fallido/expirado
+ */
+async function handleOxxoFailed(session) {
+  const { metadata } = session;
+  const { negocioId, phone } = metadata || {};
+
+  if (!negocioId) return;
+
+  // Actualizar registro de pago como fallido
+  const pagoSnap = await db.collection('pagos_stripe')
+    .where('sessionId', '==', session.id)
+    .limit(1)
+    .get();
+
+  if (!pagoSnap.empty) {
+    await pagoSnap.docs[0].ref.update({
+      status: 'expired',
+      updatedAt: Timestamp.now()
+    });
+  }
+
+  // Notificar por WhatsApp
+  const negocioRef = db.collection('Negocios').doc(negocioId);
+  const negocioSnap = await negocioRef.get();
+  const negocioData = negocioSnap.exists ? negocioSnap.data() : {};
+
+  const finalPhone = phone || negocioData.leadPhone;
+  if (finalPhone) {
+    const mensaje = `⚠️ Tu pago en OXXO ha expirado.
+
+Si aún deseas activar tu plan, puedes generar un nuevo pago desde nuestra página.
+
+¿Necesitas ayuda? Responde a este mensaje. 🙋‍♂️`;
+
+    try {
+      await enviarMensaje(
+        { telefono: finalPhone, nombre: negocioData.companyInfo || 'Cliente' },
+        { type: 'texto', contenido: mensaje }
+      );
+    } catch (waErr) {
+      console.error('❌ Error enviando WhatsApp OXXO failed:', waErr);
+    }
   }
 }
 
