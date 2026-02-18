@@ -29,6 +29,7 @@ import {
   hasSameTrigger,
   phoneFromJid
 } from './queue.js';
+import { isMessageFromMetaAd } from './utils/metaAdDetector.js';
 
 
 let latestQR = null;
@@ -50,10 +51,6 @@ const STATIC_HASHTAG_MAP = {
   '#planredes990': 'PlanRedes',
   '#info':         'LeadWeb',
   '#infoweb':      'NuevoLead',
-  '#WebPromo':     'LeadWhatsapp',
-  '#webpromo':     'LeadWhatsapp',
-  '#webPromo':     'LeadWhatsapp',
-  '#WEBPROMO':     'LeadWhatsapp',
 
 };
 
@@ -63,6 +60,7 @@ const STATIC_CANCEL_BY_TRIGGER = {
 };
 
 const WEBPROMO_TRIGGER = 'LeadWhatsapp';
+const META_ADS_CAMPAIGN = 'whatsapp_click_to_chat';
 
 function firstName(n = '') {
   return String(n).trim().split(/\s+/)[0] || '';
@@ -358,6 +356,10 @@ export async function connectToWhatsApp() {
           const leadId   = jidResolved || `${normNum}@s.whatsapp.net`;
           const sender   = msg.key.fromMe ? 'business' : 'lead';
           const jid      = finalJid;
+          const inboundFromMetaAd = sender === 'lead' && isMessageFromMetaAd(msg);
+          if (inboundFromMetaAd) {
+            console.log(`[WA] 🎯 externalAdReply detectado para ${leadId}. Se tratará como inbound de Meta Ads.`);
+          }
 
           // Verificar que el mensaje tenga contenido desencriptado
           if (!msg.message || Object.keys(msg.message).length === 0) {
@@ -370,28 +372,14 @@ export async function connectToWhatsApp() {
               const leadRef = db.collection('leads').doc(leadId);
               const leadSnap = await leadRef.get();
 
-              // 🔍 NUEVO: Intentar detectar trigger desde el ID del mensaje o metadata
+              // Trigger interno para inbound de anuncio de Meta
               const cfgSnap = await db.collection('config').doc('appConfig').get();
               const cfg = cfgSnap.exists ? cfgSnap.data() : {};
-              const defaultTrigger = cfg.defaultTriggerMetaAds || WEBPROMO_TRIGGER;
+              const detectedTrigger = cfg.defaultTriggerMetaAds || WEBPROMO_TRIGGER;
+              const inboundAt = now();
 
-              // 🔍 Buscar hashtags en el pushName o en metadata del mensaje
-              let detectedTrigger = defaultTrigger;
-              const pushNameTags = extractHashtags(msg.pushName || '');
-
-              if (pushNameTags.length > 0) {
-                // Intentar resolver trigger desde hashtag en pushName
-                for (const tag of pushNameTags) {
-                  const trg = STATIC_HASHTAG_MAP[tag];
-                  if (trg) {
-                    detectedTrigger = trg;
-                    console.log(`[WA] ✅ Hashtag detectado en pushName: ${tag} → trigger: ${detectedTrigger}`);
-                    break;
-                  }
-                }
-              }
-
-              const baseEtiquetas = ['FacebookAds', detectedTrigger];
+              const baseEtiquetas = [];
+              if (inboundFromMetaAd) baseEtiquetas.push('MetaAds', detectedTrigger);
               if (!msg.message) baseEtiquetas.push('MensajeNoDesencriptado');
 
               // 🔧 CRÍTICO: Guardar ambos JID para futuras resoluciones
@@ -405,52 +393,70 @@ export async function connectToWhatsApp() {
                 resolvedJid: jidResolved,
                 lidJid,
                 addressingMode,
-                source: 'WhatsApp Business API',
-                lastMessageAt: now(),
+                source: inboundFromMetaAd ? 'meta_ads' : 'WhatsApp Business API',
+                ...(inboundFromMetaAd
+                  ? {
+                      campaign: META_ADS_CAMPAIGN,
+                      lastInboundFromAd: true,
+                      lastInboundAt: inboundAt,
+                    }
+                  : {}),
+                lastMessageAt: inboundAt,
               };
 
               if (!leadSnap.exists) {
-                // Crear lead nuevo sin mensaje pero CON trigger detectado
+                // Crear lead nuevo sin mensaje
                 await leadRef.set({
                   ...leadPayload,
-                  fecha_creacion: now(),
+                  fecha_creacion: inboundAt,
                   estado: 'nuevo',
                   etiquetas: baseEtiquetas,
                   unreadCount: 1,
                 });
 
-                // ✅ ACTIVAR SECUENCIA para lead nuevo de Meta Ads
-                console.log(`[WA] ✅ Lead creado desde Meta Ads: ${leadId} - Programando secuencia: ${detectedTrigger}`);
-
-                try {
-                  await scheduleSequenceForLead(leadId, detectedTrigger, now());
-                  console.log(`[WA] 🎯 Secuencia ${detectedTrigger} programada para ${leadId}`);
-                } catch (seqErr) {
-                  console.error(`[WA] ❌ Error programando secuencia: ${seqErr?.message || seqErr}`);
+                if (inboundFromMetaAd) {
+                  const blocked = shouldBlockSequences({}, detectedTrigger);
+                  if (!blocked) {
+                    try {
+                      await scheduleSequenceForLead(leadId, detectedTrigger, inboundAt);
+                      await leadRef.set({ hasActiveSequences: true, estado: 'nuevo' }, { merge: true });
+                      console.log(`[WA] 🎯 Meta Ads inbound → secuencia '${detectedTrigger}' programada para ${leadId}`);
+                    } catch (seqErr) {
+                      console.error(`[WA] ❌ Error programando secuencia desde Meta Ads: ${seqErr?.message || seqErr}`);
+                    }
+                  } else {
+                    console.log(`[WA] ⏭️ Meta Ads inbound detectado pero bloqueado para ${leadId}`);
+                  }
                 }
               } else {
                 // Lead existente: actualizar y verificar si necesita secuencia
                 const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
-
-                await leadRef.update({
+                const updatePayload = {
                   ...leadPayload,
                   unreadCount: FieldValue.increment(1),
-                  etiquetas: FieldValue.arrayUnion(...baseEtiquetas)
-                });
+                };
+                if (baseEtiquetas.length > 0) {
+                  updatePayload.etiquetas = FieldValue.arrayUnion(...baseEtiquetas);
+                }
+                await leadRef.set(updatePayload, { merge: true });
 
-                // ✅ ACTIVAR SECUENCIA si no la tiene activa
-                const alreadyHas = hasSameTrigger(current.secuenciasActivas, detectedTrigger);
-                const blocked = shouldBlockSequences(current, detectedTrigger);
+                if (inboundFromMetaAd) {
+                  const alreadyHas = hasSameTrigger(current.secuenciasActivas, detectedTrigger);
+                  const blocked = shouldBlockSequences(current, detectedTrigger);
 
-                if (!blocked && !alreadyHas) {
-                  try {
-                    await scheduleSequenceForLead(leadId, detectedTrigger, now());
-                    console.log(`[WA] 🎯 Secuencia ${detectedTrigger} programada para lead existente ${leadId}`);
-                  } catch (seqErr) {
-                    console.error(`[WA] ❌ Error programando secuencia: ${seqErr?.message || seqErr}`);
+                  if (!blocked && !alreadyHas) {
+                    try {
+                      await scheduleSequenceForLead(leadId, detectedTrigger, inboundAt);
+                      await leadRef.set({ hasActiveSequences: true, estado: 'nuevo' }, { merge: true });
+                      console.log(`[WA] 🎯 Meta Ads inbound → secuencia '${detectedTrigger}' programada para ${leadId}`);
+                    } catch (seqErr) {
+                      console.error(`[WA] ❌ Error programando secuencia desde Meta Ads: ${seqErr?.message || seqErr}`);
+                    }
+                  } else {
+                    console.log(`[WA] ⏭️ Meta Ads inbound sin reprogramar para ${leadId}: blocked=${blocked}, alreadyHas=${alreadyHas}`);
                   }
                 } else {
-                  console.log(`[WA] ⏭️ Secuencia NO programada para ${leadId}: blocked=${blocked}, alreadyHas=${alreadyHas}`);
+                  console.log(`[WA] ⏭️ Mensaje no desencriptado sin externalAdReply para ${leadId}; no se activa WebPromo.`);
                 }
 
                 console.log(`[WA] ✅ Lead actualizado desde mensaje no desencriptado: ${leadId}`);
@@ -622,26 +628,21 @@ export async function connectToWhatsApp() {
           const cfgSnap = await db.collection('config').doc('appConfig').get();
           const cfg = cfgSnap.exists ? cfgSnap.data() : {};
           const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';
+          const metaAdTrigger = cfg.defaultTriggerMetaAds || WEBPROMO_TRIGGER;
           const rule = await resolveTriggerFromMessage(content, defaultTrigger);
           let trigger = rule.trigger;
           let triggerSource = rule.source;
-          const toCancel = rule.cancel || [];
+          let toCancel = rule.cancel || [];
+          const inboundAt = now();
 
-          const incomingHashtags = extractHashtags(content || '');
-          const hasWebPromo = incomingHashtags.some((tag) => tag.replace('#', '').toLowerCase() === 'webpromo');
-
-          if (hasWebPromo) {
-            const forcedTrigger = WEBPROMO_TRIGGER;
-            if (trigger !== forcedTrigger) {
-              console.log(`[WA] #WebPromo entrante detectado. Forzando trigger '${forcedTrigger}' para ${leadId}`);
-            } else {
-              console.log(`[WA] #WebPromo entrante detectado. Trigger ya '${forcedTrigger}' para ${leadId}`);
-            }
-            trigger = forcedTrigger;
-            triggerSource = 'hashtag';
+          if (inboundFromMetaAd) {
+            trigger = metaAdTrigger;
+            triggerSource = 'meta_ad';
+            toCancel = [];
+            console.log(`[WA] 🎯 Inbound desde Meta Ads: trigger interno '${trigger}' para ${leadId}`);
           }
 
-          const etiquetaUnion = hasWebPromo ? [trigger, 'WebPromo'] : [trigger];
+          const etiquetaUnion = inboundFromMetaAd ? [trigger, 'MetaAds'] : [trigger];
 
           const leadRef = db.collection('leads').doc(leadId);
           const leadSnap = await leadRef.get();
@@ -653,40 +654,54 @@ export async function connectToWhatsApp() {
             resolvedJid: jidResolved,
             lidJid,
             addressingMode,
-            source: 'WhatsApp',
+            source: inboundFromMetaAd ? 'meta_ads' : 'WhatsApp',
+            ...(inboundFromMetaAd
+              ? {
+                  campaign: META_ADS_CAMPAIGN,
+                  lastInboundFromAd: true,
+                  lastInboundAt: inboundAt,
+                }
+              : {}),
           };
 
           // Lead nuevo
           if (!leadSnap.exists) {
             await leadRef.set({
               ...baseLead,
-              fecha_creacion: now(),
+              fecha_creacion: inboundAt,
               estado: 'nuevo',
               etiquetas: etiquetaUnion,
               unreadCount: 0,
-              lastMessageAt: now(),
+              lastMessageAt: inboundAt,
             });
 
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
 
             const canSchedule = !shouldBlockSequences({}, trigger);
             if (canSchedule) {
-              await scheduleSequenceForLead(leadId, trigger, now());
-              console.log('[WA] ✅ Lead CREADO + secuencia programada:', { leadId, phone: normNum, trigger, source: rule.source });
+              await scheduleSequenceForLead(leadId, trigger, inboundAt);
+              console.log('[WA] ✅ Lead CREADO + secuencia programada:', { leadId, phone: normNum, trigger, source: triggerSource });
             } else {
               console.log('[WA] Lead CREADO (bloqueado); no se programa:', { leadId, trigger });
             }
           } else {
             // Lead existente
             const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
-            await leadRef.update({
-              lastMessageAt: now(),
+            const updatePayload = {
+              lastMessageAt: inboundAt,
               jid,
               resolvedJid: jidResolved,
               lidJid,
               telefono: normNum,
               addressingMode
-            });
+            };
+            if (inboundFromMetaAd) {
+              updatePayload.source = 'meta_ads';
+              updatePayload.campaign = META_ADS_CAMPAIGN;
+              updatePayload.lastInboundFromAd = true;
+              updatePayload.lastInboundAt = inboundAt;
+            }
+            await leadRef.update(updatePayload);
 
             if (!current.nombre && msg.pushName) {
               await leadRef.set({ nombre: msg.pushName }, { merge: true });
@@ -694,17 +709,16 @@ export async function connectToWhatsApp() {
 
             await leadRef.set({ etiquetas: FieldValue.arrayUnion(...etiquetaUnion) }, { merge: true });
 
-            if (hasWebPromo) {
-              await leadRef.set({ estado: 'nuevo', hasActiveSequences: true }, { merge: true });
-            }
-
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
 
             const blocked = shouldBlockSequences(current, trigger);
             const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
 
-            if (!blocked && !alreadyHas && (triggerSource === 'hashtag' || triggerSource === 'db')) {
-              await scheduleSequenceForLead(leadId, trigger, now());
+            if (!blocked && !alreadyHas && (triggerSource === 'hashtag' || triggerSource === 'db' || triggerSource === 'meta_ad')) {
+              await scheduleSequenceForLead(leadId, trigger, inboundAt);
+              if (triggerSource === 'meta_ad') {
+                await leadRef.set({ estado: 'nuevo', hasActiveSequences: true }, { merge: true });
+              }
               console.log('[WA] ✅ Lead ACTUALIZADO (reprogramado):', { leadId, trigger, source: triggerSource });
             } else {
               console.log('[WA] Lead ACTUALIZADO (sin reprogramar):', {
