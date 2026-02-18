@@ -50,10 +50,10 @@ const STATIC_HASHTAG_MAP = {
   '#planredes990': 'PlanRedes',
   '#info':         'LeadWeb',
   '#infoweb':      'NuevoLead',
-  '#WebPromo':     'WebPromo',       // ✅ CORREGIDO: trigger específico para campañas de Meta Ads
-  '#webpromo':     'WebPromo',       // ✅ AGREGADO: variante en minúsculas
-  '#webPromo':     'WebPromo',       // ✅ AGREGADO: variante camelCase
-  '#WEBPROMO':     'WebPromo',       // ✅ AGREGADO: variante mayúsculas
+  '#WebPromo':     'LeadWhatsapp',
+  '#webpromo':     'LeadWhatsapp',
+  '#webPromo':     'LeadWhatsapp',
+  '#WEBPROMO':     'LeadWhatsapp',
 
 };
 
@@ -62,7 +62,7 @@ const STATIC_CANCEL_BY_TRIGGER = {
   LeadWeb: ['NuevoLeadWeb', 'NuevoLead'],
 };
 
-const WEBPROMO_TRIGGER = 'NuevoLead';
+const WEBPROMO_TRIGGER = 'LeadWhatsapp';
 
 function firstName(n = '') {
   return String(n).trim().split(/\s+/)[0] || '';
@@ -373,7 +373,7 @@ export async function connectToWhatsApp() {
               // 🔍 NUEVO: Intentar detectar trigger desde el ID del mensaje o metadata
               const cfgSnap = await db.collection('config').doc('appConfig').get();
               const cfg = cfgSnap.exists ? cfgSnap.data() : {};
-              const defaultTrigger = cfg.defaultTriggerMetaAds || 'WebPromo'; // ✅ Usar WebPromo por defecto para Meta Ads
+              const defaultTrigger = cfg.defaultTriggerMetaAds || WEBPROMO_TRIGGER;
 
               // 🔍 Buscar hashtags en el pushName o en metadata del mensaje
               let detectedTrigger = defaultTrigger;
@@ -624,6 +624,7 @@ export async function connectToWhatsApp() {
           const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';
           const rule = await resolveTriggerFromMessage(content, defaultTrigger);
           let trigger = rule.trigger;
+          let triggerSource = rule.source;
           const toCancel = rule.cancel || [];
 
           const incomingHashtags = extractHashtags(content || '');
@@ -637,6 +638,7 @@ export async function connectToWhatsApp() {
               console.log(`[WA] #WebPromo entrante detectado. Trigger ya '${forcedTrigger}' para ${leadId}`);
             }
             trigger = forcedTrigger;
+            triggerSource = 'hashtag';
           }
 
           const etiquetaUnion = hasWebPromo ? [trigger, 'WebPromo'] : [trigger];
@@ -701,14 +703,14 @@ export async function connectToWhatsApp() {
             const blocked = shouldBlockSequences(current, trigger);
             const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
 
-            if (!blocked && !alreadyHas && (rule.source === 'hashtag' || rule.source === 'db')) {
+            if (!blocked && !alreadyHas && (triggerSource === 'hashtag' || triggerSource === 'db')) {
               await scheduleSequenceForLead(leadId, trigger, now());
-              console.log('[WA] ✅ Lead ACTUALIZADO (reprogramado):', { leadId, trigger, source: rule.source });
+              console.log('[WA] ✅ Lead ACTUALIZADO (reprogramado):', { leadId, trigger, source: triggerSource });
             } else {
               console.log('[WA] Lead ACTUALIZADO (sin reprogramar):', {
                 leadId,
                 trigger,
-                source: rule.source,
+                source: triggerSource,
                 blocked,
                 reason: blocked ? 'bloqueado' : (alreadyHas ? 'ya-activo' : 'trigger=default')
               });

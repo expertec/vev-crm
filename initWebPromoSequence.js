@@ -1,19 +1,19 @@
 // initWebPromoSequence.js
-// Script para crear/actualizar la secuencia WebPromo en Firebase
+// Script para crear/actualizar la secuencia LeadWhatsapp en Firebase
 // Ejecutar con: node initWebPromoSequence.js
 
 import { db } from './firebaseAdmin.js';
 
 /**
- * Crea o actualiza la secuencia WebPromo en Firestore
+ * Crea o actualiza la secuencia LeadWhatsapp en Firestore
  * Esta secuencia se activa cuando un lead llega desde campañas de Facebook Ads con #webPromo
  */
 async function initWebPromoSequence() {
-  console.log('🚀 Inicializando secuencia WebPromo...\n');
+  console.log('🚀 Inicializando secuencia LeadWhatsapp...\n');
 
   const secuenciaWebPromo = {
     name: 'Secuencia Meta Ads - Web Promo',
-    trigger: 'WebPromo',
+    trigger: 'LeadWhatsapp',
     active: true,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -43,9 +43,9 @@ async function initWebPromoSequence() {
   };
 
   try {
-    // Verificar si ya existe una secuencia con el trigger "WebPromo"
+    // Verificar si ya existe una secuencia con el trigger "LeadWhatsapp"
     const existingQuery = await db.collection('secuencias')
-      .where('trigger', '==', 'WebPromo')
+      .where('trigger', '==', 'LeadWhatsapp')
       .limit(1)
       .get();
 
@@ -56,12 +56,12 @@ async function initWebPromoSequence() {
         ...secuenciaWebPromo,
         updatedAt: new Date()
       });
-      console.log('✅ Secuencia WebPromo ACTUALIZADA exitosamente');
+      console.log('✅ Secuencia LeadWhatsapp ACTUALIZADA exitosamente');
       console.log(`   📄 ID: ${docId}`);
     } else {
       // Crear nueva secuencia
       const docRef = await db.collection('secuencias').add(secuenciaWebPromo);
-      console.log('✅ Secuencia WebPromo CREADA exitosamente');
+      console.log('✅ Secuencia LeadWhatsapp CREADA exitosamente');
       console.log(`   📄 ID: ${docRef.id}`);
     }
 
@@ -81,12 +81,12 @@ async function initWebPromoSequence() {
     console.log('\n🎯 La secuencia se activará automáticamente cuando:');
     console.log('   1. Llegue un mensaje desde Facebook Ads (dominio @lid)');
     console.log('   2. El mensaje contenga el hashtag #webPromo (o variantes)');
-    console.log('   3. O cuando defaultTriggerMetaAds esté configurado como "WebPromo"');
+    console.log('   3. O cuando defaultTriggerMetaAds esté configurado como "LeadWhatsapp"');
 
-    console.log('\n✨ ¡Listo! La secuencia WebPromo está configurada y funcionando.\n');
+    console.log('\n✨ ¡Listo! La secuencia LeadWhatsapp está configurada y funcionando.\n');
 
   } catch (error) {
-    console.error('❌ Error al inicializar la secuencia WebPromo:', error);
+    console.error('❌ Error al inicializar la secuencia LeadWhatsapp:', error);
     throw error;
   }
 }

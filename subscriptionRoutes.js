@@ -19,6 +19,16 @@ const getApiBaseUrl = (req) => {
   return `${proto}://${host}`;
 };
 
+// Evita bloquear el webhook en operaciones no críticas (ej. WhatsApp)
+const sendWhatsAppBackground = (lead, payload, context = 'WhatsApp') => {
+  Promise.resolve()
+    .then(() => enviarMensaje(lead, payload))
+    .then(() => console.log(`📤 ${context}`))
+    .catch((error) => {
+      console.error(`❌ Error en envío de WhatsApp (${context}):`, error);
+    });
+};
+
 /**
  * POST /api/subscription/create-checkout
  * Crea una sesión de checkout de Stripe para nueva suscripción
@@ -438,15 +448,11 @@ Si tu banco aún está procesando el cobro, Stripe confirmará automáticamente 
 
 Cualquier duda, respóndeme por aquí 🚀`;
 
-    try {
-      await enviarMensaje(
-        { telefono: finalPhone, nombre: companyName },
-        { type: 'texto', contenido: mensaje }
-      );
-      console.log(`📤 Credenciales enviadas por WhatsApp a ${finalPhone}`);
-    } catch (waErr) {
-      console.error('❌ Error enviando WhatsApp:', waErr);
-    }
+    sendWhatsAppBackground(
+      { telefono: finalPhone, nombre: companyName },
+      { type: 'texto', contenido: mensaje },
+      `Credenciales enviadas por WhatsApp a ${finalPhone}`
+    );
   }
 
   // Registrar en historial
@@ -972,14 +978,11 @@ Una vez que pagues, recibirás tu confirmación automáticamente por WhatsApp.
 
 ¡Gracias por tu preferencia! 🙌`;
 
-    try {
-      await enviarMensaje(
-        { telefono: finalPhone, nombre: negocioData.companyInfo || 'Cliente' },
-        { type: 'texto', contenido: mensaje }
-      );
-    } catch (waErr) {
-      console.error('❌ Error enviando WhatsApp OXXO pending:', waErr);
-    }
+    sendWhatsAppBackground(
+      { telefono: finalPhone, nombre: negocioData.companyInfo || 'Cliente' },
+      { type: 'texto', contenido: mensaje },
+      `OXXO pending enviado a ${finalPhone}`
+    );
   }
 }
 
@@ -1018,14 +1021,11 @@ Si aún deseas activar tu plan, puedes generar un nuevo pago desde nuestra pági
 
 ¿Necesitas ayuda? Responde a este mensaje. 🙋‍♂️`;
 
-    try {
-      await enviarMensaje(
-        { telefono: finalPhone, nombre: negocioData.companyInfo || 'Cliente' },
-        { type: 'texto', contenido: mensaje }
-      );
-    } catch (waErr) {
-      console.error('❌ Error enviando WhatsApp OXXO failed:', waErr);
-    }
+    sendWhatsAppBackground(
+      { telefono: finalPhone, nombre: negocioData.companyInfo || 'Cliente' },
+      { type: 'texto', contenido: mensaje },
+      `OXXO expired enviado a ${finalPhone}`
+    );
   }
 }
 
@@ -1035,6 +1035,10 @@ Si aún deseas activar tu plan, puedes generar un nuevo pago desde nuestra pági
 async function handleOneTimePaymentCompleted(session) {
   const { metadata, payment_intent, amount_total } = session;
   const { negocioId, phone, planId, planNombre, duracionDias } = metadata || {};
+  const safePlanId = planId || 'basico';
+  const safePlanNombre = planNombre || 'Plan Anual';
+  const safeAmountTotal = Number.isFinite(amount_total) ? amount_total : 0;
+  const safePaymentIntent = payment_intent || null;
 
   console.log(`✅ Pago único completado para negocio ${negocioId}`);
 
@@ -1063,8 +1067,8 @@ async function handleOneTimePaymentCompleted(session) {
 
   // Actualizar negocio
   await negocioRef.update({
-    plan: planId,
-    planNombre: planNombre,
+    plan: safePlanId,
+    planNombre: safePlanNombre,
     subscriptionStatus: 'active', // Para que el panel lo considere activo
     planStartDate: negocioData.planStartDate || Timestamp.now(),
     planActivatedAt: Timestamp.now(),
@@ -1074,14 +1078,14 @@ async function handleOneTimePaymentCompleted(session) {
     trialActive: false,
     websiteArchived: false,
     pin: finalPin,
-    lastPaymentId: payment_intent,
-    lastPaymentAmount: amount_total / 100,
+    lastPaymentId: safePaymentIntent,
+    lastPaymentAmount: safeAmountTotal / 100,
     lastPaymentDate: Timestamp.now(),
     paymentMethod: 'stripe_onetime',
     updatedAt: Timestamp.now()
   });
 
-  console.log(`✅ Plan actualizado: negocio=${negocioId}, plan=${planId}, expira=${expiresAt.toISOString()}`);
+  console.log(`✅ Plan actualizado: negocio=${negocioId}, plan=${safePlanId}, expira=${expiresAt.toISOString()}`);
 
   // Actualizar registro de pago si existe
   const pagoSnap = await db.collection('pagos_stripe')
@@ -1091,7 +1095,7 @@ async function handleOneTimePaymentCompleted(session) {
 
   if (!pagoSnap.empty) {
     await pagoSnap.docs[0].ref.update({
-      paymentIntentId: payment_intent,
+      paymentIntentId: safePaymentIntent,
       status: 'completed',
       processedAt: Timestamp.now(),
       updatedAt: Timestamp.now()
@@ -1105,8 +1109,8 @@ async function handleOneTimePaymentCompleted(session) {
 
     const mensaje = `🎉 ¡Pago recibido exitosamente!
 
-✅ Plan: ${planNombre}
-💰 Monto: $${amount_total / 100} MXN
+✅ Plan: ${safePlanNombre}
+💰 Monto: $${safeAmountTotal / 100} MXN
 📅 Válido hasta: ${expiresAt.toLocaleDateString('es-MX')}
 
 🔐 Tu PIN de acceso: ${finalPin}
@@ -1116,15 +1120,11 @@ ${loginUrl}
 
 ¡Gracias por tu confianza! 🚀`;
 
-    try {
-      await enviarMensaje(
-        { telefono: finalPhone, nombre: negocioData.companyInfo || 'Cliente' },
-        { type: 'texto', contenido: mensaje }
-      );
-      console.log(`📤 Confirmación enviada por WhatsApp a ${finalPhone}`);
-    } catch (waErr) {
-      console.error('❌ Error enviando WhatsApp:', waErr);
-    }
+    sendWhatsAppBackground(
+      { telefono: finalPhone, nombre: negocioData.companyInfo || 'Cliente' },
+      { type: 'texto', contenido: mensaje },
+      `Confirmación enviada por WhatsApp a ${finalPhone}`
+    );
   }
 
   // Registrar en historial
@@ -1132,9 +1132,9 @@ ${loginUrl}
     negocioId,
     event: 'one_time_payment_completed',
     sessionId: session.id,
-    paymentIntentId: payment_intent,
-    planId,
-    amount: amount_total / 100,
+    paymentIntentId: safePaymentIntent,
+    planId: safePlanId,
+    amount: safeAmountTotal / 100,
     currency: 'mxn',
     expiresAt: Timestamp.fromDate(expiresAt),
     timestamp: Timestamp.now()

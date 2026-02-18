@@ -126,12 +126,6 @@ router.post('/create-checkout', async (req, res) => {
 
     // Normalizar teléfono
     const phoneDigits = normalizarTelefono(phone);
-    if (!phoneDigits || phoneDigits.length < 10) {
-      return res.status(400).json({
-        success: false,
-        error: 'Teléfono inválido'
-      });
-    }
 
     // Buscar negocio
     let negocioRef;
@@ -164,6 +158,14 @@ router.post('/create-checkout', async (req, res) => {
           error: 'No se encontró un negocio asociado a este teléfono'
         });
       }
+    }
+
+    // Validar teléfono final
+    if (!phoneDigits || phoneDigits.length < 10) {
+      return res.status(400).json({
+        success: false,
+        error: 'El teléfono debe tener al menos 10 dígitos'
+      });
     }
 
     // Crear o recuperar customer de Stripe

@@ -20,6 +20,20 @@ function firstName(full = '') {
   return String(full).trim().split(/\s+/)[0] || '';
 }
 
+function isLidJid(jid) {
+  return /@lid$/i.test(String(jid || '').trim());
+}
+
+function isSendableJid(jid) {
+  return /@s\.whatsapp\.net$/i.test(String(jid || '').trim());
+}
+
+function cleanLeadPhone(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.includes('@')) return '';
+  return raw.replace(/\D/g, '');
+}
+
 function toDateSafe(v) {
   if (!v) return null;
   if (v instanceof Date) return isNaN(+v) ? null : v;
@@ -34,9 +48,10 @@ function toDateSafe(v) {
 
 function replacePlaceholders(template, lead) {
   if (!template) return '';
+  const telFromLead = cleanLeadPhone(lead?.telefono);
   const leadJid = extractJidFromLead(lead);
-  const telFromJid = phoneFromJid(leadJid);
-  const tel = telFromJid || String(lead.telefono || '').replace(/\D/g, '');
+  const telFromJid = isSendableJid(leadJid) ? phoneFromJid(leadJid) : null;
+  const tel = telFromLead || telFromJid || '';
   const nameFirst = firstName(lead.nombre || '');
   return String(template).replace(/\{\{(\w+)\}\}/g, (_, key) => {
     if (key === 'telefono') return tel;
@@ -81,8 +96,9 @@ function e164ToJid(e164) {
 }
 
 function phoneFromJid(jid) {
-  if (!jid) return null;
-  const [user] = String(jid || '').split('@');
+  const normalized = normalizeJid(jid);
+  if (!normalized || !isSendableJid(normalized)) return null;
+  const [user] = normalized.split('@');
   const cleanUser = user.split(':')[0].replace(/\D/g, '');
   if (!cleanUser) return null;
   return normalizePhoneForWA(cleanUser);
@@ -98,7 +114,9 @@ function extractJidFromLead(lead) {
 
   for (const cand of candidates) {
     const normalized = normalizeJid(cand);
-    if (normalized) return normalized;
+    if (!normalized) continue;
+    if (isLidJid(normalized)) continue;
+    if (isSendableJid(normalized)) return normalized;
   }
 
   return null;
@@ -106,9 +124,10 @@ function extractJidFromLead(lead) {
 
 function resolveLeadJidAndPhone(lead) {
   const phoneRaw = lead?.telefono || '';
+  const normalizedPhoneFromLead = normalizePhoneForWA(cleanLeadPhone(phoneRaw));
   const jidCandidate = extractJidFromLead(lead);
   const normalizedPhone =
-    normalizePhoneForWA(phoneRaw) ||
+    normalizedPhoneFromLead ||
     phoneFromJid(jidCandidate) ||
     phoneFromJid(lead?.resolvedJid) ||
     null;
@@ -193,8 +212,8 @@ const _sequenceDefCache = new Map();
 const _sequenceDefCacheTime = new Map();
 const SEQUENCE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
 const TRIGGER_FALLBACK = {
-  WebPromo: 'NuevoLead',
-  webpromo: 'NuevoLead'
+  WebPromo: 'LeadWhatsapp',
+  webpromo: 'LeadWhatsapp'
 };
 
 const isSeqCacheFresh = (key) => {
