@@ -1,5 +1,5 @@
 // whatsappService.js - VERSIÓN CORREGIDA
-// 🔧 FIX APLICADO: Listener corregido para procesar solo mensajes 'notify' (nuevos entrantes)
+// 🔧 FIX APLICADO: Listener procesa 'notify' y 'append' recientes con deduplicación por messageId
 // Según documentación oficial de Baileys: https://baileys.wiki/docs/socket/receiving-updates/
 
 import {
@@ -29,7 +29,7 @@ import {
   hasSameTrigger,
   phoneFromJid
 } from './queue.js';
-import { isMessageFromMetaAd } from './utils/metaAdDetector.js';
+import { detectMetaAdSignal } from './utils/metaAdDetector.js';
 
 
 let latestQR = null;
@@ -61,6 +61,15 @@ const STATIC_CANCEL_BY_TRIGGER = {
 
 const WEBPROMO_TRIGGER = 'LeadWhatsapp';
 const META_ADS_CAMPAIGN = 'whatsapp_click_to_chat';
+const APPEND_MAX_AGE_MS_ENV = Number(process.env.WA_APPEND_MAX_AGE_MS);
+const APPEND_MAX_AGE_MS = Number.isFinite(APPEND_MAX_AGE_MS_ENV) && APPEND_MAX_AGE_MS_ENV >= 0
+  ? APPEND_MAX_AGE_MS_ENV
+  : 6 * 60 * 60 * 1000;
+const PROCESSED_MESSAGE_ID_TTL_MS = Number(process.env.WA_MSG_ID_TTL_MS) > 0
+  ? Number(process.env.WA_MSG_ID_TTL_MS)
+  : 6 * 60 * 60 * 1000;
+const processedInboundMessageIds = new Map();
+const ENABLE_LID_APPEND_META_FALLBACK = process.env.WA_LID_APPEND_META_FALLBACK !== '0';
 
 function firstName(n = '') {
   return String(n).trim().split(/\s+/)[0] || '';
@@ -74,6 +83,51 @@ function tpl(str, lead) {
   });
 }
 function now() { return new Date(); }
+
+function getMessageTimestampMs(msg) {
+  const raw = msg?.messageTimestamp;
+  if (!raw) return null;
+
+  let seconds = null;
+  if (typeof raw === 'number') seconds = raw;
+  else if (typeof raw === 'string') seconds = Number(raw);
+  else if (typeof raw?.toNumber === 'function') seconds = raw.toNumber();
+  else if (typeof raw === 'object' && typeof raw.low === 'number') seconds = raw.low;
+
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return seconds > 1e12 ? seconds : seconds * 1000;
+}
+
+function getMessageDedupKey(msg) {
+  const id = String(msg?.key?.id || '').trim();
+  if (!id) return null;
+  const remote = String(msg?.key?.remoteJid || msg?.key?.remoteJidAlt || msg?.key?.participant || '').trim();
+  return `${remote}:${id}`;
+}
+
+function cleanupProcessedMessageIds(refNow = Date.now()) {
+  for (const [key, seenAt] of processedInboundMessageIds.entries()) {
+    if ((refNow - seenAt) > PROCESSED_MESSAGE_ID_TTL_MS) {
+      processedInboundMessageIds.delete(key);
+    }
+  }
+}
+
+function markMessageAsProcessed(msg, refNow = Date.now()) {
+  const key = getMessageDedupKey(msg);
+  if (!key) return true;
+  cleanupProcessedMessageIds(refNow);
+  if (processedInboundMessageIds.has(key)) return false;
+  processedInboundMessageIds.set(key, refNow);
+  return true;
+}
+
+function shouldProcessAppendMessage(msg, refNow = Date.now()) {
+  if (APPEND_MAX_AGE_MS === 0) return true; // 0 desactiva filtro por antigüedad
+  const tsMs = getMessageTimestampMs(msg);
+  if (!tsMs) return true; // si no viene timestamp, se procesa para no perder mensajes reales
+  return (refNow - tsMs) <= APPEND_MAX_AGE_MS;
+}
 
 function extractHashtags(text = '') {
   const found = String(text).toLowerCase().match(/#[\p{L}\p{N}_-]+/gu);
@@ -137,6 +191,23 @@ function shouldBlockSequences(leadData, nextTrigger) {
     if (['LeadWeb', 'NuevoLead', 'NuevoLeadWeb'].includes(nextTrigger)) return true;
   }
   return false;
+}
+
+function isLeadFromMetaAds(leadData) {
+  if (!leadData || typeof leadData !== 'object') return false;
+  const source = String(leadData.source || '').toLowerCase();
+  const campaign = String(leadData.campaign || '').toLowerCase();
+  const etiquetas = Array.isArray(leadData.etiquetas) ? leadData.etiquetas.map((e) => String(e).toLowerCase()) : [];
+  return source === 'meta_ads' || campaign === META_ADS_CAMPAIGN.toLowerCase() || etiquetas.includes('metaads');
+}
+
+function resolveMetaAdInbound({ baseDetected, leadData, isLidRemote, upsertType }) {
+  if (baseDetected) return { isMetaAd: true, reason: 'signal' };
+  if (isLeadFromMetaAds(leadData)) return { isMetaAd: true, reason: 'lead_context' };
+  if (ENABLE_LID_APPEND_META_FALLBACK && isLidRemote && upsertType === 'append') {
+    return { isMetaAd: true, reason: 'lid_append_fallback' };
+  }
+  return { isMetaAd: false, reason: 'none' };
 }
 
 function resolveSenderFromLid(msg) {
@@ -251,30 +322,62 @@ export async function connectToWhatsApp() {
 
     /* -------------------- 🔧 FIX: recepción de mensajes -------------------- */
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      // ✅ CORRECCIÓN: Solo procesar mensajes nuevos (notify) según documentación oficial de Baileys
+      // ✅ CORRECCIÓN: Procesar notify + append recientes (con dedupe) según documentación oficial de Baileys
       // https://baileys.wiki/docs/socket/receiving-updates/
       // type === 'notify': mensajes NUEVOS entrantes (lo que necesitamos)
-      // type === 'append': historial/sincronización (ignorar)
+      // type === 'append': puede incluir mensajes recientes tras reconexión
       // type === 'prepend': historial antiguo (ignorar)
-      if (type !== 'notify') {
-        console.log(`[WA] ⏭️ Ignorando mensajes tipo '${type || 'undefined'}' (solo se procesan 'notify')`);
+      if (!['notify', 'append'].includes(type || '')) {
+        console.log(`[WA] ⏭️ Ignorando mensajes tipo '${type || 'undefined'}' (solo notify/append)`);
         return;
       }
 
-      // ✅ Log de debugging mejorado
-        console.log(`[WA] 📩 Procesando ${messages.length} mensaje(s) NUEVOS | tipo: ${type} | ${new Date().toISOString()}`);
+      const incomingMessages = Array.isArray(messages) ? messages : [];
+      let messagesToProcess = incomingMessages;
+      if (messagesToProcess.length === 0) return;
 
-        for (const msg of messages) {
-          try {
-            // Validación de JID
+      if (type === 'append') {
+        const refNow = Date.now();
+        messagesToProcess = messagesToProcess.filter((m) => shouldProcessAppendMessage(m, refNow));
+        const skippedByAge = incomingMessages.length - messagesToProcess.length;
+        if (skippedByAge > 0) {
+          console.log(`[WA] ⏭️ append: ${skippedByAge} mensaje(s) descartados por antigüedad (> ${Math.round(APPEND_MAX_AGE_MS / 60000)} min)`);
+        }
+        if (messagesToProcess.length === 0) {
+          console.log('[WA] ⏭️ append sin mensajes recientes para procesar');
+          return;
+        }
+      }
+
+      // ✅ Log de debugging mejorado
+      console.log(`[WA] 📩 Procesando ${messagesToProcess.length} mensaje(s) | tipo: ${type} | ${new Date().toISOString()}`);
+
+      for (const msg of messagesToProcess) {
+        if (!markMessageAsProcessed(msg)) {
+          console.log(`[WA] ⏭️ Mensaje duplicado omitido: id=${msg?.key?.id || 'N/A'} tipo=${type}`);
+          continue;
+        }
+        try {
+          if (type === 'append') {
+            const tsMs = getMessageTimestampMs(msg);
+            console.log(`[WA] ℹ️ append aceptado: id=${msg?.key?.id || 'N/A'} ts=${tsMs ? new Date(tsMs).toISOString() : 'sin-timestamp'}`);
+          }
+
+          // Validación de JID
           let rawJid = (msg?.key?.remoteJid || '').trim();
           const remoteJidAltRaw = msg?.key?.remoteJidAlt;
           const remoteJidAlt = normalizeJid(remoteJidAltRaw);
           const addressingMode = msg?.key?.addressingMode || 'pn';
 
           if (!rawJid && !remoteJidAlt) {
-            console.warn('[WA] mensaje sin remoteJid ni remoteJidAlt, se ignora');
-            continue;
+            const recoveredJid = normalizeJid(resolveSenderFromLid(msg));
+            if (recoveredJid) {
+              rawJid = recoveredJid;
+              console.log(`[WA] ♻️ JID recuperado sin remoteJid/remoteJidAlt: ${recoveredJid}`);
+            } else {
+              console.warn('[WA] mensaje sin remoteJid/remoteJidAlt ni fallback resoluble, se ignora');
+              continue;
+            }
           }
 
           // Ignorar grupos/estados/newsletters
@@ -320,15 +423,21 @@ export async function connectToWhatsApp() {
                   jidToUse = `${normalized}@s.whatsapp.net`;
                   console.log(`   ⚠️ FALLBACK: Usando dígitos del remoteJid: ${jidToUse}`);
                 } else {
-                  console.error(`   ❌ NO SE PUDO RESOLVER JID REAL - Mensaje será ignorado`);
-                  console.log(`   🔍 Estructura completa del mensaje:`);
-                  console.log(JSON.stringify({
-                    key: msg.key,
-                    pushName: msg.pushName,
-                    hasMessage: !!msg.message
-                  }, null, 2));
-                  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
-                  continue; // ❌ Saltar este mensaje si no se puede resolver el JID
+                  const fallbackJid = normalizeJid(rawJid) || normalizeJid(msg?.key?.participant);
+                  if (fallbackJid) {
+                    jidToUse = fallbackJid;
+                    console.warn(`   ⚠️ JID real no resuelto; guardando lead provisional con ${fallbackJid}`);
+                  } else {
+                    console.error(`   ❌ NO SE PUDO RESOLVER JID REAL - Mensaje será ignorado`);
+                    console.log(`   🔍 Estructura completa del mensaje:`);
+                    console.log(JSON.stringify({
+                      key: msg.key,
+                      pushName: msg.pushName,
+                      hasMessage: !!msg.message
+                    }, null, 2));
+                    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+                    continue; // ❌ Saltar este mensaje si no se puede resolver ningún JID
+                  }
                 }
               }
             } else {
@@ -352,13 +461,23 @@ export async function connectToWhatsApp() {
           if (!['s.whatsapp.net', 'lid'].includes(jidDomain)) continue;
 
           const phoneFromResolved = phoneFromJid(jidResolved);
-          const normNum  = phoneFromResolved || normalizePhoneForWA(cleanUser);
+          const phoneFromFinalJid = phoneFromJid(finalJid);
+          const normNum  = phoneFromResolved || phoneFromFinalJid || normalizePhoneForWA(cleanUser);
+          const hasReachableTarget = Boolean(
+            phoneFromResolved
+            || phoneFromFinalJid
+            || (typeof normNum === 'string' && normNum.length >= 10)
+          );
           const leadId   = jidResolved || `${normNum}@s.whatsapp.net`;
           const sender   = msg.key.fromMe ? 'business' : 'lead';
           const jid      = finalJid;
-          const inboundFromMetaAd = sender === 'lead' && isMessageFromMetaAd(msg);
+          const adSignal = sender === 'lead' ? detectMetaAdSignal(msg) : { isFromMetaAd: false, indicator: null, path: null };
+          const inboundFromMetaAd = sender === 'lead' && adSignal.isFromMetaAd;
           if (inboundFromMetaAd) {
-            console.log(`[WA] 🎯 externalAdReply detectado para ${leadId}. Se tratará como inbound de Meta Ads.`);
+            console.log(`[WA] 🎯 Indicador Meta Ads detectado para ${leadId}: ${adSignal.indicator} (${adSignal.path})`);
+          } else if (sender === 'lead' && isLidRemote) {
+            const msgKeys = Object.keys(msg?.message || {});
+            console.log(`[WA] ℹ️ @lid sin indicador Meta Ads para ${leadId}. keys=${msgKeys.join(',') || 'sin-keys'}`);
           }
 
           // Verificar que el mensaje tenga contenido desencriptado
@@ -371,6 +490,17 @@ export async function connectToWhatsApp() {
 
               const leadRef = db.collection('leads').doc(leadId);
               const leadSnap = await leadRef.get();
+              const existingLeadData = leadSnap.exists ? (leadSnap.data() || {}) : null;
+              const metaAdDecision = resolveMetaAdInbound({
+                baseDetected: inboundFromMetaAd,
+                leadData: existingLeadData,
+                isLidRemote,
+                upsertType: type,
+              });
+              const shouldTreatAsMetaAdInbound = metaAdDecision.isMetaAd;
+              if (shouldTreatAsMetaAdInbound && !inboundFromMetaAd) {
+                console.log(`[WA] ⚠️ Meta Ads fallback aplicado para ${leadId} (motivo: ${metaAdDecision.reason})`);
+              }
 
               // Trigger interno para inbound de anuncio de Meta
               const cfgSnap = await db.collection('config').doc('appConfig').get();
@@ -379,7 +509,7 @@ export async function connectToWhatsApp() {
               const inboundAt = now();
 
               const baseEtiquetas = [];
-              if (inboundFromMetaAd) baseEtiquetas.push('MetaAds', detectedTrigger);
+              if (shouldTreatAsMetaAdInbound) baseEtiquetas.push('MetaAds', detectedTrigger);
               if (!msg.message) baseEtiquetas.push('MensajeNoDesencriptado');
 
               // 🔧 CRÍTICO: Guardar ambos JID para futuras resoluciones
@@ -393,8 +523,9 @@ export async function connectToWhatsApp() {
                 resolvedJid: jidResolved,
                 lidJid,
                 addressingMode,
-                source: inboundFromMetaAd ? 'meta_ads' : 'WhatsApp Business API',
-                ...(inboundFromMetaAd
+                needsJidResolution: !hasReachableTarget,
+                source: shouldTreatAsMetaAdInbound ? 'meta_ads' : 'WhatsApp Business API',
+                ...(shouldTreatAsMetaAdInbound
                   ? {
                       campaign: META_ADS_CAMPAIGN,
                       lastInboundFromAd: true,
@@ -414,9 +545,9 @@ export async function connectToWhatsApp() {
                   unreadCount: 1,
                 });
 
-                if (inboundFromMetaAd) {
+                if (shouldTreatAsMetaAdInbound) {
                   const blocked = shouldBlockSequences({}, detectedTrigger);
-                  if (!blocked) {
+                  if (!blocked && hasReachableTarget) {
                     try {
                       await scheduleSequenceForLead(leadId, detectedTrigger, inboundAt);
                       await leadRef.set({ hasActiveSequences: true, estado: 'nuevo' }, { merge: true });
@@ -424,13 +555,15 @@ export async function connectToWhatsApp() {
                     } catch (seqErr) {
                       console.error(`[WA] ❌ Error programando secuencia desde Meta Ads: ${seqErr?.message || seqErr}`);
                     }
+                  } else if (!hasReachableTarget) {
+                    console.log(`[WA] ⏭️ Meta Ads inbound sin ruta de envío (${leadId}); secuencia pendiente de resolución de JID.`);
                   } else {
                     console.log(`[WA] ⏭️ Meta Ads inbound detectado pero bloqueado para ${leadId}`);
                   }
                 }
               } else {
                 // Lead existente: actualizar y verificar si necesita secuencia
-                const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
+                const current = { id: leadSnap.id, ...(existingLeadData || {}) };
                 const updatePayload = {
                   ...leadPayload,
                   unreadCount: FieldValue.increment(1),
@@ -440,11 +573,11 @@ export async function connectToWhatsApp() {
                 }
                 await leadRef.set(updatePayload, { merge: true });
 
-                if (inboundFromMetaAd) {
+                if (shouldTreatAsMetaAdInbound) {
                   const alreadyHas = hasSameTrigger(current.secuenciasActivas, detectedTrigger);
                   const blocked = shouldBlockSequences(current, detectedTrigger);
 
-                  if (!blocked && !alreadyHas) {
+                  if (!blocked && !alreadyHas && hasReachableTarget) {
                     try {
                       await scheduleSequenceForLead(leadId, detectedTrigger, inboundAt);
                       await leadRef.set({ hasActiveSequences: true, estado: 'nuevo' }, { merge: true });
@@ -452,11 +585,13 @@ export async function connectToWhatsApp() {
                     } catch (seqErr) {
                       console.error(`[WA] ❌ Error programando secuencia desde Meta Ads: ${seqErr?.message || seqErr}`);
                     }
+                  } else if (!hasReachableTarget) {
+                    console.log(`[WA] ⏭️ Meta Ads inbound sin ruta de envío (${leadId}); secuencia pendiente de resolución de JID.`);
                   } else {
                     console.log(`[WA] ⏭️ Meta Ads inbound sin reprogramar para ${leadId}: blocked=${blocked}, alreadyHas=${alreadyHas}`);
                   }
                 } else {
-                  console.log(`[WA] ⏭️ Mensaje no desencriptado sin externalAdReply para ${leadId}; no se activa WebPromo.`);
+                  console.log(`[WA] ⏭️ Mensaje no desencriptado sin indicador Meta Ads para ${leadId}; no se activa WebPromo.`);
                 }
 
                 console.log(`[WA] ✅ Lead actualizado desde mensaje no desencriptado: ${leadId}`);
@@ -635,17 +770,25 @@ export async function connectToWhatsApp() {
           let toCancel = rule.cancel || [];
           const inboundAt = now();
 
-          if (inboundFromMetaAd) {
+          const leadRef = db.collection('leads').doc(leadId);
+          const leadSnap = await leadRef.get();
+          const existingLeadData = leadSnap.exists ? (leadSnap.data() || {}) : null;
+          const metaAdDecision = resolveMetaAdInbound({
+            baseDetected: inboundFromMetaAd,
+            leadData: existingLeadData,
+            isLidRemote,
+            upsertType: type,
+          });
+          const shouldTreatAsMetaAdInbound = metaAdDecision.isMetaAd;
+          if (shouldTreatAsMetaAdInbound) {
             trigger = metaAdTrigger;
             triggerSource = 'meta_ad';
             toCancel = [];
-            console.log(`[WA] 🎯 Inbound desde Meta Ads: trigger interno '${trigger}' para ${leadId}`);
+            const metaReason = inboundFromMetaAd ? 'signal' : metaAdDecision.reason;
+            console.log(`[WA] 🎯 Inbound tratado como Meta Ads (${metaReason}): trigger interno '${trigger}' para ${leadId}`);
           }
 
-          const etiquetaUnion = inboundFromMetaAd ? [trigger, 'MetaAds'] : [trigger];
-
-          const leadRef = db.collection('leads').doc(leadId);
-          const leadSnap = await leadRef.get();
+          const etiquetaUnion = shouldTreatAsMetaAdInbound ? [trigger, 'MetaAds'] : [trigger];
 
           const baseLead = {
             telefono: normNum,
@@ -654,8 +797,9 @@ export async function connectToWhatsApp() {
             resolvedJid: jidResolved,
             lidJid,
             addressingMode,
-            source: inboundFromMetaAd ? 'meta_ads' : 'WhatsApp',
-            ...(inboundFromMetaAd
+            needsJidResolution: !hasReachableTarget,
+            source: shouldTreatAsMetaAdInbound ? 'meta_ads' : 'WhatsApp',
+            ...(shouldTreatAsMetaAdInbound
               ? {
                   campaign: META_ADS_CAMPAIGN,
                   lastInboundFromAd: true,
@@ -677,25 +821,28 @@ export async function connectToWhatsApp() {
 
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
 
-            const canSchedule = !shouldBlockSequences({}, trigger);
+            const canSchedule = hasReachableTarget && !shouldBlockSequences({}, trigger);
             if (canSchedule) {
               await scheduleSequenceForLead(leadId, trigger, inboundAt);
               console.log('[WA] ✅ Lead CREADO + secuencia programada:', { leadId, phone: normNum, trigger, source: triggerSource });
+            } else if (!hasReachableTarget) {
+              console.log('[WA] ⏭️ Lead CREADO sin ruta de envío; secuencia pendiente de resolución:', { leadId, trigger, source: triggerSource });
             } else {
               console.log('[WA] Lead CREADO (bloqueado); no se programa:', { leadId, trigger });
             }
           } else {
             // Lead existente
-            const current = { id: leadSnap.id, ...(leadSnap.data() || {}) };
+            const current = { id: leadSnap.id, ...(existingLeadData || {}) };
             const updatePayload = {
               lastMessageAt: inboundAt,
               jid,
               resolvedJid: jidResolved,
               lidJid,
               telefono: normNum,
-              addressingMode
+              addressingMode,
+              needsJidResolution: !hasReachableTarget
             };
-            if (inboundFromMetaAd) {
+            if (shouldTreatAsMetaAdInbound) {
               updatePayload.source = 'meta_ads';
               updatePayload.campaign = META_ADS_CAMPAIGN;
               updatePayload.lastInboundFromAd = true;
@@ -714,7 +861,7 @@ export async function connectToWhatsApp() {
             const blocked = shouldBlockSequences(current, trigger);
             const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
 
-            if (!blocked && !alreadyHas && (triggerSource === 'hashtag' || triggerSource === 'db' || triggerSource === 'meta_ad')) {
+            if (!blocked && !alreadyHas && hasReachableTarget && (triggerSource === 'hashtag' || triggerSource === 'db' || triggerSource === 'meta_ad')) {
               await scheduleSequenceForLead(leadId, trigger, inboundAt);
               if (triggerSource === 'meta_ad') {
                 await leadRef.set({ estado: 'nuevo', hasActiveSequences: true }, { merge: true });
@@ -726,7 +873,7 @@ export async function connectToWhatsApp() {
                 trigger,
                 source: triggerSource,
                 blocked,
-                reason: blocked ? 'bloqueado' : (alreadyHas ? 'ya-activo' : 'trigger=default')
+                reason: !hasReachableTarget ? 'sin-ruta-envio' : (blocked ? 'bloqueado' : (alreadyHas ? 'ya-activo' : 'trigger=default'))
               });
             }
           }

@@ -150,7 +150,9 @@ function resolveLeadJidAndPhone(lead) {
 }
 
 function hasSameTrigger(secuencias = [], trigger = '') {
-  return Array.isArray(secuencias) && secuencias.some(s => (s?.trigger || '').toLowerCase() === String(trigger).toLowerCase());
+  const next = String(trigger || '').toLowerCase();
+  return Array.isArray(secuencias)
+    && secuencias.some((s) => !s?.completed && String(s?.trigger || '').toLowerCase() === next);
 }
 
 /* ----------------------- normalización de tipos ------------------------ */

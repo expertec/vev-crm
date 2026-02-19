@@ -771,6 +771,139 @@ app.post(
   }
 );
 
+// Forzar secuencia para rescate manual (crea/actualiza lead si falta)
+app.post('/api/whatsapp/force-sequence', async (req, res) => {
+  const {
+    leadId: inputLeadId,
+    phone,
+    leadPhone,
+    trigger: rawTrigger = 'LeadWhatsapp',
+    markAsMetaAd = true,
+    forceRestart = false,
+  } = req.body || {};
+
+  const trigger = String(rawTrigger || '').trim() || 'LeadWhatsapp';
+  const phoneInput = String(phone || leadPhone || '').trim();
+
+  if (!inputLeadId && !phoneInput) {
+    return res.status(400).json({ error: 'Falta leadId o phone' });
+  }
+  if (typeof scheduleSequenceForLead !== 'function') {
+    return res.status(503).json({ error: 'Scheduler de secuencias no disponible' });
+  }
+
+  try {
+    const e164 = phoneInput ? toE164(phoneInput) : '';
+    const phoneDigits = e164 ? e164.replace(/\D/g, '') : '';
+    const leadIdFromPhone = e164 ? e164ToLeadId(e164) : '';
+
+    let finalLeadId = String(inputLeadId || leadIdFromPhone || '').trim();
+    if (!finalLeadId) {
+      return res.status(400).json({ error: 'No se pudo resolver leadId' });
+    }
+
+    let leadRef = db.collection('leads').doc(finalLeadId);
+    let leadSnap = await leadRef.get();
+
+    if (!leadSnap.exists && phoneDigits) {
+      const byPhone = await db
+        .collection('leads')
+        .where('telefono', '==', phoneDigits)
+        .limit(1)
+        .get();
+      if (!byPhone.empty) {
+        leadRef = byPhone.docs[0].ref;
+        leadSnap = byPhone.docs[0];
+        finalLeadId = byPhone.docs[0].id;
+      }
+    }
+
+    const existingData = leadSnap.exists ? (leadSnap.data() || {}) : {};
+    const existingResolvedJid = String(existingData.resolvedJid || '');
+    const existingJid = String(existingData.jid || '');
+    const candidateJid =
+      (existingResolvedJid.includes('@s.whatsapp.net') && existingResolvedJid) ||
+      (existingJid.includes('@s.whatsapp.net') && existingJid) ||
+      (String(finalLeadId).includes('@s.whatsapp.net') ? String(finalLeadId) : '') ||
+      (phoneDigits ? `${phoneDigits}@s.whatsapp.net` : '');
+
+    if (!phoneDigits && !candidateJid) {
+      return res.status(400).json({
+        error: 'Lead sin teléfono/JID enrutable. Envía phone para rescatarlo.',
+      });
+    }
+
+    const now = new Date();
+    const tags = markAsMetaAd
+      ? [trigger, 'RescateManual', 'MetaAds']
+      : [trigger, 'RescateManual'];
+
+    const baseLeadPatch = {
+      lastMessageAt: now,
+      estado: 'nuevo',
+      hasActiveSequences: true,
+      needsJidResolution: false,
+      ...(phoneDigits ? { telefono: phoneDigits } : {}),
+      ...(candidateJid ? { jid: candidateJid, resolvedJid: candidateJid } : {}),
+      ...(markAsMetaAd
+        ? {
+            source: 'meta_ads',
+            campaign: 'whatsapp_click_to_chat',
+            lastInboundFromAd: true,
+            lastInboundAt: now,
+          }
+        : {}),
+    };
+
+    if (!leadSnap.exists) {
+      await leadRef.set({
+        ...baseLeadPatch,
+        nombre: '',
+        fecha_creacion: now,
+        unreadCount: 0,
+        etiquetas: tags,
+      });
+    } else {
+      await leadRef.set(
+        {
+          ...baseLeadPatch,
+          etiquetas: admin.firestore.FieldValue.arrayUnion(...tags),
+        },
+        { merge: true }
+      );
+    }
+
+    if (forceRestart && typeof cancelSequences === 'function') {
+      await cancelSequences(finalLeadId, [trigger]).catch((err) => {
+        console.warn('[force-sequence] cancelSequences:', err?.message || err);
+      });
+    }
+
+    await scheduleSequenceForLead(finalLeadId, trigger, now);
+
+    await leadRef.set(
+      {
+        hasActiveSequences: true,
+        estado: 'nuevo',
+        etiquetas: admin.firestore.FieldValue.arrayUnion(...tags),
+      },
+      { merge: true }
+    );
+
+    return res.json({
+      ok: true,
+      leadId: finalLeadId,
+      trigger,
+      createdLead: !leadSnap.exists,
+      markAsMetaAd: !!markAsMetaAd,
+      forceRestart: !!forceRestart,
+    });
+  } catch (err) {
+    console.error('[force-sequence] Error:', err);
+    return res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
 // after-form (web)
 app.post('/api/web/after-form', async (req, res) => {
   try {
