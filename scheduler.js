@@ -60,13 +60,133 @@ function firstName(n = '') {
   return String(n).trim().split(/\s+/)[0] || '';
 }
 
+function getSampleSiteBaseUrl() {
+  return String(
+    process.env.SAMPLE_SITE_BASE_URL ||
+      process.env.SITE_PUBLIC_BASE_URL ||
+      'https://negociosweb.mx/site'
+  ).replace(/\/+$/, '');
+}
+
+function resolveSampleSlug(leadData = {}) {
+  const candidate = [
+    leadData?.slug,
+    leadData?.webSlug,
+    leadData?.siteSlug,
+    leadData?.briefWeb?.slug,
+    leadData?.schema?.slug,
+  ].find((v) => String(v || '').trim());
+  return String(candidate || '').trim();
+}
+
+function buildLinkPagina(leadData = {}) {
+  const slug = resolveSampleSlug(leadData);
+  if (!slug) return '';
+  return `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
+}
+
+function resolveLeadIdFromNegocio(data = {}) {
+  const rawLeadId = String(data?.leadId || '').trim();
+  if (/@s\.whatsapp\.net$/i.test(rawLeadId)) return rawLeadId;
+
+  const phoneRaw =
+    data?.leadPhone ||
+    data?.contactWhatsapp ||
+    '';
+  const phoneDigits = String(phoneRaw || '').replace(/\D/g, '');
+  if (phoneDigits.length < 10) return '';
+  const e164 = toE164(phoneRaw || '');
+  const leadId = e164ToJid(e164);
+  return /^\d+@s\.whatsapp\.net$/i.test(leadId) ? leadId : '';
+}
+
+async function activateArchiveSequenceForLead(negocioId, data = {}) {
+  const leadId = resolveLeadIdFromNegocio(data);
+  if (!leadId) {
+    console.warn(
+      `[archivarNegociosAntiguos] Negocio ${negocioId} sin leadId/leadPhone enrutable para activar #etapaLevamiento`
+    );
+    return { leadId: '', scheduled: false, trigger: null };
+  }
+
+  const triggerCandidates = [
+    '#etapaLevamiento',
+    'EtapaLevamiento',
+    '#etapalevamiento',
+    'etapaLevamiento',
+    'etapalevamiento',
+  ];
+
+  let scheduled = false;
+  let usedTrigger = null;
+
+  if (typeof Q.scheduleSequenceForLead === 'function') {
+    for (const trigger of triggerCandidates) {
+      try {
+        const programmed = await Q.scheduleSequenceForLead(
+          leadId,
+          trigger,
+          new Date()
+        );
+        if (programmed > 0) {
+          scheduled = true;
+          usedTrigger = trigger;
+          break;
+        }
+      } catch (err) {
+        console.warn(
+          `[archivarNegociosAntiguos] No se pudo programar trigger '${trigger}' para ${leadId}:`,
+          err?.message || err
+        );
+      }
+    }
+  } else {
+    console.warn(
+      '[archivarNegociosAntiguos] Q.scheduleSequenceForLead no disponible'
+    );
+  }
+
+  const etiquetas = ['NegocioArchivado', '#etapaLevamiento'];
+  if (usedTrigger) etiquetas.push(usedTrigger);
+
+  const leadPatch = {
+    etapa: 'negocio_archivado',
+    archivedNegocioAt: new Date(),
+    archivedNegocioId: negocioId,
+    archivedSequenceTrigger: usedTrigger || '#etapaLevamiento',
+    archivedSequenceScheduled: scheduled,
+    etiquetas: FieldValue.arrayUnion(...etiquetas),
+  };
+  if (scheduled) leadPatch.hasActiveSequences = true;
+
+  await db
+    .collection('leads')
+    .doc(leadId)
+    .set(leadPatch, { merge: true })
+    .catch((err) => {
+      console.warn(
+        `[archivarNegociosAntiguos] No se pudo actualizar lead ${leadId}:`,
+        err?.message || err
+      );
+    });
+
+  return { leadId, scheduled, trigger: usedTrigger };
+}
+
 function replacePlaceholders(template, leadData) {
   const str = String(template || '');
-  return str.replace(/\{\{(\w+)\}\}/g, (_, field) => {
+  const linkPagina = buildLinkPagina(leadData);
+
+  const resolveField = (field) => {
     const value = leadData?.[field] || '';
     if (field === 'nombre') return firstName(value);
+    if (field === 'linkPagina' || field === 'link_pagina') return linkPagina;
     return value;
-  });
+  };
+
+  return str
+    .replace(/\{\{\s*(\w+)\s*\}\}/g, (_, field) => resolveField(field))
+    .replace(/\$\{\s*(\w+)\s*\}/g, (_, field) => resolveField(field));
 }
 
 // =============== GENERACIÓN DE SCHEMAS ===============
@@ -210,6 +330,7 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
   const e164 = toE164(phoneRaw);
   const jid = e164ToJid(e164);
   const sitioUrl = `https://negociosweb.mx/site/${slug}`;
+  const linkPagina = sitioUrl;
 
   try {
     console.log(`📤 [ENVIANDO WHATSAPP] A: ${e164} | URL: ${sitioUrl}`);
@@ -218,7 +339,7 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
       { telefono: e164, nombre: negocio.companyInfo || '' },
       { 
         type: 'texto', 
-        contenido: `¡Hola! 🎉 Tu sitio web ya está listo.\n\nPuedes verlo aquí: ${sitioUrl}\n\n✨ Este es tu sitio de muestra gratuito por 24 horas.\n\nSi te gusta y quieres mantenerlo activo, te enviaremos opciones de planes desde $397 MXN/año.` 
+        contenido: `¡tu página está lista! 🎉 Chécala aquí: ${linkPagina} Baja para que veas todas las secciones: inicio, servicios, testimonios, contacto y el botón de WhatsApp.` 
       }
     );
     
@@ -333,10 +454,26 @@ export async function archivarNegociosAntiguos() {
         console.log(`💎 Negocio ${doc.id} tiene plan (${data.plan}), no se archiva.`);
         continue;
       }
-      
-      await db.collection('ArchivoNegocios').doc(doc.id).set(data);
+
+      await db.collection('ArchivoNegocios').doc(doc.id).set({
+        ...data,
+        archivedAt: Timestamp.now(),
+        archivedReason: 'inactive_24h_no_plan',
+      });
+
+      const seqResult = await activateArchiveSequenceForLead(doc.id, data);
+      if (seqResult.scheduled) {
+        console.log(
+          `🎯 Secuencia '${seqResult.trigger}' activada para ${seqResult.leadId} tras archivar ${doc.id}`
+        );
+      } else {
+        console.warn(
+          `⚠️ No se pudo activar secuencia #etapaLevamiento para ${doc.id} (lead: ${seqResult.leadId || 'N/A'})`
+        );
+      }
+
       await doc.ref.delete();
-      
+
       console.log(`📦 Negocio ${doc.id} archivado correctamente.`);
       n++;
     } catch (err) {

@@ -46,6 +46,31 @@ function toDateSafe(v) {
   return isNaN(+d) ? null : d;
 }
 
+function getSampleSiteBaseUrl() {
+  return String(
+    process.env.SAMPLE_SITE_BASE_URL ||
+      process.env.SITE_PUBLIC_BASE_URL ||
+      'https://negociosweb.mx/site'
+  ).replace(/\/+$/, '');
+}
+
+function resolveSampleSlug(lead = {}) {
+  const candidate = [
+    lead?.slug,
+    lead?.webSlug,
+    lead?.siteSlug,
+    lead?.briefWeb?.slug,
+    lead?.schema?.slug,
+  ].find((v) => String(v || '').trim());
+  return String(candidate || '').trim();
+}
+
+function buildLinkPagina(lead = {}) {
+  const slug = resolveSampleSlug(lead);
+  if (!slug) return '';
+  return `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
+}
+
 function replacePlaceholders(template, lead) {
   if (!template) return '';
   const telFromLead = cleanLeadPhone(lead?.telefono);
@@ -53,11 +78,18 @@ function replacePlaceholders(template, lead) {
   const telFromJid = isSendableJid(leadJid) ? phoneFromJid(leadJid) : null;
   const tel = telFromLead || telFromJid || '';
   const nameFirst = firstName(lead.nombre || '');
-  return String(template).replace(/\{\{(\w+)\}\}/g, (_, key) => {
+  const linkPagina = buildLinkPagina(lead);
+
+  const resolveKey = (key) => {
     if (key === 'telefono') return tel;
     if (key === 'nombre') return nameFirst;
+    if (key === 'linkPagina' || key === 'link_pagina') return linkPagina;
     return lead[key] ?? '';
-  });
+  };
+
+  return String(template)
+    .replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => resolveKey(key))
+    .replace(/\$\{\s*(\w+)\s*\}/g, (_, key) => resolveKey(key));
 }
 
 // --- helpers de teléfono/JID (MX requiere 521 para móviles con Baileys) ---

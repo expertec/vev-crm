@@ -715,7 +715,11 @@ export async function activateTrial(req, res) {
     const { phone, pin, email, companyInfo } = req.body;
 
     const phoneDigits = normalizarTelefono(phone);
-    const finalPin = pin || generarPIN();
+    const requestedPin = String(pin || '').trim();
+    const requestedPinValid = /^\d{4}$/.test(requestedPin);
+    const panelURL =
+      process.env.CLIENT_PANEL_URL ||
+      'https://negociosweb.mx/cliente-login';
 
     // Buscar si ya existe
     const negociosSnap = await db
@@ -726,6 +730,8 @@ export async function activateTrial(req, res) {
 
     let negocioRef;
     let negocioData;
+    let archivedNegocioData = null;
+    let archivedNegocioId = '';
 
     if (!negociosSnap.empty) {
       negocioRef = negociosSnap.docs[0].ref;
@@ -740,12 +746,36 @@ export async function activateTrial(req, res) {
         });
       }
     } else {
+      const archivedSnap = await db
+        .collection('ArchivoNegocios')
+        .where('leadPhone', '==', phoneDigits)
+        .limit(1)
+        .get();
+      if (!archivedSnap.empty) {
+        archivedNegocioData = archivedSnap.docs[0].data() || {};
+        archivedNegocioId = archivedSnap.docs[0].id;
+      }
+
+      const archivedPin = String(
+        archivedNegocioData?.pin || ''
+      ).trim();
+      const reusedPin = /^\d{4}$/.test(archivedPin)
+        ? archivedPin
+        : '';
+      const finalPin = requestedPinValid
+        ? requestedPin
+        : reusedPin || generarPIN();
+
       // Crear nuevo negocio con trial
       const newData = {
         leadPhone: phoneDigits,
         contactWhatsapp: phoneDigits,
-        contactEmail: email || '',
-        companyInfo: companyInfo || 'Mi Negocio',
+        contactEmail:
+          email || archivedNegocioData?.contactEmail || '',
+        companyInfo:
+          companyInfo ||
+          archivedNegocioData?.companyInfo ||
+          'Mi Negocio',
         pin: finalPin,
         plan: 'trial',
         trialActive: true,
@@ -758,6 +788,8 @@ export async function activateTrial(req, res) {
         updatedAt: Timestamp.now(),
         status: 'Sin procesar',
         websiteArchived: false,
+        archivedSourceId: archivedNegocioId || null,
+        reactivatedFromArchive: !!archivedNegocioData,
       };
 
       const docRef = await db
@@ -765,7 +797,28 @@ export async function activateTrial(req, res) {
         .add(newData);
       negocioRef = docRef;
       negocioData = newData;
+
+      if (archivedNegocioId) {
+        await db
+          .collection('ArchivoNegocios')
+          .doc(archivedNegocioId)
+          .set(
+            {
+              reactivatedAt: Timestamp.now(),
+              reactivatedNegocioId: docRef.id,
+            },
+            { merge: true }
+          )
+          .catch(() => {});
+      }
     }
+
+    const existingPin = String(negocioData?.pin || '').trim();
+    const finalPin = requestedPinValid
+      ? requestedPin
+      : /^\d{4}$/.test(existingPin)
+      ? existingPin
+      : generarPIN();
 
     // Activar trial
     await negocioRef.update({
@@ -790,16 +843,10 @@ export async function activateTrial(req, res) {
       {
         type: 'texto',
         contenido:
-          `🎁 ¡Prueba Gratuita Activada!\n\n` +
-          `⏰ Válida por 24 horas\n` +
-          `📱 Teléfono: ${phoneDigits}\n` +
-          `🔐 PIN: ${finalPin}\n\n` +
-          `🌐 Accede a tu panel:\n` +
-          `${
-            process.env.CLIENT_PANEL_URL ||
-            'https://negociosweb.mx/cliente-login'
-          }\n\n` +
-          `¡Aprovecha para personalizar tu sitio!`,
+          `✅ ¡Listo! Tu muestra gratuita está en camino.\n\n` +
+          `Te comparto los datos de acceso:\n\n` +
+          `📱 Tel: ${phoneDigits} 🔐 PIN: ${finalPin} 🌐 Panel: ${panelURL}\n\n` +
+          `⏰ Activa por 24 horas.`,
       }
     );
 

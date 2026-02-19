@@ -238,6 +238,56 @@ async function uploadBase64Image({
   }
 }
 
+async function getOpenAI() {
+  if (!process.env.OPENAI_API_KEY)
+    throw new Error('Falta OPENAI_API_KEY');
+
+  try {
+    const client = new OpenAICtor({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+    const hasChatCompletions =
+      !!client?.chat?.completions?.create;
+    if (hasChatCompletions)
+      return { client, mode: 'v4-chat' };
+  } catch {
+    /* noop */
+  }
+
+  const { Configuration, OpenAIApi } =
+    await import('openai');
+  const configuration = new Configuration({
+    apiKey: process.env.OPENAI_API_KEY,
+  });
+  const client = new OpenAIApi(configuration);
+  return { client, mode: 'v3' };
+}
+
+function extractText(resp, mode) {
+  try {
+    if (mode === 'v4-chat') {
+      return (
+        resp?.choices?.[0]?.message?.content?.trim() ||
+        ''
+      );
+    }
+    if (mode === 'v4-resp') {
+      return (
+        resp?.output_text?.trim?.() ||
+        resp?.output?.[0]?.content?.[0]?.text
+          ?.trim?.() ||
+        ''
+      );
+    }
+    return (
+      resp?.data?.choices?.[0]?.message?.content?.trim() ||
+      ''
+    );
+  } catch {
+    return '';
+  }
+}
+
 async function chatCompletionCompat({
   model,
   messages,
@@ -370,6 +420,328 @@ function pickOpportunityTriplet(giroHumano = '') {
     ];
   }
   return common;
+}
+
+function normalizeFold(text = '') {
+  return String(text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function uniqueClean(items = []) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const clean = String(item || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
+}
+
+function formatTriplet(items = []) {
+  const top = uniqueClean(items).slice(0, 3);
+  return top
+    .map((line, i) => `${i + 1}) ${line}`)
+    .join('\n');
+}
+
+function parseRecommendations(raw = '') {
+  const txt = String(raw || '').replace(/\r/g, '\n').trim();
+  if (!txt) return [];
+
+  let lines = txt
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  if (lines.length < 3) {
+    lines = txt
+      .split(/(?:\n|;\s+|\.\s+)/g)
+      .map((l) => l.trim())
+      .filter(Boolean);
+  }
+
+  return uniqueClean(
+    lines.map((line) =>
+      line
+        .replace(/^\s*\d+\s*[.)-]?\s*/, '')
+        .replace(/^\s*[-*•]+\s*/, '')
+        .trim()
+    )
+  ).slice(0, 3);
+}
+
+async function buildAfterFormRecommendations({
+  summary = {},
+  giroHumano = 'negocio',
+  fallbackTriplet = [],
+}) {
+  const probe = normalizeFold(
+    [
+      summary?.companyName,
+      summary?.name,
+      summary?.description,
+      summary?.businessStory,
+      summary?.templateId,
+      giroHumano,
+    ]
+      .filter(Boolean)
+      .join(' ')
+  );
+  let sectorClassified = giroHumano || 'negocio';
+  if (/(restaurante|comida|cafeteria|pizza|taquer|bar)/.test(probe)) {
+    sectorClassified = 'restaurante';
+  } else if (/(spa|belleza|barber|estetica|unas)/.test(probe)) {
+    sectorClassified = 'spa y belleza';
+  } else if (/(clinica|salud|dent|medic|terapia|psicolog)/.test(probe)) {
+    sectorClassified = 'clinica/salud';
+  } else if (/(inmobili|bienes raices|departament|casa|renta|venta)/.test(probe)) {
+    sectorClassified = 'inmobiliaria';
+  } else if (/(tienda|ecommerce|producto|catalogo|ropa|boutique)/.test(probe)) {
+    sectorClassified = 'tienda online';
+  } else if (/(curso|academ|escuela|clase|capacitacion|taller)/.test(probe)) {
+    sectorClassified = 'escuela/cursos';
+  } else if (/(abogad|conta|consultor|agencia|marketing|diseno)/.test(probe)) {
+    sectorClassified = 'servicios profesionales';
+  } else if (/(booking|reserva|agenda|cita)/.test(probe)) {
+    sectorClassified = 'servicios con reservas';
+  }
+
+  const templateId = String(
+    summary?.templateId || ''
+  ).toLowerCase();
+  const keyItems = Array.isArray(summary?.keyItems)
+    ? summary.keyItems
+        .map((x) => String(x || '').trim())
+        .filter(Boolean)
+        .slice(0, 4)
+    : [];
+  const sectorNorm = normalizeFold(sectorClassified);
+
+  const personalized = [];
+
+  if (keyItems[0]) {
+    personalized.push(
+      `Destaca "${keyItems[0]}" en portada con beneficio claro y CTA a WhatsApp`
+    );
+  }
+  if (keyItems[1]) {
+    personalized.push(
+      `Crea bloque específico para "${keyItems[1]}" con precio base y tiempos`
+    );
+  }
+
+  if (/(restaurante|cafeteria|bar)/.test(sectorNorm)) {
+    personalized.push(
+      'Menu y precios visibles desde el primer scroll con fotos reales'
+    );
+    personalized.push(
+      'Boton fijo para pedir o reservar por WhatsApp en todo momento'
+    );
+    personalized.push(
+      'Horarios, ubicacion y mapa accesibles sin navegar varias secciones'
+    );
+  } else if (
+    /(clinica|salud|dent|medic|terapia)/.test(
+      sectorNorm
+    )
+  ) {
+    personalized.push(
+      'Explica cada servicio con sintomas que resuelve y rango de precio'
+    );
+    personalized.push(
+      'Agenda por WhatsApp en 1 paso con horarios disponibles'
+    );
+    personalized.push(
+      'Refuerza confianza con credenciales, reseñas y protocolos visibles'
+    );
+  } else if (
+    /(spa|belleza|barber|estetica)/.test(sectorNorm)
+  ) {
+    personalized.push(
+      'Galeria antes/despues con resultados reales y servicios destacados'
+    );
+    personalized.push(
+      'Reservacion rapida por WhatsApp con promos de primera visita'
+    );
+    personalized.push(
+      'Muestra paquetes, duracion y cuidados posteriores por servicio'
+    );
+  } else if (
+    /(tienda online|ecommerce|tienda de ropa|retail)/.test(
+      sectorNorm
+    )
+  ) {
+    personalized.push(
+      'Categorias simples para encontrar productos en menos clics'
+    );
+    personalized.push(
+      'Incluye envios, cambios y metodos de pago antes de comprar'
+    );
+    personalized.push(
+      'Productos estrella con prueba social y CTA de compra/WhatsApp'
+    );
+  } else if (
+    /(inmobiliaria|bienes raices|propiedad)/.test(
+      sectorNorm
+    )
+  ) {
+    personalized.push(
+      'Fichas por propiedad con precio, zona, metraje y fotos reales'
+    );
+    personalized.push(
+      'Boton para agendar visita por WhatsApp desde cada inmueble'
+    );
+    personalized.push(
+      'Filtros por presupuesto, ubicacion y tipo para reducir friccion'
+    );
+  } else if (
+    /(servicios profesionales|consultor|abogad|conta|marketing)/.test(
+      sectorNorm
+    )
+  ) {
+    personalized.push(
+      'Presenta servicios por resultado esperado, no solo por nombre'
+    );
+    personalized.push(
+      'Incluye casos de exito cortos con metrica de impacto'
+    );
+    personalized.push(
+      'CTA para diagnostico inicial por WhatsApp con respuesta rapida'
+    );
+  } else {
+    personalized.push(
+      'Propuesta de valor clara en portada y llamada a la accion inmediata'
+    );
+    personalized.push(
+      'Bloques cortos por servicio/producto con beneficio y prueba social'
+    );
+    personalized.push(
+      'Contacto por WhatsApp visible en toda la navegacion'
+    );
+  }
+
+  if (templateId === 'ecommerce') {
+    personalized.push(
+      'Checkout simple: pocos pasos, costos claros y pago confiable'
+    );
+  }
+  if (templateId === 'booking') {
+    personalized.push(
+      'Agenda de disponibilidad con confirmacion por WhatsApp automatizada'
+    );
+  }
+
+  const fallback = uniqueClean([
+    ...personalized,
+    ...(Array.isArray(fallbackTriplet)
+      ? fallbackTriplet
+      : []),
+    ...pickOpportunityTriplet(sectorClassified),
+  ]).slice(0, 3);
+  const fallbackText = formatTriplet(fallback);
+
+  if (!process.env.OPENAI_API_KEY) {
+    return {
+      text: fallbackText,
+      source: 'fallback_no_api_key',
+      sector: sectorClassified,
+    };
+  }
+
+  const companyName = String(
+    summary?.companyName ||
+      summary?.name ||
+      'Negocio sin nombre'
+  ).trim();
+  const description = String(
+    summary?.description ||
+      summary?.businessStory ||
+      ''
+  ).trim();
+  const keyItemsText = Array.isArray(summary?.keyItems)
+    ? summary.keyItems
+        .map((x) => String(x || '').trim())
+        .filter(Boolean)
+        .slice(0, 6)
+        .join(', ')
+    : '';
+  try {
+    const raw = await chatCompletionCompat({
+      model:
+        process.env.WEB_AFTER_FORM_GPT_MODEL ||
+        process.env.OPENAI_MODEL ||
+        'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Eres consultor CRO/UX para sitios de negocio local. Devuelve 3 recomendaciones accionables, concretas y utiles para vender mas. Escribe en espanol neutro, en formato numerado 1) 2) 3), sin saludos ni cierre.',
+        },
+        {
+          role: 'user',
+          content: `Genera recomendaciones para una muestra web.
+Negocio: ${companyName}
+Tipo de negocio: ${sectorClassified}
+Template: ${templateId || 'no definido'}
+Descripcion: ${description || 'sin descripcion'}
+Puntos clave: ${keyItemsText || 'sin puntos clave'}
+
+Contexto: Las recomendaciones se enviaran por WhatsApp a un cliente real.
+Necesito recomendaciones faciles de implementar en una landing/muestra.
+
+Devuelve solo los 3 puntos numerados.`,
+        },
+      ],
+      max_tokens: 280,
+      temperature: 0.35,
+    });
+
+    const parsed = parseRecommendations(raw);
+    if (!parsed.length) {
+      return {
+        text: fallbackText,
+        source: 'fallback_empty_gpt',
+        sector: sectorClassified,
+      };
+    }
+
+    const merged = uniqueClean([...parsed, ...fallback]).slice(
+      0,
+      3
+    );
+    return {
+      text: formatTriplet(merged),
+      source: 'gpt',
+      sector: sectorClassified,
+    };
+  } catch (err) {
+    console.error(
+      '[after-form] recomendaciones GPT fallback:',
+      err?.message || err
+    );
+    return {
+      text: fallbackText,
+      source: 'fallback_error_gpt',
+      sector: sectorClassified,
+    };
+  }
+}
+
+function renderMessageTemplate(template = '', vars = {}) {
+  return String(template)
+    .replace(/\\n/g, '\n')
+    .replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key) => {
+      const value = vars[key];
+      return value === undefined || value === null ? '' : String(value);
+    });
 }
 
 // ================ App base ================
@@ -1115,11 +1487,33 @@ app.post('/api/web/after-form', async (req, res) => {
             'CTA visible a WhatsApp',
             'pruebas sociales (reseñas)',
           ];
+    const recomendacionesData =
+      await buildAfterFormRecommendations({
+        summary,
+        giroHumano,
+        fallbackTriplet: [op1, op2, op3],
+      });
+    const recomendacionesGpt = recomendacionesData.text;
 
-    const msg1 = `${
-      nombreCorto ? nombreCorto + ', ' : ''
-    }ya recibí tu formulario. Mi equipo y yo ya estamos trabajando en tu muestra para que quede clara y útil.`;
-    const msg2 = `Platicando con mi equipo, identificamos tres áreas para que tu ${giroHumano} aproveche mejor su web:\n1) ${op1}\n2) ${op2}\n3) ${op3}\nSi te late, las integramos en tu demo y te la comparto.`;
+    const msgVars = {
+      nombre: nombreCorto,
+      nombre_prefix: nombreCorto ? `${nombreCorto}, ` : '',
+      giro: giroHumano,
+      op1,
+      op2,
+      op3,
+      recomendaciones_gpt: recomendacionesGpt,
+    };
+
+    const msg1Template =
+      process.env.WEB_AFTER_FORM_MSG1 ||
+      'mientras generamos tu página, mi equipo analizó tu tipo de negocio y preparó esto para ti:\n{{recomendaciones_gpt}}\n\nEsto es lo que vamos a integrar en tu muestra.';
+    const msg2Template =
+      process.env.WEB_AFTER_FORM_MSG2 ||
+      'Detectamos tres oportunidades para tu {{giro}}:\n1) {{op1}}\n2) {{op2}}\n3) {{op3}}\nSi te parece bien, las aplicamos en tu demo y te la comparto por aquí.';
+
+    const msg1 = renderMessageTemplate(msg1Template, msgVars);
+    const msg2 = renderMessageTemplate(msg2Template, msgVars);
 
     const d1 =
       60_000 + Math.floor(Math.random() * 30_000);
@@ -1146,6 +1540,14 @@ app.post('/api/web/after-form', async (req, res) => {
     await leadRef.set(
       {
         etapa: 'form_submitted',
+        afterFormRecommendations: {
+          source:
+            recomendacionesData.source || 'unknown',
+          sector:
+            recomendacionesData.sector || giroHumano,
+          text: recomendacionesGpt,
+          generatedAt: new Date(),
+        },
         etiquetas:
           admin.firestore.FieldValue.arrayUnion(
             'FormOK'
@@ -1628,6 +2030,7 @@ cron.schedule('0 * * * *', async () => {
       .get();
 
     for (const doc of expiredTrials.docs) {
+      const negocioData = doc.data() || {};
       await doc.ref.update({
         trialActive: false,
         plan: 'expired',
@@ -1639,6 +2042,92 @@ cron.schedule('0 * * * *', async () => {
       console.log(
         `⏰ Trial expirado para negocio: ${doc.id}`
       );
+
+      const rawLeadId = String(
+        negocioData.leadId || ''
+      ).trim();
+      let leadId = /@s\.whatsapp\.net$/i.test(rawLeadId)
+        ? rawLeadId
+        : '';
+
+      if (!leadId) {
+        const phoneSource = String(
+          negocioData.leadPhone ||
+            negocioData.contactWhatsapp ||
+            ''
+        ).trim();
+        const digits = phoneSource.replace(/\D/g, '');
+        if (digits.length >= 10) {
+          leadId = e164ToLeadId(toE164(phoneSource));
+        }
+      }
+
+      let usedTrigger = null;
+      let scheduled = false;
+      const triggerCandidates = [
+        '#etapaLevamiento',
+        'EtapaLevamiento',
+        '#etapalevamiento',
+        'etapaLevamiento',
+        'etapalevamiento',
+      ];
+
+      if (leadId && typeof scheduleSequenceForLead === 'function') {
+        for (const trigger of triggerCandidates) {
+          try {
+            const programmed =
+              await scheduleSequenceForLead(
+                leadId,
+                trigger,
+                new Date()
+              );
+            if (programmed > 0) {
+              usedTrigger = trigger;
+              scheduled = true;
+              break;
+            }
+          } catch (seqErr) {
+            console.warn(
+              `[trial-expired] No se pudo activar '${trigger}' para ${leadId}:`,
+              seqErr?.message || seqErr
+            );
+          }
+        }
+      }
+
+      if (leadId) {
+        const etiquetas = ['NegocioArchivado', '#etapaLevamiento'];
+        if (usedTrigger) etiquetas.push(usedTrigger);
+
+        const leadPatch = {
+          etapa: 'negocio_archivado',
+          archivedNegocioAt: new Date(),
+          archivedNegocioId: doc.id,
+          archivedSequenceTrigger:
+            usedTrigger || '#etapaLevamiento',
+          archivedSequenceScheduled: scheduled,
+          etiquetas:
+            admin.firestore.FieldValue.arrayUnion(
+              ...etiquetas
+            ),
+        };
+        if (scheduled) leadPatch.hasActiveSequences = true;
+
+        await db
+          .collection('leads')
+          .doc(leadId)
+          .set(leadPatch, { merge: true })
+          .catch((err) =>
+            console.warn(
+              `[trial-expired] No se pudo actualizar lead ${leadId}:`,
+              err?.message || err
+            )
+          );
+      } else {
+        console.warn(
+          `[trial-expired] No se pudo resolver lead para negocio ${doc.id}`
+        );
+      }
     }
   } catch (err) {
     console.error(
