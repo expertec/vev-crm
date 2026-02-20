@@ -15,6 +15,7 @@ import { generateCompleteSchema } from './schemaGenerator.js';
 const { FieldValue } = admin.firestore;
 const execFileAsync = promisify(execFile);
 let _chromeReadyState = null; // null=unknown, true=ready, false=failed
+const ENABLE_THUMIO_FALLBACK = process.env.SITE_PREVIEW_THUMIO_FALLBACK !== '0';
 
 // =============== TASK LOCK ===============
 const _taskLocks = new Map();
@@ -167,6 +168,25 @@ async function ensureChromeReadyForPuppeteer() {
   }
 }
 
+function buildThumioCaptureUrl(slug) {
+  const target = `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
+  return `https://image.thum.io/get/width/390/crop/844/noanimate/${target}`;
+}
+
+async function captureSitePreviewBufferViaThumio(slug) {
+  const url = buildThumioCaptureUrl(slug);
+  const resp = await fetch(url, {
+    headers: { 'User-Agent': 'VEVCRM-Preview-Bot/1.0' },
+  });
+  if (!resp.ok) {
+    throw new Error(`thumio status ${resp.status}`);
+  }
+  const arr = await resp.arrayBuffer();
+  const buf = Buffer.from(arr);
+  if (!buf.length) throw new Error('thumio returned empty image');
+  return buf;
+}
+
 async function uploadPreviewToStorage(buffer, slug) {
   const bucket = admin.storage().bucket();
   const safeSlug = normalizeSlug(slug);
@@ -203,7 +223,20 @@ async function ensureSitePreviewForNegocio(negocioId, negocioData = {}) {
   if (!slug) return { ok: false, url: '', path: '', error: 'missing_slug' };
 
   try {
-    const buffer = await captureSitePreviewBuffer(slug);
+    let provider = 'puppeteer';
+    let buffer;
+    try {
+      buffer = await captureSitePreviewBuffer(slug);
+    } catch (primaryErr) {
+      if (!ENABLE_THUMIO_FALLBACK) throw primaryErr;
+      console.warn(
+        `[ensureSitePreviewForNegocio] Puppeteer falló para ${negocioId || slug}, usando thum.io fallback:`,
+        primaryErr?.message || primaryErr
+      );
+      buffer = await captureSitePreviewBufferViaThumio(slug);
+      provider = 'thumio';
+    }
+
     const uploaded = await uploadPreviewToStorage(buffer, slug);
 
     if (negocioId) {
@@ -211,7 +244,9 @@ async function ensureSitePreviewForNegocio(negocioId, negocioData = {}) {
         {
           previewImageUrl: uploaded.url,
           previewImagePath: uploaded.path,
+          previewProvider: provider,
           previewGeneratedAt: Timestamp.now(),
+          previewLastError: FieldValue.delete(),
         },
         { merge: true }
       );
@@ -219,6 +254,15 @@ async function ensureSitePreviewForNegocio(negocioId, negocioData = {}) {
 
     return { ok: true, url: uploaded.url, path: uploaded.path };
   } catch (err) {
+    if (negocioId) {
+      await db.collection('Negocios').doc(negocioId).set(
+        {
+          previewLastAttemptAt: Timestamp.now(),
+          previewLastError: String(err?.message || err),
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
     console.warn(
       `[ensureSitePreviewForNegocio] No se pudo generar preview para ${negocioId || slug}:`,
       err?.message || err
@@ -533,19 +577,33 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
       previewUrl = preview.url || '';
     }
     
-    const delivered = await enviarMensaje(
-      { telefono: e164, nombre: negocio.companyInfo || '' },
-      previewUrl
-        ? {
-            type: 'imagen',
-            contenido: previewUrl,
-            caption: textoSitioListo,
-          }
-        : {
-            type: 'texto',
-            contenido: textoSitioListo,
-          }
-    );
+    let delivered = false;
+    if (previewUrl) {
+      delivered = await enviarMensaje(
+        { telefono: e164, nombre: negocio.companyInfo || '' },
+        {
+          type: 'imagen',
+          contenido: previewUrl,
+          caption: textoSitioListo,
+        }
+      );
+      if (!delivered) {
+        console.warn(
+          `[enviarSitioWebPorWhatsApp] Falló envío de imagen, se intentará texto para ${e164}`
+        );
+      }
+    }
+
+    if (!delivered) {
+      delivered = await enviarMensaje(
+        { telefono: e164, nombre: negocio.companyInfo || '' },
+        {
+          type: 'texto',
+          contenido: textoSitioListo,
+        }
+      );
+    }
+
     if (!delivered) {
       throw new Error('No se pudo entregar mensaje de sitio listo');
     }
