@@ -445,6 +445,25 @@ function uniqueClean(items = []) {
   return out;
 }
 
+function normalizeKeyItems(keyItems = []) {
+  if (!Array.isArray(keyItems)) return [];
+  return keyItems
+    .map((item) => {
+      if (item && typeof item === 'object') {
+        return String(
+          item.label ||
+            item.name ||
+            item.title ||
+            item.text ||
+            item.value ||
+            ''
+        ).trim();
+      }
+      return String(item || '').trim();
+    })
+    .filter(Boolean);
+}
+
 function formatTriplet(items = []) {
   const top = uniqueClean(items).slice(0, 3);
   return top
@@ -517,12 +536,8 @@ async function buildAfterFormRecommendations({
   const templateId = String(
     summary?.templateId || ''
   ).toLowerCase();
-  const keyItems = Array.isArray(summary?.keyItems)
-    ? summary.keyItems
-        .map((x) => String(x || '').trim())
-        .filter(Boolean)
-        .slice(0, 4)
-    : [];
+  const normalizedKeyItems = normalizeKeyItems(summary?.keyItems);
+  const keyItems = normalizedKeyItems.slice(0, 4);
   const sectorNorm = normalizeFold(sectorClassified);
 
   const personalized = [];
@@ -666,13 +681,9 @@ async function buildAfterFormRecommendations({
       summary?.businessStory ||
       ''
   ).trim();
-  const keyItemsText = Array.isArray(summary?.keyItems)
-    ? summary.keyItems
-        .map((x) => String(x || '').trim())
-        .filter(Boolean)
-        .slice(0, 6)
-        .join(', ')
-    : '';
+  const keyItemsText = normalizedKeyItems
+    .slice(0, 6)
+    .join(', ');
   try {
     const raw = await chatCompletionCompat({
       model:
@@ -733,15 +744,6 @@ Devuelve solo los 3 puntos numerados.`,
       sector: sectorClassified,
     };
   }
-}
-
-function renderMessageTemplate(template = '', vars = {}) {
-  return String(template)
-    .replace(/\\n/g, '\n')
-    .replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key) => {
-      const value = vars[key];
-      return value === undefined || value === null ? '' : String(value);
-    });
 }
 
 // ================ App base ================
@@ -1317,8 +1319,6 @@ app.post('/api/web/after-form', async (req, res) => {
         { merge: true }
       );
     }
-    const leadData = (await leadRef.get()).data() || {};
-
     await leadRef.set(
       {
         briefWeb: summary || {},
@@ -1459,13 +1459,6 @@ app.post('/api/web/after-form', async (req, res) => {
       finalSlug = summary.slug || '';
     }
 
-    const first = (v = '') =>
-      String(v).trim().split(/\s+/)[0] || '';
-    const nombreCorto = first(
-      leadData?.nombre ||
-        summary?.contactName ||
-        ''
-    );
     const giroBase = (() => {
       const t = String(
         summary?.templateId || ''
@@ -1479,7 +1472,7 @@ app.post('/api/web/after-form', async (req, res) => {
     const giroHumano = humanizeGiro
       ? humanizeGiro(giroBase)
       : giroBase;
-    const [op1, op2, op3] =
+    const fallbackTriplet =
       pickOpportunityTriplet
         ? pickOpportunityTriplet(giroHumano)
         : [
@@ -1491,70 +1484,45 @@ app.post('/api/web/after-form', async (req, res) => {
       await buildAfterFormRecommendations({
         summary,
         giroHumano,
-        fallbackTriplet: [op1, op2, op3],
+        fallbackTriplet,
       });
     const recomendacionesGpt = recomendacionesData.text;
 
-    const msgVars = {
-      nombre: nombreCorto,
-      nombre_prefix: nombreCorto ? `${nombreCorto}, ` : '',
-      giro: giroHumano,
-      op1,
-      op2,
-      op3,
-      recomendaciones_gpt: recomendacionesGpt,
+    const afterFormRecommendations = {
+      source:
+        recomendacionesData.source || 'unknown',
+      sector:
+        recomendacionesData.sector || giroHumano,
+      text: recomendacionesGpt,
+      generatedAt: new Date(),
     };
 
-    const msg1Template =
-      process.env.WEB_AFTER_FORM_MSG1 ||
-      'mientras generamos tu página, mi equipo analizó tu tipo de negocio y preparó esto para ti:\n{{recomendaciones_gpt}}\n\nEsto es lo que vamos a integrar en tu muestra.';
-    const msg2Template =
-      process.env.WEB_AFTER_FORM_MSG2 ||
-      'Detectamos tres oportunidades para tu {{giro}}:\n1) {{op1}}\n2) {{op2}}\n3) {{op3}}\nSi te parece bien, las aplicamos en tu demo y te la comparto por aquí.';
-
-    const msg1 = renderMessageTemplate(msg1Template, msgVars);
-    const msg2 = renderMessageTemplate(msg2Template, msgVars);
-
-    const d1 =
-      60_000 + Math.floor(Math.random() * 30_000);
-    const d2 =
-      115_000 + Math.floor(Math.random() * 65_000);
-
-    setTimeout(
-      () =>
-        sendMessageToLead(
-          leadPhoneDigits,
-          msg1
-        ).catch(console.error),
-      d1
-    );
-    setTimeout(
-      () =>
-        sendMessageToLead(
-          leadPhoneDigits,
-          msg2
-        ).catch(console.error),
-      d2
-    );
-
-    await leadRef.set(
-      {
-        etapa: 'form_submitted',
-        afterFormRecommendations: {
-          source:
-            recomendacionesData.source || 'unknown',
-          sector:
-            recomendacionesData.sector || giroHumano,
-          text: recomendacionesGpt,
-          generatedAt: new Date(),
+    const writes = [
+      leadRef.set(
+        {
+          etapa: 'form_submitted',
+          afterFormRecommendations,
+          etiquetas:
+            admin.firestore.FieldValue.arrayUnion(
+              'FormOK'
+            ),
         },
-        etiquetas:
-          admin.firestore.FieldValue.arrayUnion(
-            'FormOK'
-          ),
-      },
-      { merge: true }
-    );
+        { merge: true }
+      ),
+    ];
+
+    if (negocioDocId) {
+      writes.push(
+        db.collection('Negocios')
+          .doc(negocioDocId)
+          .set(
+            { afterFormRecommendations },
+            { merge: true }
+          )
+      );
+    }
+
+    await Promise.all(writes);
 
     return res.json({
       ok: true,
@@ -1591,6 +1559,19 @@ app.post('/api/web/sample-sent', async (req, res) => {
       return res.status(500).json({
         error:
           'scheduleSequenceForLead no disponible',
+      });
+    }
+
+    if (cancelSequences) {
+      await cancelSequences(finalLeadId, [
+        'LeadWhatsapp',
+        'NuevoLeadWeb',
+        'LeadWeb',
+      ]).catch((err) => {
+        console.warn(
+          '[sample-sent] cancelSequences:',
+          err?.message || err
+        );
       });
     }
 

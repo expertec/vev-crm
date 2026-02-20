@@ -375,6 +375,232 @@ function replacePlaceholders(template, leadData) {
     .replace(/\$\{\s*(\w+)\s*\}/g, (_, field) => resolveField(field));
 }
 
+function normalizeFold(text = '') {
+  return String(text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function uniqueClean(items = []) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const clean = String(item || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
+}
+
+function formatTriplet(items = []) {
+  return uniqueClean(items)
+    .slice(0, 3)
+    .map((line, i) => `${i + 1}) ${line}`)
+    .join('\n');
+}
+
+function parseRecommendationTriplet(raw = '') {
+  const txt = String(raw || '').replace(/\r/g, '\n').trim();
+  if (!txt) return [];
+
+  let lines = txt
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length < 3) {
+    lines = txt
+      .split(/(?:\n|;\s+|\.\s+)/g)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  return uniqueClean(
+    lines.map((line) =>
+      line
+        .replace(/^\s*\d+\s*[.)-]?\s*/, '')
+        .replace(/^\s*[-*•]+\s*/, '')
+        .trim()
+    )
+  ).slice(0, 3);
+}
+
+function normalizeKeyItems(keyItems = []) {
+  if (!Array.isArray(keyItems)) return [];
+  return keyItems
+    .map((item) => {
+      if (item && typeof item === 'object') {
+        return String(
+          item.label ||
+            item.name ||
+            item.title ||
+            item.text ||
+            item.value ||
+            ''
+        ).trim();
+      }
+      return String(item || '').trim();
+    })
+    .filter(Boolean);
+}
+
+function inferBusinessCategory(negocio = {}) {
+  const templateId = String(
+    negocio?.templateId ||
+      negocio?.schema?.templateId ||
+      negocio?.briefWeb?.templateId ||
+      ''
+  ).toLowerCase();
+  const probe = normalizeFold(
+    [
+      negocio?.businessSector,
+      negocio?.companyInfo,
+      negocio?.businessStory,
+      negocio?.afterFormRecommendations?.sector,
+      templateId,
+    ]
+      .filter(Boolean)
+      .join(' ')
+  );
+
+  if (templateId === 'ecommerce' || /(tienda|ecommerce|producto|catalogo|boutique|retail)/.test(probe)) {
+    return 'tienda online';
+  }
+  if (templateId === 'booking' || /(reserva|agenda|cita|turno)/.test(probe)) {
+    return 'servicios con reservas';
+  }
+  if (/(restaurante|comida|cafeter|pizza|taquer|bar)/.test(probe)) {
+    return 'restaurante';
+  }
+  if (/(clinica|salud|dent|medic|terapia|psicolog)/.test(probe)) {
+    return 'clinica/salud';
+  }
+  if (/(spa|belleza|barber|estetica|salon)/.test(probe)) {
+    return 'spa y belleza';
+  }
+  if (/(inmobili|bienes raices|departament|casa|renta|venta)/.test(probe)) {
+    return 'inmobiliaria';
+  }
+  if (/(abogad|conta|consultor|agencia|marketing|diseno)/.test(probe)) {
+    return 'servicios profesionales';
+  }
+  return 'negocio';
+}
+
+function pickOpportunityTripletByCategory(category = 'negocio') {
+  const base = normalizeFold(category);
+  if (/(tienda online|ecommerce|retail)/.test(base)) {
+    return [
+      'Ordena productos por categorías simples para encontrar rápido',
+      'Destaca productos estrella con precio y CTA directo a WhatsApp',
+      'Aclara envíos, cambios y formas de pago desde el inicio',
+    ];
+  }
+  if (/(restaurante|cafeter|bar)/.test(base)) {
+    return [
+      'Muestra menú y precios desde el primer scroll',
+      'Activa botón fijo para pedir o reservar por WhatsApp',
+      'Horarios y ubicación visibles sin navegar varias secciones',
+    ];
+  }
+  if (/(clinica|salud|dent|medic|terapia)/.test(base)) {
+    return [
+      'Explica servicios por problema que resuelven y precio base',
+      'Agenda por WhatsApp en un solo paso',
+      'Refuerza confianza con testimonios y credenciales visibles',
+    ];
+  }
+  if (/(spa|belleza|barber|estetica)/.test(base)) {
+    return [
+      'Publica resultados reales en galería antes/después',
+      'Permite reservar por WhatsApp con horario visible',
+      'Aclara paquetes, duración y cuidados por servicio',
+    ];
+  }
+  if (/(servicios con reservas|booking)/.test(base)) {
+    return [
+      'Define servicios con duración, precio base y disponibilidad',
+      'Reduce pasos para agendar por WhatsApp',
+      'Confirma beneficios de reservar con respuestas rápidas',
+    ];
+  }
+  if (/(inmobiliaria|bienes raices)/.test(base)) {
+    return [
+      'Muestra propiedades con precio, zona y fotos reales',
+      'Facilita agendar visita por WhatsApp desde cada inmueble',
+      'Agrega filtros básicos para encontrar opciones en menos tiempo',
+    ];
+  }
+  if (/(servicios profesionales|consultor|abogad|conta|marketing)/.test(base)) {
+    return [
+      'Presenta cada servicio por resultado esperado',
+      'Incluye casos de éxito con datos concretos',
+      'CTA visible para diagnóstico inicial por WhatsApp',
+    ];
+  }
+  return [
+    'Define una propuesta de valor clara en portada',
+    'Muestra servicios con beneficios y precio de referencia',
+    'Mantén WhatsApp visible en toda la navegación',
+  ];
+}
+
+function buildFallbackOpportunityTriplet(negocio = {}) {
+  const category = inferBusinessCategory(negocio);
+  const keyItems = normalizeKeyItems(
+    negocio?.keyItems ||
+      negocio?.schema?.keyItems ||
+      negocio?.briefWeb?.keyItems ||
+      []
+  );
+  const custom = [];
+  if (keyItems[0]) {
+    custom.push(
+      `Destaca "${keyItems[0]}" en portada con beneficio claro y CTA a WhatsApp`
+    );
+  }
+  if (keyItems[1]) {
+    custom.push(
+      `Crea bloque específico para "${keyItems[1]}" con precio base y tiempos`
+    );
+  }
+  return uniqueClean([
+    ...custom,
+    ...pickOpportunityTripletByCategory(category),
+  ]).slice(0, 3);
+}
+
+function buildAreasOportunidadMessage(negocio = {}) {
+  const parsed = parseRecommendationTriplet(
+    negocio?.afterFormRecommendations?.text || ''
+  );
+  const triplet =
+    parsed.length >= 3
+      ? parsed
+      : buildFallbackOpportunityTriplet(negocio);
+  const tripletText = formatTriplet(triplet);
+  if (!tripletText) {
+    return { text: '', source: 'empty', tripletText: '' };
+  }
+  const message =
+    `Mientras revisas tu muestra, identificamos 3 áreas de oportunidad para tu negocio con base en lo que nos compartiste:\n` +
+    `${tripletText}`;
+  return {
+    text: message,
+    source:
+      parsed.length >= 3
+        ? negocio?.afterFormRecommendations?.source || 'stored_recommendations'
+        : 'fallback_local',
+    tripletText,
+  };
+}
+
 // =============== GENERACIÓN DE SCHEMAS ===============
 
 /**
@@ -610,11 +836,41 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
     
     console.log(`✅ WhatsApp enviado a ${e164}: ${sitioUrl}`);
 
+    if (!negocio?.opportunitiesSentAt) {
+      const oportunidades = buildAreasOportunidadMessage(negocio);
+      if (oportunidades.text) {
+        const sentOportunidades = await enviarMensaje(
+          { telefono: e164, nombre: negocio.companyInfo || '' },
+          {
+            type: 'texto',
+            contenido: oportunidades.text,
+          }
+        );
+        if (sentOportunidades && negocio?.id) {
+          await db.collection('Negocios').doc(negocio.id).set(
+            {
+              opportunitiesSentAt: FieldValue.serverTimestamp(),
+              opportunitiesSource: oportunidades.source,
+              opportunitiesText: oportunidades.tripletText,
+            },
+            { merge: true }
+          ).catch(() => {});
+        } else if (!sentOportunidades) {
+          console.warn(
+            `[enviarSitioWebPorWhatsApp] No se pudo enviar áreas de oportunidad a ${e164}`
+          );
+        }
+      }
+    }
+
     // Activar secuencia WebEnviada
     try {
       const leadId = jid;
       if (typeof Q.cancelSequences === 'function') {
-        await Q.cancelSequences(leadId, ['NuevoLeadWeb', 'LeadWeb']).catch(() => {});
+        await Q.cancelSequences(
+          leadId,
+          ['LeadWhatsapp', 'NuevoLeadWeb', 'LeadWeb']
+        ).catch(() => {});
       }
       if (typeof Q.scheduleSequenceForLead === 'function') {
         await Q.scheduleSequenceForLead(leadId, 'WebEnviada', new Date()).catch(() => {});
