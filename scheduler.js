@@ -6,11 +6,15 @@ import { getWhatsAppSock } from './whatsappService.js';
 import { Timestamp } from 'firebase-admin/firestore';
 import * as Q from './queue.js';
 import puppeteer from 'puppeteer';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 // ⭐ IMPORTAR EL NUEVO GENERADOR
 import { generateCompleteSchema } from './schemaGenerator.js';
 
 const { FieldValue } = admin.firestore;
+const execFileAsync = promisify(execFile);
+let _chromeReadyState = null; // null=unknown, true=ready, false=failed
 
 // =============== TASK LOCK ===============
 const _taskLocks = new Map();
@@ -97,6 +101,7 @@ function normalizeSlug(value = '') {
 
 async function captureSitePreviewBuffer(slug) {
   const url = `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
+  await ensureChromeReadyForPuppeteer();
   const browser = await puppeteer.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -113,6 +118,52 @@ async function captureSitePreviewBuffer(slug) {
     });
   } finally {
     await browser.close().catch(() => {});
+  }
+}
+
+async function ensureChromeReadyForPuppeteer() {
+  if (_chromeReadyState === true) return;
+  if (_chromeReadyState === false) {
+    throw new Error(
+      'Chrome no disponible para Puppeteer (ensure failed previously)'
+    );
+  }
+
+  try {
+    const existingPath = puppeteer.executablePath();
+    if (existingPath) {
+      _chromeReadyState = true;
+      return;
+    }
+  } catch {
+    /* noop */
+  }
+
+  // Fallback: instalación en caliente (útil cuando Render no descargó Chrome en build)
+  try {
+    console.log('[preview] Instalando Chrome para Puppeteer...');
+    await execFileAsync(
+      'npx',
+      ['puppeteer', 'browsers', 'install', 'chrome'],
+      {
+        timeout: 300_000,
+        env: {
+          ...process.env,
+          PUPPETEER_CACHE_DIR:
+            process.env.PUPPETEER_CACHE_DIR ||
+            '/opt/render/.cache/puppeteer',
+        },
+      }
+    );
+    _chromeReadyState = true;
+    console.log('[preview] Chrome instalado para Puppeteer');
+  } catch (err) {
+    _chromeReadyState = false;
+    throw new Error(
+      `No se pudo instalar Chrome para Puppeteer: ${
+        err?.message || err
+      }`
+    );
   }
 }
 
