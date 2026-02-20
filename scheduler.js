@@ -246,6 +246,30 @@ export async function generateSiteSchemas() {
         console.log(`   💾 Schema guardado en Firebase para: ${id}`);
         console.log(`   🌐 URL del sitio: https://negociosweb.mx/site/${data.slug}`);
 
+        // Envío inmediato al quedar "Procesado" (sin esperar al cron)
+        const sentNow = await enviarSitioWebPorWhatsApp({
+          ...data,
+          schema,
+          status: 'Procesado',
+        });
+        if (sentNow) {
+          await db.collection('Negocios').doc(id).set({
+            status: 'Web enviada',
+            siteSentAt: FieldValue.serverTimestamp(),
+            siteReadyAt: FieldValue.delete(),
+            siteScheduleSetAt: FieldValue.delete(),
+            siteSendMode: 'immediate',
+          }, { merge: true });
+          console.log(`   ⚡ Sitio enviado al instante para: ${id}`);
+        } else {
+          await db.collection('Negocios').doc(id).set({
+            siteSendMode: 'immediate',
+            siteSendPending: true,
+            siteSendLastAttemptAt: Timestamp.now(),
+          }, { merge: true });
+          console.warn(`   ⚠️ Envío inmediato falló para ${id}; queda para reintento por cron.`);
+        }
+
       } catch (err) {
         console.error(`❌ Error procesando negocio ${id}:`, err?.message || err);
         
@@ -266,19 +290,20 @@ export async function generateSiteSchemas() {
 export async function enviarMensaje(lead, mensaje) {
   try {
     const sock = getWhatsAppSock();
-    if (!sock) return;
+    if (!sock) return false;
 
     const { jid, phone } = Q.resolveLeadJidAndPhone(lead);
     if (!jid) {
       console.warn('[enviarMensaje] No se pudo resolver JID para lead', lead?.id || lead?.telefono);
-      return;
+      return false;
     }
 
     switch ((mensaje?.type || 'texto').toLowerCase()) {
       case 'texto': {
         const text = replacePlaceholders(mensaje.contenido, lead).trim();
-        if (text) await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
-        break;
+        if (!text) return false;
+        await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
+        return true;
       }
       case 'formulario': {
         const raw = String(mensaje.contenido || '');
@@ -287,31 +312,35 @@ export async function enviarMensaje(lead, mensaje) {
           .replace('{{nombre}}', encodeURIComponent(lead.nombre || ''))
           .replace(/\r?\n/g, ' ')
           .trim();
-        if (text) await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
-        break;
+        if (!text) return false;
+        await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
+        return true;
       }
       case 'audio': {
         const audioUrl = replacePlaceholders(mensaje.contenido, lead).trim();
-        if (audioUrl) {
-          await sock.sendMessage(jid, { audio: { url: audioUrl }, ptt: true });
-        }
-        break;
+        if (!audioUrl) return false;
+        await sock.sendMessage(jid, { audio: { url: audioUrl }, ptt: true });
+        return true;
       }
       case 'imagen': {
         const url = replacePlaceholders(mensaje.contenido, lead).trim();
-        if (url) await sock.sendMessage(jid, { image: { url } });
-        break;
+        if (!url) return false;
+        await sock.sendMessage(jid, { image: { url } });
+        return true;
       }
       case 'video': {
         const url = replacePlaceholders(mensaje.contenido, lead).trim();
-        if (url) await sock.sendMessage(jid, { video: { url } }, { timeoutMs: 120_000 });
-        break;
+        if (!url) return false;
+        await sock.sendMessage(jid, { video: { url } }, { timeoutMs: 120_000 });
+        return true;
       }
       default:
         console.warn('Tipo desconocido:', mensaje?.type);
+        return false;
     }
   } catch (err) {
     console.error('Error al enviar mensaje:', err);
+    return false;
   }
 }
 
@@ -324,7 +353,7 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
       leadPhone: phoneRaw,
       slug
     });
-    return;
+    return false;
   }
 
   const e164 = toE164(phoneRaw);
@@ -335,13 +364,16 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
   try {
     console.log(`📤 [ENVIANDO WHATSAPP] A: ${e164} | URL: ${sitioUrl}`);
     
-    await enviarMensaje(
+    const delivered = await enviarMensaje(
       { telefono: e164, nombre: negocio.companyInfo || '' },
       { 
         type: 'texto', 
         contenido: `¡tu página está lista! 🎉 Chécala aquí: ${linkPagina} Baja para que veas todas las secciones: inicio, servicios, testimonios, contacto y el botón de WhatsApp.` 
       }
     );
+    if (!delivered) {
+      throw new Error('No se pudo entregar mensaje de sitio listo');
+    }
     
     console.log(`✅ WhatsApp enviado a ${e164}: ${sitioUrl}`);
 
@@ -363,17 +395,19 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
     } catch (seqErr) {
       console.warn('[enviarSitioWebPorWhatsApp] No se pudo activar secuencias:', seqErr?.message);
     }
+    return true;
   } catch (err) {
     console.error(`❌ Error enviando WhatsApp a ${e164}:`, err);
+    return false;
   }
 }
 
 /**
- * Busca negocios "Procesado" y los envía con retraso realista (15-25 min)
+ * Fallback: busca negocios "Procesado" que no se pudieron enviar al instante
  */
 export async function enviarSitiosPendientes() {
   return withTaskLock('enviarSitiosPendientes', 30, async () => {
-    console.log('⏳ Buscando negocios procesados para enviar sitio web...');
+    console.log('⏳ Buscando negocios procesados pendientes de envío...');
     
     const snap = await db.collection('Negocios')
       .where('status', '==', 'Procesado')
@@ -381,49 +415,33 @@ export async function enviarSitiosPendientes() {
     
     console.log(`📋 Encontrados: ${snap.size} negocios procesados`);
 
-    const nowMs = Date.now();
-
     for (const doc of snap.docs) {
       const data = doc.data();
-      const hasReady = !!data.siteReadyAt;
-      const readyMs = data.siteReadyAt?.toMillis?.() ?? null;
-
-      // 1) Si NO tiene siteReadyAt, programarlo a +15–25 min
-      if (!hasReady) {
-        const jitter = Math.floor(Math.random() * (10 * 60 * 1000)); // 0-10 min
-        const target = nowMs + (15 * 60 * 1000) + jitter; // 15-25 min
-        
-        await doc.ref.update({
-          siteReadyAt: Timestamp.fromMillis(target),
-          siteScheduleSetAt: FieldValue.serverTimestamp()
-        });
-        
-        console.log(`⏰ Programado siteReadyAt para ${doc.id} en ${new Date(target).toISOString()}`);
-        continue;
-      }
-
-      // 2) Si tiene siteReadyAt pero aún no llega, omitir
-      if (readyMs && readyMs > nowMs) {
-        console.log(`⏸️ ${doc.id} aún no alcanza siteReadyAt (${new Date(readyMs).toISOString()})`);
-        continue;
-      }
-
-      // 3) Ya es hora: enviar
       console.log(`\n📤 Enviando sitio para negocio: ${doc.id}`, {
         leadPhone: data.leadPhone,
         slug: data.slug,
         status: data.status
       });
 
-      await enviarSitioWebPorWhatsApp(data);
-
-      // 4) Marcar como enviado
-      await doc.ref.update({
-        status: 'Web enviada',
-        siteSentAt: FieldValue.serverTimestamp()
-      });
-      
-      console.log(`✅ Sitio enviado y marcado como "Web enviada"`);
+      const sent = await enviarSitioWebPorWhatsApp(data);
+      if (sent) {
+        await doc.ref.set({
+          status: 'Web enviada',
+          siteSentAt: FieldValue.serverTimestamp(),
+          siteSendPending: false,
+          siteSendLastAttemptAt: Timestamp.now(),
+          siteSendLastError: FieldValue.delete(),
+        }, { merge: true });
+        
+        console.log(`✅ Sitio enviado y marcado como "Web enviada"`);
+      } else {
+        await doc.ref.set({
+          siteSendPending: true,
+          siteSendLastAttemptAt: Timestamp.now(),
+          siteSendLastError: 'send_failed',
+        }, { merge: true });
+        console.warn(`⚠️ Reintento fallido para negocio ${doc.id}; seguirá pendiente.`);
+      }
     }
 
     return snap.size;

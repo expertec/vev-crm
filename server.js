@@ -1990,7 +1990,7 @@ cron.schedule('* * * * *', () => {
   );
 });
 
-cron.schedule('*/5 * * * *', () => {
+cron.schedule('*/15 * * * *', () => {
   console.log(
     '⏱️ enviarSitiosPendientes:',
     new Date().toISOString()
