@@ -5,6 +5,7 @@ import { db } from './firebaseAdmin.js';
 import { getWhatsAppSock } from './whatsappService.js';
 import { Timestamp } from 'firebase-admin/firestore';
 import * as Q from './queue.js';
+import puppeteer from 'puppeteer';
 
 // ⭐ IMPORTAR EL NUEVO GENERADOR
 import { generateCompleteSchema } from './schemaGenerator.js';
@@ -83,6 +84,96 @@ function buildLinkPagina(leadData = {}) {
   const slug = resolveSampleSlug(leadData);
   if (!slug) return '';
   return `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
+}
+
+function normalizeSlug(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'site';
+}
+
+async function captureSitePreviewBuffer(slug) {
+  const url = `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 390, height: 844, isMobile: true, deviceScaleFactor: 2 });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60_000 });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    return await page.screenshot({
+      type: 'jpeg',
+      quality: 78,
+      fullPage: false,
+    });
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+async function uploadPreviewToStorage(buffer, slug) {
+  const bucket = admin.storage().bucket();
+  const safeSlug = normalizeSlug(slug);
+  const filePath = `site-previews/${safeSlug}/mobile_${Date.now()}.jpg`;
+  const file = bucket.file(filePath);
+
+  await file.save(buffer, {
+    contentType: 'image/jpeg',
+    metadata: { cacheControl: 'public,max-age=31536000' },
+    resumable: false,
+    validation: false,
+  });
+
+  try {
+    await file.makePublic();
+    return {
+      path: filePath,
+      url: `https://storage.googleapis.com/${bucket.name}/${filePath}`,
+    };
+  } catch {
+    const [signedUrl] = await file.getSignedUrl({
+      action: 'read',
+      expires: '2100-01-01',
+    });
+    return { path: filePath, url: signedUrl };
+  }
+}
+
+async function ensureSitePreviewForNegocio(negocioId, negocioData = {}) {
+  const currentUrl = String(negocioData?.previewImageUrl || '').trim();
+  if (currentUrl) return { ok: true, url: currentUrl, path: String(negocioData?.previewImagePath || '') };
+
+  const slug = resolveSampleSlug(negocioData);
+  if (!slug) return { ok: false, url: '', path: '', error: 'missing_slug' };
+
+  try {
+    const buffer = await captureSitePreviewBuffer(slug);
+    const uploaded = await uploadPreviewToStorage(buffer, slug);
+
+    if (negocioId) {
+      await db.collection('Negocios').doc(negocioId).set(
+        {
+          previewImageUrl: uploaded.url,
+          previewImagePath: uploaded.path,
+          previewGeneratedAt: Timestamp.now(),
+        },
+        { merge: true }
+      );
+    }
+
+    return { ok: true, url: uploaded.url, path: uploaded.path };
+  } catch (err) {
+    console.warn(
+      `[ensureSitePreviewForNegocio] No se pudo generar preview para ${negocioId || slug}:`,
+      err?.message || err
+    );
+    return { ok: false, url: '', path: '', error: String(err?.message || err) };
+  }
 }
 
 function resolveLeadIdFromNegocio(data = {}) {
@@ -246,10 +337,23 @@ export async function generateSiteSchemas() {
         console.log(`   💾 Schema guardado en Firebase para: ${id}`);
         console.log(`   🌐 URL del sitio: https://negociosweb.mx/site/${data.slug}`);
 
-        // Envío inmediato al quedar "Procesado" (sin esperar al cron)
-        const sentNow = await enviarSitioWebPorWhatsApp({
+        const preview = await ensureSitePreviewForNegocio(id, {
           ...data,
           schema,
+        });
+        if (preview.ok && preview.url) {
+          console.log(`   🖼️ Preview generado para ${id}`);
+        } else {
+          console.warn(`   ⚠️ No se pudo generar preview para ${id}; se enviará sin imagen.`);
+        }
+
+        // Envío inmediato al quedar "Procesado" (sin esperar al cron)
+        const sentNow = await enviarSitioWebPorWhatsApp({
+          id,
+          ...data,
+          schema,
+          previewImageUrl: preview.url || data.previewImageUrl || '',
+          previewImagePath: preview.path || data.previewImagePath || '',
           status: 'Procesado',
         });
         if (sentNow) {
@@ -325,7 +429,11 @@ export async function enviarMensaje(lead, mensaje) {
       case 'imagen': {
         const url = replacePlaceholders(mensaje.contenido, lead).trim();
         if (!url) return false;
-        await sock.sendMessage(jid, { image: { url } });
+        const caption = replacePlaceholders(mensaje.caption || '', lead).trim();
+        await sock.sendMessage(
+          jid,
+          caption ? { image: { url }, caption } : { image: { url } }
+        );
         return true;
       }
       case 'video': {
@@ -360,16 +468,32 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
   const jid = e164ToJid(e164);
   const sitioUrl = `https://negociosweb.mx/site/${slug}`;
   const linkPagina = sitioUrl;
+  const textoSitioListo =
+    `¡Tu página está lista! 🎉\n\n` +
+    `Chécala aquí: ${linkPagina}\n\n` +
+    `Baja para que veas todas las secciones: inicio, servicios, testimonios, contacto y el botón de WhatsApp.`;
 
   try {
     console.log(`📤 [ENVIANDO WHATSAPP] A: ${e164} | URL: ${sitioUrl}`);
+
+    let previewUrl = String(negocio?.previewImageUrl || '').trim();
+    if (!previewUrl && negocio?.id) {
+      const preview = await ensureSitePreviewForNegocio(negocio.id, negocio);
+      previewUrl = preview.url || '';
+    }
     
     const delivered = await enviarMensaje(
       { telefono: e164, nombre: negocio.companyInfo || '' },
-      { 
-        type: 'texto', 
-        contenido: `¡tu página está lista! 🎉 Chécala aquí: ${linkPagina} Baja para que veas todas las secciones: inicio, servicios, testimonios, contacto y el botón de WhatsApp.` 
-      }
+      previewUrl
+        ? {
+            type: 'imagen',
+            contenido: previewUrl,
+            caption: textoSitioListo,
+          }
+        : {
+            type: 'texto',
+            contenido: textoSitioListo,
+          }
     );
     if (!delivered) {
       throw new Error('No se pudo entregar mensaje de sitio listo');
@@ -423,7 +547,10 @@ export async function enviarSitiosPendientes() {
         status: data.status
       });
 
-      const sent = await enviarSitioWebPorWhatsApp(data);
+      const sent = await enviarSitioWebPorWhatsApp({
+        id: doc.id,
+        ...data,
+      });
       if (sent) {
         await doc.ref.set({
           status: 'Web enviada',
