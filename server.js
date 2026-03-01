@@ -1511,6 +1511,27 @@ app.post('/api/web/after-form', async (req, res) => {
       ),
     ];
 
+    if (typeof cancelSequences === 'function') {
+      const intakeTriggers = [
+        'LeadWeb',
+        'NuevoLead',
+        'NuevoLeadWeb',
+        'LeadWhatsapp',
+        'WebPromo',
+        'leadweb',
+        'nuevolead',
+        'nuevoleadweb',
+        'leadwhatsapp',
+        'webpromo',
+      ];
+      writes.push(
+        cancelSequences(finalLeadId, intakeTriggers).catch((err) => {
+          console.warn('[after-form] cancelSequences:', err?.message || err);
+          return 0;
+        })
+      );
+    }
+
     if (negocioDocId) {
       writes.push(
         db.collection('Negocios')

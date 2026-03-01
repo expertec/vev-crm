@@ -187,6 +187,27 @@ function hasSameTrigger(secuencias = [], trigger = '') {
     && secuencias.some((s) => !s?.completed && String(s?.trigger || '').toLowerCase() === next);
 }
 
+const FORM_COMPLETED_BLOCKED_TRIGGERS = new Set([
+  'leadweb',
+  'nuevolead',
+  'nuevoleadweb',
+  'leadwhatsapp',
+  'webpromo',
+]);
+
+function hasLeadCompletedForm(leadData = {}) {
+  const etapa = String(leadData?.etapa || '').toLowerCase();
+  if (etapa === 'form_submitted') return true;
+  const tags = Array.isArray(leadData?.etiquetas)
+    ? leadData.etiquetas.map((t) => String(t || '').toLowerCase())
+    : [];
+  return tags.includes('formok') || tags.includes('formulariocompletado');
+}
+
+function shouldStopTriggerAfterForm(trigger = '') {
+  return FORM_COMPLETED_BLOCKED_TRIGGERS.has(String(trigger || '').toLowerCase());
+}
+
 /* ----------------------- normalización de tipos ------------------------ */
 // Unifica variantes: 'videonota' | 'video_note' | 'video-note' | 'ptv' → 'videonota'
 function normType(t = '') {
@@ -325,44 +346,53 @@ async function _getLead(leadId) {
 /* -------------------- programar / cancelar secuencias ------------------- */
 export async function scheduleSequenceForLead(leadId, trigger, startAt = new Date()) {
   const leadRef = db.collection('leads').doc(leadId);
-  const leadSnap = await leadRef.get();
-  const leadData = leadSnap.exists ? leadSnap.data() || {} : {};
-
   const def = await getSequenceDefinition(trigger);
   if (!def || def.active === false || !def.messages || def.messages.length === 0) return 0;
 
-  // Reinicio si ya existe y no se fuerza: no duplicar
-  const secAct = Array.isArray(leadData.secuenciasActivas) ? [...leadData.secuenciasActivas] : [];
-  if (hasSameTrigger(secAct, trigger)) {
-    console.log(`[scheduleSequenceForLead] trigger '${trigger}' ya presente en ${leadId}, no se duplica.`);
+  const normalizedTrigger = String(trigger || '');
+  const startIso = toDateSafe(startAt)?.toISOString?.() || new Date().toISOString();
+
+  const scheduled = await db.runTransaction(async (tx) => {
+    const leadSnap = await tx.get(leadRef);
+    const leadData = leadSnap.exists ? leadSnap.data() || {} : {};
+
+    // No duplicar trigger activo aunque lleguen múltiples eventos en paralelo.
+    const secAct = Array.isArray(leadData.secuenciasActivas) ? [...leadData.secuenciasActivas] : [];
+    if (hasSameTrigger(secAct, normalizedTrigger)) return false;
+
+    const newSeq = {
+      trigger: normalizedTrigger,
+      startTime: startIso,
+      index: 0,
+      completed: false
+    };
+    secAct.push(newSeq);
+
+    // Limpiar pasos enviados previos de este trigger.
+    const sent = { ...(leadData.sequenceSentSteps || {}) };
+    Object.keys(sent).forEach((k) => {
+      if (k.startsWith(`${normalizedTrigger}:`)) delete sent[k];
+    });
+
+    const nextAt = computeNextRunForLead(secAct);
+    const payload = {
+      secuenciasActivas: secAct,
+      hasActiveSequences: true,
+      sequenceSentSteps: sent,
+      // Historial simple para evitar reactivaciones automáticas repetidas.
+      sequenceScheduledTriggers: FieldValue.arrayUnion(normalizedTrigger)
+    };
+    if (nextAt) payload.nextSequenceRunAt = nextAt;
+
+    tx.set(leadRef, payload, { merge: true });
+    tx.set(leadRef, { etiquetas: FieldValue.arrayUnion(normalizedTrigger) }, { merge: true });
+    return true;
+  });
+
+  if (!scheduled) {
+    console.log(`[scheduleSequenceForLead] trigger '${normalizedTrigger}' ya presente en ${leadId}, no se duplica.`);
     return 0;
   }
-
-  const newSeq = {
-    trigger,
-    startTime: toDateSafe(startAt)?.toISOString?.() || new Date().toISOString(),
-    index: 0,
-    completed: false
-  };
-
-  secAct.push(newSeq);
-
-  // limpiar pasos enviados previos de este trigger
-  const sent = { ...(leadData.sequenceSentSteps || {}) };
-  Object.keys(sent).forEach(k => { if (k.startsWith(`${trigger}:`)) delete sent[k]; });
-
-  const nextAt = computeNextRunForLead(secAct);
-
-  const payload = {
-    secuenciasActivas: secAct,
-    hasActiveSequences: true,
-    sequenceSentSteps: sent
-  };
-  if (nextAt) payload.nextSequenceRunAt = nextAt;
-  await leadRef.set(payload, { merge: true });
-
-  // Etiqueta trigger
-  await leadRef.set({ etiquetas: FieldValue.arrayUnion(trigger) }, { merge: true }).catch(() => {});
 
   return def.messages.length;
 }
@@ -750,6 +780,7 @@ export async function processLeadSequences(leadId) {
     const data = { id: snap.id, ...(snap.data() || {}) };
     let secuencias = normalizeSecuencias(data.secuenciasActivas);
     let sentSteps = { ...(data.sequenceSentSteps || {}) };
+    const formCompleted = hasLeadCompletedForm(data);
 
     if (!secuencias.length) {
       await leadRef.set({
@@ -765,6 +796,10 @@ export async function processLeadSequences(leadId) {
 
     for (const seq of secuencias) {
       if (seq.completed) continue;
+      if (formCompleted && shouldStopTriggerAfterForm(seq.trigger)) {
+        seq.completed = true;
+        continue;
+      }
       const def = await getSequenceDefinition(seq.trigger);
       if (!def || def.active === false || !def.messages || def.messages.length === 0) {
         seq.completed = true;
