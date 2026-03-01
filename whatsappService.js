@@ -295,6 +295,16 @@ function resolveSenderFromLid(msg) {
   return null;
 }
 
+function buildStableLeadId({ normalizedPhone, resolvedJid, fallbackJid }) {
+  const phone = String(normalizedPhone || '').replace(/\D/g, '');
+  if (phone.length >= 10) return `${phone}@s.whatsapp.net`;
+  const resolved = normalizeJid(resolvedJid);
+  if (resolved) return resolved;
+  const fallback = normalizeJid(fallbackJid);
+  if (fallback) return fallback;
+  return '';
+}
+
 /* ---------------------------- conexión WA ---------------------------- */
 export async function connectToWhatsApp() {
   try {
@@ -491,7 +501,15 @@ export async function connectToWhatsApp() {
             || phoneFromFinalJid
             || (typeof normNum === 'string' && normNum.length >= 10)
           );
-          const leadId   = jidResolved || `${normNum}@s.whatsapp.net`;
+          const leadId = buildStableLeadId({
+            normalizedPhone: normNum,
+            resolvedJid: jidResolved,
+            fallbackJid: finalJid
+          });
+          if (!leadId) {
+            console.warn('[WA] no se pudo construir leadId estable, se ignora mensaje');
+            continue;
+          }
           const sender   = msg.key.fromMe ? 'business' : 'lead';
           const jid      = finalJid;
           const adSignal = sender === 'lead' ? detectMetaAdSignal(msg) : { isFromMetaAd: false, indicator: null, path: null };

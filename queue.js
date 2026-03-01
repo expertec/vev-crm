@@ -187,6 +187,13 @@ function hasSameTrigger(secuencias = [], trigger = '') {
     && secuencias.some((s) => !s?.completed && String(s?.trigger || '').toLowerCase() === next);
 }
 
+function hasTriggerInHistory(history = [], trigger = '') {
+  const next = String(trigger || '').toLowerCase();
+  if (!next) return false;
+  return Array.isArray(history)
+    && history.some((t) => String(t || '').toLowerCase() === next);
+}
+
 const FORM_COMPLETED_BLOCKED_TRIGGERS = new Set([
   'leadweb',
   'nuevolead',
@@ -352,13 +359,33 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
   const normalizedTrigger = String(trigger || '');
   const startIso = toDateSafe(startAt)?.toISOString?.() || new Date().toISOString();
 
-  const scheduled = await db.runTransaction(async (tx) => {
+  const scheduleResult = await db.runTransaction(async (tx) => {
     const leadSnap = await tx.get(leadRef);
     const leadData = leadSnap.exists ? leadSnap.data() || {} : {};
 
     // No duplicar trigger activo aunque lleguen múltiples eventos en paralelo.
     const secAct = Array.isArray(leadData.secuenciasActivas) ? [...leadData.secuenciasActivas] : [];
-    if (hasSameTrigger(secAct, normalizedTrigger)) return false;
+    if (hasSameTrigger(secAct, normalizedTrigger)) return 'already-active';
+
+    // Regla global: cada trigger se programa una sola vez por lead (histórico).
+    const history = Array.isArray(leadData.sequenceScheduledTriggers)
+      ? leadData.sequenceScheduledTriggers
+      : [];
+    const tags = Array.isArray(leadData.etiquetas)
+      ? leadData.etiquetas.map((t) => String(t || '').toLowerCase())
+      : [];
+    const sent = leadData.sequenceSentSteps && typeof leadData.sequenceSentSteps === 'object'
+      ? leadData.sequenceSentSteps
+      : {};
+    const hadSentStepsForTrigger = Object.keys(sent).some((k) => k.startsWith(`${normalizedTrigger}:`));
+
+    if (
+      hasTriggerInHistory(history, normalizedTrigger)
+      || tags.includes(normalizedTrigger.toLowerCase())
+      || hadSentStepsForTrigger
+    ) {
+      return 'already-scheduled';
+    }
 
     const newSeq = {
       trigger: normalizedTrigger,
@@ -369,16 +396,16 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
     secAct.push(newSeq);
 
     // Limpiar pasos enviados previos de este trigger.
-    const sent = { ...(leadData.sequenceSentSteps || {}) };
-    Object.keys(sent).forEach((k) => {
-      if (k.startsWith(`${normalizedTrigger}:`)) delete sent[k];
+    const sentPatch = { ...(leadData.sequenceSentSteps || {}) };
+    Object.keys(sentPatch).forEach((k) => {
+      if (k.startsWith(`${normalizedTrigger}:`)) delete sentPatch[k];
     });
 
     const nextAt = computeNextRunForLead(secAct);
     const payload = {
       secuenciasActivas: secAct,
       hasActiveSequences: true,
-      sequenceSentSteps: sent,
+      sequenceSentSteps: sentPatch,
       // Historial simple para evitar reactivaciones automáticas repetidas.
       sequenceScheduledTriggers: FieldValue.arrayUnion(normalizedTrigger)
     };
@@ -386,10 +413,14 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
 
     tx.set(leadRef, payload, { merge: true });
     tx.set(leadRef, { etiquetas: FieldValue.arrayUnion(normalizedTrigger) }, { merge: true });
-    return true;
+    return 'scheduled';
   });
 
-  if (!scheduled) {
+  if (scheduleResult !== 'scheduled') {
+    if (scheduleResult === 'already-scheduled') {
+      console.log(`[scheduleSequenceForLead] trigger '${normalizedTrigger}' ya fue programado antes en ${leadId}, se omite.`);
+      return 0;
+    }
     console.log(`[scheduleSequenceForLead] trigger '${normalizedTrigger}' ya presente en ${leadId}, no se duplica.`);
     return 0;
   }
