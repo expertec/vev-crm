@@ -367,12 +367,9 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
     const secAct = Array.isArray(leadData.secuenciasActivas) ? [...leadData.secuenciasActivas] : [];
     if (hasSameTrigger(secAct, normalizedTrigger)) return 'already-active';
 
-    // Regla global: cada trigger se programa una sola vez por lead (histórico).
-    const history = Array.isArray(leadData.sequenceScheduledTriggers)
-      ? leadData.sequenceScheduledTriggers
-      : [];
-    const tags = Array.isArray(leadData.etiquetas)
-      ? leadData.etiquetas.map((t) => String(t || '').toLowerCase())
+    // Regla global: cada trigger se ejecuta una sola vez por lead (histórico).
+    const history = Array.isArray(leadData.sequenceDeliveredTriggers)
+      ? leadData.sequenceDeliveredTriggers
       : [];
     const sent = leadData.sequenceSentSteps && typeof leadData.sequenceSentSteps === 'object'
       ? leadData.sequenceSentSteps
@@ -381,7 +378,6 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
 
     if (
       hasTriggerInHistory(history, normalizedTrigger)
-      || tags.includes(normalizedTrigger.toLowerCase())
       || hadSentStepsForTrigger
     ) {
       return 'already-scheduled';
@@ -811,6 +807,9 @@ export async function processLeadSequences(leadId) {
     const data = { id: snap.id, ...(snap.data() || {}) };
     let secuencias = normalizeSecuencias(data.secuenciasActivas);
     let sentSteps = { ...(data.sequenceSentSteps || {}) };
+    let deliveredHistory = Array.isArray(data.sequenceDeliveredTriggers)
+      ? [...data.sequenceDeliveredTriggers]
+      : [];
     const formCompleted = hasLeadCompletedForm(data);
 
     if (!secuencias.length) {
@@ -855,6 +854,9 @@ export async function processLeadSequences(leadId) {
       await deliverPayload(leadId, msg);
       processed += 1;
       sentSteps[stepKey] = Timestamp.now();
+      if (!hasTriggerInHistory(deliveredHistory, seq.trigger)) {
+        deliveredHistory.push(seq.trigger);
+      }
       await persistSystemMessage(leadId, `[sequence:${seq.trigger}] step ${seq.index} enviado`);
 
       seq.index += 1;
@@ -870,6 +872,9 @@ export async function processLeadSequences(leadId) {
       hasActiveSequences: secuencias.length > 0,
       sequenceSentSteps: sentSteps
     };
+    if (deliveredHistory.length > 0 || Array.isArray(data.sequenceDeliveredTriggers)) {
+      patch.sequenceDeliveredTriggers = deliveredHistory;
+    }
     if (nextAt) patch.nextSequenceRunAt = nextAt;
     else {
       patch.nextSequenceRunAt = FieldValue.delete();
