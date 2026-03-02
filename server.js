@@ -53,6 +53,7 @@ import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
 
 // ================ 🆕 AUTENTICACIÓN DE CLIENTE ================
 import { loginCliente, verificarSesion, logoutCliente } from './clienteAuthRoutes.js';
+import { createProcessInformationRouter } from './routes/processInformationRoutes.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
@@ -809,6 +810,9 @@ app.use('/api/stripe-onetime', stripeOneTimeRoutes);
 app.post('/api/cliente/login', loginCliente);
 app.post('/api/cliente/verificar-sesion', verificarSesion);
 app.post('/api/cliente/logout', logoutCliente);
+
+// ============== 🆕 FLUJO INFORMACION (SIN SECUENCIAS) ==============
+app.use('/api/web', createProcessInformationRouter());
 
 // ============== RUTAS EXISTENTES ==============
 
