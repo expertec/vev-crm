@@ -146,6 +146,93 @@ function buildLeadLastMessagePatch(msgData = {}, { incrementUnread = false } = {
   return patch;
 }
 
+function buildQuotedPreviewFromMessageObject(message = {}) {
+  const inner = message || {};
+  if (inner.conversation) return String(inner.conversation || '').trim().slice(0, 160);
+  if (inner.extendedTextMessage?.text) return String(inner.extendedTextMessage.text || '').trim().slice(0, 160);
+  if (inner.imageMessage) return String(inner.imageMessage?.caption || '').trim() || 'Imagen';
+  if (inner.videoMessage) return String(inner.videoMessage?.caption || '').trim() || 'Video';
+  if (inner.audioMessage) return 'Audio';
+  if (inner.documentMessage) return String(inner.documentMessage?.fileName || '').trim() || 'Documento';
+  return 'Mensaje';
+}
+
+function extractReplyContextFromIncomingMessage(inner = {}) {
+  const contextInfo =
+    inner?.extendedTextMessage?.contextInfo ||
+    inner?.imageMessage?.contextInfo ||
+    inner?.videoMessage?.contextInfo ||
+    inner?.audioMessage?.contextInfo ||
+    inner?.documentMessage?.contextInfo ||
+    null;
+
+  const replyToWaMessageId = String(contextInfo?.stanzaId || '').trim();
+  if (!replyToWaMessageId) return {};
+
+  const replyToPreview = buildQuotedPreviewFromMessageObject(contextInfo?.quotedMessage || {});
+  const participant = normalizeJid(contextInfo?.participant || '');
+
+  return {
+    replyToWaMessageId,
+    replyToPreview: String(replyToPreview || 'Mensaje').slice(0, 160),
+    ...(participant ? { replyToParticipant: participant } : {}),
+  };
+}
+
+async function resolveQuotedMessageForSend({
+  leadRef,
+  targetJid,
+  waMessageId,
+  fallbackPreview = '',
+  fallbackFromMe = false,
+}) {
+  const quotedWaId = String(waMessageId || '').trim();
+  if (!quotedWaId) return null;
+
+  let data = null;
+  if (leadRef) {
+    try {
+      const byDocId = messageDocIdFromWaId(quotedWaId);
+      if (byDocId) {
+        const byDoc = await leadRef.collection('messages').doc(byDocId).get();
+        if (byDoc.exists) data = byDoc.data() || {};
+      }
+
+      if (!data) {
+        const q = await leadRef
+          .collection('messages')
+          .where('waMessageId', '==', quotedWaId)
+          .limit(1)
+          .get();
+        if (!q.empty) data = q.docs[0].data() || {};
+      }
+    } catch (error) {
+      console.warn('[WA] No se pudo resolver quoted message en Firestore:', error?.message || error);
+    }
+  }
+
+  const preview = buildMessagePreview({
+    content: String(data?.content || fallbackPreview || '').trim(),
+    mediaType: String(data?.mediaType || '').trim(),
+    mediaUrl: String(data?.mediaUrl || '').trim(),
+  }) || 'Mensaje';
+
+  const fromMe = data
+    ? String(data?.sender || '').toLowerCase() === 'business'
+    : Boolean(fallbackFromMe);
+
+  return {
+    key: {
+      id: quotedWaId,
+      remoteJid: normalizeJid(targetJid) || String(targetJid || ''),
+      fromMe,
+    },
+    message: {
+      conversation: String(preview || 'Mensaje').slice(0, 160),
+    },
+  };
+}
+
 function isUserJid(jid) {
   return String(normalizeJid(jid) || '').endsWith('@s.whatsapp.net');
 }
@@ -1017,6 +1104,8 @@ export async function connectToWhatsApp() {
             content = '';
           }
 
+          const replyContext = extractReplyContextFromIncomingMessage(inner);
+
           // Mensajes propios (fromMe)
           if (sender === 'business') {
             const msgData = {
@@ -1025,6 +1114,7 @@ export async function connectToWhatsApp() {
               mediaUrl,
               sender,
               timestamp: now(),
+              ...replyContext,
             };
 
             await leadRef.set({
@@ -1281,6 +1371,7 @@ export async function connectToWhatsApp() {
             mediaUrl,
             sender,
             timestamp: now(),
+            ...replyContext,
           };
           await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
 
@@ -1401,21 +1492,58 @@ async function syncAliasLeadToCanonical({
   await aliasRef.set(patch, { merge: true });
 }
 
-export async function sendMessageToLead(phoneOrJid, messageContent) {
+export async function sendMessageToLead(phoneOrJid, messageContent, options = {}) {
   if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
 
   const { leadId, targetJid, num, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
 
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
-  const sent = await whatsappSock.sendMessage(
+  const replyToWaMessageId = String(options?.replyToWaMessageId || '').trim();
+  const replyPreview = String(options?.replyPreview || '').trim();
+  const replySender = String(options?.replySender || '').toLowerCase();
+  const quoted = await resolveQuotedMessageForSend({
+    leadRef,
     targetJid,
-    { text: messageContent, linkPreview: false },
-    { timeoutMs: 60_000 }
-  );
+    waMessageId: replyToWaMessageId,
+    fallbackPreview: replyPreview,
+    fallbackFromMe: replySender === 'business',
+  });
+
+  const sendOptions = { timeoutMs: 60_000 };
+  if (quoted) sendOptions.quoted = quoted;
+
+  let sent;
+  try {
+    sent = await whatsappSock.sendMessage(
+      targetJid,
+      { text: messageContent, linkPreview: false },
+      sendOptions
+    );
+  } catch (error) {
+    if (quoted) {
+      console.warn(
+        `[WA] quoted falló para ${targetJid} (msgId=${replyToWaMessageId}). Reintentando sin quoted:`,
+        error?.message || error
+      );
+      sent = await whatsappSock.sendMessage(
+        targetJid,
+        { text: messageContent, linkPreview: false },
+        { timeoutMs: 60_000 }
+      );
+    } else {
+      throw error;
+    }
+  }
 
   if (leadId) {
-    const outMsg = { content: messageContent, sender: 'business', timestamp: now() };
+    const outMsg = {
+      content: messageContent,
+      sender: 'business',
+      timestamp: now(),
+      ...(replyToWaMessageId ? { replyToWaMessageId } : {}),
+      ...(replyPreview ? { replyToPreview: replyPreview.slice(0, 160) } : {}),
+    };
     const canonicalRef = leadRef || db.collection('leads').doc(leadId);
     await persistLeadMessage(canonicalRef, outMsg, sent?.key?.id || null);
     await canonicalRef.update(buildLeadLastMessagePatch(outMsg));

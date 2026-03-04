@@ -851,7 +851,13 @@ app.get('/api/whatsapp/number', (_req, res) => {
 
 // Enviar mensaje manual
 app.post('/api/whatsapp/send-message', async (req, res) => {
-  const { leadId, message } = req.body;
+  const {
+    leadId,
+    message,
+    replyToWaMessageId = '',
+    replyPreview = '',
+    replySender = '',
+  } = req.body || {};
   if (!leadId || !message)
     return res.status(400).json({ error: 'Faltan leadId o message' });
 
@@ -859,7 +865,11 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
     const leadDoc = await db.collection('leads').doc(leadId).get();
     if (!leadDoc.exists)
       return res.status(404).json({ error: 'Lead no encontrado' });
-    const result = await sendMessageToLead(leadId, message);
+    const result = await sendMessageToLead(leadId, message, {
+      replyToWaMessageId,
+      replyPreview,
+      replySender,
+    });
     return res.json(result);
   } catch (error) {
     console.error('Error enviando WhatsApp:', error);
@@ -884,6 +894,36 @@ app.post('/api/whatsapp/send-image', async (req, res) => {
     return res.json(result);
   } catch (error) {
     console.error('Error enviando imagen por WhatsApp:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// Reenviar audio por URL (sin subir archivo)
+app.post('/api/whatsapp/send-audio-url', async (req, res) => {
+  const {
+    leadId,
+    audioUrl,
+    ptt = true,
+    forwarded = true,
+  } = req.body || {};
+
+  if (!leadId || !audioUrl) {
+    return res.status(400).json({ error: 'Faltan leadId o audioUrl' });
+  }
+
+  try {
+    const leadDoc = await db.collection('leads').doc(String(leadId)).get();
+    if (!leadDoc.exists) {
+      return res.status(404).json({ error: 'Lead no encontrado' });
+    }
+
+    await sendAudioMessage(String(leadId), String(audioUrl), {
+      ptt: Boolean(ptt),
+      forwarded: Boolean(forwarded),
+    });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Error reenviando audio por URL:', error);
     return res.status(500).json({ error: error.message });
   }
 });
