@@ -115,6 +115,34 @@ async function persistLeadMessage(leadRef, msgData, waMessageId = null) {
   return snap.id;
 }
 
+function buildMessagePreview(msgData = {}) {
+  const content = String(msgData?.content || '').trim();
+  if (content) return content.slice(0, 160);
+
+  const mediaType = String(msgData?.mediaType || '').toLowerCase();
+  if (mediaType === 'image') return 'Imagen';
+  if (mediaType === 'audio' || mediaType === 'audio_ptt' || mediaType === 'ptt') return 'Audio';
+  if (mediaType === 'video' || mediaType === 'video_note' || mediaType === 'ptv') return 'Video';
+  if (mediaType === 'document' || mediaType === 'pdf') return 'Documento';
+  return 'Mensaje';
+}
+
+function buildLeadLastMessagePatch(msgData = {}, { incrementUnread = false } = {}) {
+  const preview = buildMessagePreview(msgData);
+  const rawType = String(msgData?.mediaType || '').toLowerCase();
+  const mediaType = rawType || (String(msgData?.content || '').trim() ? 'text' : 'unknown');
+  const patch = {
+    lastMessageAt: msgData?.timestamp || now(),
+    lastMessage: preview,
+    lastMessageText: preview,
+    lastMessagePreview: preview,
+    ultimoMensaje: preview,
+    lastMessageMediaType: mediaType,
+  };
+  if (incrementUnread) patch.unreadCount = FieldValue.increment(1);
+  return patch;
+}
+
 function getMessageTimestampMs(msg) {
   const raw = msg?.messageTimestamp;
   if (!raw) return null;
@@ -912,7 +940,7 @@ export async function connectToWhatsApp() {
               lidJid,
               addressingMode,
               source: 'WhatsApp',
-              lastMessageAt: msgData.timestamp,
+              ...buildLeadLastMessagePatch(msgData),
             }, { merge: true });
 
             await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
@@ -1144,8 +1172,7 @@ export async function connectToWhatsApp() {
           };
           await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
 
-          const upd = { lastMessageAt: msgData.timestamp };
-          if (sender === 'lead') upd.unreadCount = FieldValue.increment(1);
+          const upd = buildLeadLastMessagePatch(msgData, { incrementUnread: sender === 'lead' });
           await leadRef.update(upd);
 
           console.log('[WA] Guardado mensaje →', leadId, { mediaType, hasText: !!content, hasMedia: !!mediaUrl });
@@ -1220,7 +1247,7 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
     const outMsg = { content: messageContent, sender: 'business', timestamp: now() };
     const leadRef = db.collection('leads').doc(leadId);
     await persistLeadMessage(leadRef, outMsg, sent?.key?.id || null);
-    await leadRef.update({ lastMessageAt: outMsg.timestamp });
+    await leadRef.update(buildLeadLastMessagePatch(outMsg));
   }
   return { success: true };
 }
@@ -1250,7 +1277,7 @@ export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
     };
     const leadRef = db.collection('leads').doc(leadId);
     await persistLeadMessage(leadRef, outMsg, sent?.key?.id || null);
-    await leadRef.update({ lastMessageAt: outMsg.timestamp });
+    await leadRef.update(buildLeadLastMessagePatch(outMsg));
   }
 
   return { success: true };
@@ -1409,7 +1436,7 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
       timestamp: new Date()
     };
     await persistLeadMessage(leadRef, msgData, sent?.key?.id || null);
-    await leadRef.update({ lastMessageAt: msgData.timestamp });
+    await leadRef.update(buildLeadLastMessagePatch(msgData));
   }
 }
 
@@ -1472,6 +1499,6 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
       timestamp: new Date()
     };
     await persistLeadMessage(leadRef, msgData, sentMsg?.key?.id || null);
-    await leadRef.update({ lastMessageAt: msgData.timestamp });
+    await leadRef.update(buildLeadLastMessagePatch(msgData));
   }
 }
