@@ -143,6 +143,10 @@ function buildLeadLastMessagePatch(msgData = {}, { incrementUnread = false } = {
   return patch;
 }
 
+function isUserJid(jid) {
+  return String(normalizeJid(jid) || '').endsWith('@s.whatsapp.net');
+}
+
 function getMessageTimestampMs(msg) {
   const raw = msg?.messageTimestamp;
   if (!raw) return null;
@@ -1200,18 +1204,25 @@ async function resolveLeadAndTarget(phoneOrJid) {
   const raw = String(phoneOrJid || '');
   const isJidInput = raw.includes('@');
   const normalizedInputJid = isJidInput ? normalizeJid(raw) : null;
-  const num = isJidInput ? phoneFromJid(normalizedInputJid) : normalizePhoneForWA(raw);
+  let num = isJidInput ? phoneFromJid(normalizedInputJid) : normalizePhoneForWA(raw);
 
+  const provisionalLeadId = normalizedInputJid || null;
   let leadId = normalizedInputJid || null;
   let targetJid = normalizedInputJid || (num ? `${num}@s.whatsapp.net` : null);
   let leadData = null;
+  let leadRef = null;
 
   if (normalizedInputJid) {
     const snap = await db.collection('leads').doc(normalizedInputJid).get();
     if (snap.exists) {
       leadId = snap.id;
       leadData = snap.data() || {};
+      leadRef = snap.ref;
     }
+  }
+
+  if (!num && leadData) {
+    num = normalizePhoneForWA(leadData.telefono || '') || phoneFromJid(leadData.resolvedJid || leadData.jid || leadId);
   }
 
   if (!leadData && num) {
@@ -1219,21 +1230,73 @@ async function resolveLeadAndTarget(phoneOrJid) {
     if (!q.empty) {
       leadId = q.docs[0].id;
       leadData = q.docs[0].data() || {};
+      leadRef = q.docs[0].ref;
     }
+  }
+
+  const bestRef = await resolveExistingLeadReference({
+    provisionalLeadId: leadId || provisionalLeadId || '',
+    normalizedPhone: num,
+    resolvedJid: leadData?.resolvedJid || normalizedInputJid,
+    jid: leadData?.jid || normalizedInputJid,
+    lidJid: leadData?.lidJid || (normalizedInputJid?.endsWith('@lid') ? normalizedInputJid : null),
+  });
+  if (bestRef?.leadId) {
+    leadId = bestRef.leadId;
+    leadRef = bestRef.leadRef;
+    leadData = bestRef.leadSnap?.data?.() || bestRef.leadSnap?.data() || leadData;
+  }
+
+  if (!num && leadData) {
+    num = normalizePhoneForWA(leadData.telefono || '') || phoneFromJid(leadData.resolvedJid || leadData.jid || leadId);
   }
 
   if (leadData) {
     const candidateJid = normalizeJid(leadData.resolvedJid || leadData.jid || leadId);
-    if (candidateJid) targetJid = candidateJid;
+    if (isUserJid(candidateJid)) {
+      targetJid = candidateJid;
+    } else if (num) {
+      targetJid = `${num}@s.whatsapp.net`;
+    } else if (candidateJid) {
+      targetJid = candidateJid;
+    }
+  } else if (num) {
+    targetJid = `${num}@s.whatsapp.net`;
   }
 
-  return { leadId, targetJid, num, leadData };
+  return { leadId, targetJid, num, leadData, leadRef, provisionalLeadId };
+}
+
+async function syncAliasLeadToCanonical({
+  provisionalLeadId,
+  canonicalLeadId,
+  targetJid,
+  num,
+}) {
+  if (!provisionalLeadId || !canonicalLeadId || provisionalLeadId === canonicalLeadId) return;
+
+  const aliasRef = db.collection('leads').doc(String(provisionalLeadId));
+  const aliasSnap = await aliasRef.get();
+  if (!aliasSnap.exists) return;
+
+  const patch = {
+    mergedInto: canonicalLeadId,
+    mergedAt: now(),
+    ...(targetJid ? { resolvedJid: targetJid, jid: targetJid } : {}),
+    ...(num ? { telefono: num } : {}),
+  };
+
+  if (isUserJid(targetJid)) {
+    patch.needsJidResolution = false;
+  }
+
+  await aliasRef.set(patch, { merge: true });
 }
 
 export async function sendMessageToLead(phoneOrJid, messageContent) {
   if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
 
-  const { leadId, targetJid } = await resolveLeadAndTarget(phoneOrJid);
+  const { leadId, targetJid, num, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
 
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
@@ -1245,9 +1308,15 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
 
   if (leadId) {
     const outMsg = { content: messageContent, sender: 'business', timestamp: now() };
-    const leadRef = db.collection('leads').doc(leadId);
-    await persistLeadMessage(leadRef, outMsg, sent?.key?.id || null);
-    await leadRef.update(buildLeadLastMessagePatch(outMsg));
+    const canonicalRef = leadRef || db.collection('leads').doc(leadId);
+    await persistLeadMessage(canonicalRef, outMsg, sent?.key?.id || null);
+    await canonicalRef.update(buildLeadLastMessagePatch(outMsg));
+    await syncAliasLeadToCanonical({
+      provisionalLeadId,
+      canonicalLeadId: leadId,
+      targetJid,
+      num,
+    });
   }
   return { success: true };
 }
@@ -1255,7 +1324,7 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
 export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
   if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
 
-  const { leadId, targetJid } = await resolveLeadAndTarget(phoneOrJid);
+  const { leadId, targetJid, num, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
   const sent = await whatsappSock.sendMessage(
@@ -1275,9 +1344,15 @@ export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
       sender: 'business',
       timestamp: now(),
     };
-    const leadRef = db.collection('leads').doc(leadId);
-    await persistLeadMessage(leadRef, outMsg, sent?.key?.id || null);
-    await leadRef.update(buildLeadLastMessagePatch(outMsg));
+    const canonicalRef = leadRef || db.collection('leads').doc(leadId);
+    await persistLeadMessage(canonicalRef, outMsg, sent?.key?.id || null);
+    await canonicalRef.update(buildLeadLastMessagePatch(outMsg));
+    await syncAliasLeadToCanonical({
+      provisionalLeadId,
+      canonicalLeadId: leadId,
+      targetJid,
+      num,
+    });
   }
 
   return { success: true };
