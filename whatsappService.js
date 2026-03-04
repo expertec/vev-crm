@@ -1292,7 +1292,7 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
     typeof audioSrc === 'string'
       ? inferAudioMime(audioSrc)
       : inferAudioMime(audioSrc?.url);
-  const finalMime = mimetype || inferredMime || (ptt ? 'audio/ogg; codecs=opus' : 'audio/mp4');
+  const finalMime = mimetype || inferredMime || (ptt ? 'audio/ogg' : 'audio/mp4');
 
   const message = {
     audio: audioPayload,
@@ -1300,6 +1300,14 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
     ptt: !!ptt,
     ...(forwarded ? { contextInfo: { isForwarded: true, forwardingScore: 5 } } : {})
   };
+  if (ptt) {
+    // Mantiene la UI de nota de voz en clientes que usan waveform para render.
+    const wf = new Uint8Array(64);
+    for (let i = 0; i < wf.length; i += 1) {
+      wf[i] = Math.max(5, Math.min(100, Math.round((Math.sin(i / 5) + 1) * 45)));
+    }
+    message.waveform = wf;
+  }
   if (Number.isFinite(seconds)) {
     message.seconds = Math.max(1, Math.round(seconds));
   }

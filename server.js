@@ -1092,16 +1092,49 @@ app.post(
           .on('error', reject);
       });
       sourcePath = oggPath;
-      sourceMime = 'audio/ogg; codecs=opus';
+      sourceMime = 'audio/ogg';
       finalPtt = isPttExplicit ? shouldPtt : true;
       const durationSeconds = await getAudioDurationSeconds(sourcePath);
 
-      await sendAudioMessage(target, sourcePath, {
-        ptt: finalPtt,
-        seconds: durationSeconds,
-        forwarded: shouldForward,
-        mimetype: sourceMime,
-      });
+      let sent = false;
+
+      // Enviar por URL pública reduce errores de media no disponible en iOS.
+      try {
+        const fileBuffer = fs.readFileSync(sourcePath);
+        const filePath = `audios/outbound/${Date.now()}-${path.basename(sourcePath)}`;
+        const bucketFile = admin.storage().bucket().file(filePath);
+        await bucketFile.save(fileBuffer, {
+          contentType: 'audio/ogg',
+          resumable: false,
+          validation: false,
+          metadata: {
+            cacheControl: 'public,max-age=31536000',
+          },
+        });
+        const [signedUrl] = await bucketFile.getSignedUrl({
+          action: 'read',
+          expires: '03-01-2500',
+        });
+
+        await sendAudioMessage(target, { url: signedUrl }, {
+          ptt: finalPtt,
+          seconds: durationSeconds,
+          forwarded: shouldForward,
+          mimetype: sourceMime,
+        });
+        sent = true;
+      } catch (urlErr) {
+        console.warn('[send-audio] fallback a envío local:', urlErr?.message || urlErr);
+      }
+
+      if (!sent) {
+        await sendAudioMessage(target, sourcePath, {
+          ptt: finalPtt,
+          seconds: durationSeconds,
+          forwarded: shouldForward,
+          mimetype: sourceMime,
+        });
+      }
 
       try {
         fs.unlinkSync(uploadPath);
