@@ -305,6 +305,79 @@ function buildStableLeadId({ normalizedPhone, resolvedJid, fallbackJid }) {
   return '';
 }
 
+async function resolveExistingLeadReference({
+  provisionalLeadId,
+  normalizedPhone,
+  resolvedJid,
+  jid,
+  lidJid,
+}) {
+  const leadsCol = db.collection('leads');
+
+  const idCandidates = [
+    String(provisionalLeadId || '').trim(),
+    normalizeJid(resolvedJid),
+    normalizeJid(jid),
+    normalizeJid(lidJid),
+  ].filter(Boolean);
+
+  const uniqueIdCandidates = Array.from(new Set(idCandidates));
+  for (const candidate of uniqueIdCandidates) {
+    const snap = await leadsCol.doc(candidate).get();
+    if (snap.exists) {
+      return {
+        leadId: snap.id,
+        leadRef: snap.ref,
+        leadSnap: snap,
+        source: `doc:${candidate}`,
+      };
+    }
+  }
+
+  const jidCandidates = [
+    normalizeJid(resolvedJid),
+    normalizeJid(jid),
+    normalizeJid(lidJid),
+  ].filter(Boolean);
+
+  const uniqueJidCandidates = Array.from(new Set(jidCandidates));
+  for (const jidCandidate of uniqueJidCandidates) {
+    for (const field of ['resolvedJid', 'jid', 'lidJid']) {
+      const byField = await leadsCol.where(field, '==', jidCandidate).limit(1).get();
+      if (!byField.empty) {
+        const snap = byField.docs[0];
+        return {
+          leadId: snap.id,
+          leadRef: snap.ref,
+          leadSnap: snap,
+          source: `${field}:${jidCandidate}`,
+        };
+      }
+    }
+  }
+
+  const phone = String(normalizedPhone || '').replace(/\D/g, '');
+  if (phone.length >= 10) {
+    const byPhone = await leadsCol.where('telefono', '==', phone).limit(5).get();
+    if (!byPhone.empty) {
+      const preferred =
+        byPhone.docs.find((docSnap) => {
+          const data = docSnap.data() || {};
+          return Boolean(data.assignedTo);
+        }) || byPhone.docs[0];
+
+      return {
+        leadId: preferred.id,
+        leadRef: preferred.ref,
+        leadSnap: preferred,
+        source: `telefono:${phone}`,
+      };
+    }
+  }
+
+  return null;
+}
+
 /* ---------------------------- conexión WA ---------------------------- */
 export async function connectToWhatsApp() {
   try {
@@ -501,17 +574,38 @@ export async function connectToWhatsApp() {
             || phoneFromFinalJid
             || (typeof normNum === 'string' && normNum.length >= 10)
           );
-          const leadId = buildStableLeadId({
+          const stableLeadId = buildStableLeadId({
             normalizedPhone: normNum,
             resolvedJid: jidResolved,
             fallbackJid: finalJid
           });
-          if (!leadId) {
+          if (!stableLeadId) {
             console.warn('[WA] no se pudo construir leadId estable, se ignora mensaje');
             continue;
           }
+
+          let leadId = stableLeadId;
           const sender   = msg.key.fromMe ? 'business' : 'lead';
           const jid      = finalJid;
+          const leadResolution = await resolveExistingLeadReference({
+            provisionalLeadId: stableLeadId,
+            normalizedPhone: normNum,
+            resolvedJid: jidResolved,
+            jid,
+            lidJid,
+          });
+
+          if (leadResolution?.leadId && leadResolution.leadId !== stableLeadId) {
+            console.log(
+              `[WA] ♻️ Lead existente reutilizado: ${stableLeadId} -> ${leadResolution.leadId} (${leadResolution.source})`
+            );
+            leadId = leadResolution.leadId;
+          }
+
+          const leadRef = leadResolution?.leadRef || db.collection('leads').doc(leadId);
+          const leadSnap = leadResolution?.leadSnap || await leadRef.get();
+          const existingLeadData = leadSnap.exists ? (leadSnap.data() || {}) : null;
+
           const adSignal = sender === 'lead' ? detectMetaAdSignal(msg) : { isFromMetaAd: false, indicator: null, path: null };
           const inboundFromMetaAd = sender === 'lead' && adSignal.isFromMetaAd;
           if (inboundFromMetaAd) {
@@ -529,9 +623,6 @@ export async function connectToWhatsApp() {
             if (finalJid) {
               console.log(`[WA] 🔄 Intentando crear/actualizar lead sin contenido de mensaje para ${finalJid}`);
 
-              const leadRef = db.collection('leads').doc(leadId);
-              const leadSnap = await leadRef.get();
-              const existingLeadData = leadSnap.exists ? (leadSnap.data() || {}) : null;
               const metaAdDecision = resolveMetaAdInbound({
                 baseDetected: inboundFromMetaAd,
                 leadData: existingLeadData,
@@ -701,8 +792,6 @@ export async function connectToWhatsApp() {
 
           // Mensajes propios (fromMe)
           if (sender === 'business') {
-            const leadRef = db.collection('leads').doc(leadId);
-
             const msgData = {
               content,
               mediaType,
@@ -815,10 +904,6 @@ export async function connectToWhatsApp() {
           let triggerSource = rule.source;
           let toCancel = rule.cancel || [];
           const inboundAt = now();
-
-          const leadRef = db.collection('leads').doc(leadId);
-          const leadSnap = await leadRef.get();
-          const existingLeadData = leadSnap.exists ? (leadSnap.data() || {}) : null;
           const metaAdDecision = resolveMetaAdInbound({
             baseDetected: inboundFromMetaAd,
             leadData: existingLeadData,
@@ -1050,22 +1135,34 @@ export async function sendFullAudioAsDocument(phone, fileUrl) {
 export async function sendAudioMessage(phoneOrJid, audioSrc, {
   ptt = true,
   forwarded = false,
-  quoted = null
+  quoted = null,
+  mimetype = null
 } = {}) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
-  const raw = String(phoneOrJid || '');
+  const raw = String(phoneOrJid || '').trim();
+  const normalizedInputJid = raw.includes('@') ? normalizeJid(raw) : null;
   const digits = raw.replace(/\D/g, '');
-  const norm = (() => {
-    if (raw.includes('@s.whatsapp.net')) return raw;
+  const normalizedPhone = (() => {
     if (/^\d{10}$/.test(digits)) return `521${digits}`;
     if (/^52\d{10}$/.test(digits)) return `521${digits.slice(2)}`;
     return digits;
   })();
-  const jid = norm.includes('@s.whatsapp.net') ? norm : `${norm}@s.whatsapp.net`;
+  const jid = normalizedInputJid || (normalizedPhone ? `${normalizedPhone}@s.whatsapp.net` : null);
+  if (!jid) throw new Error('Número o JID de destino inválido');
 
   const isHttp = (v) => typeof v === 'string' && /^https?:/i.test(v);
+  const inferAudioMime = (value) => {
+    const clean = String(value || '').split('?')[0].toLowerCase();
+    if (clean.endsWith('.ogg') || clean.endsWith('.opus')) return 'audio/ogg; codecs=opus';
+    if (clean.endsWith('.mp3')) return 'audio/mpeg';
+    if (clean.endsWith('.m4a') || clean.endsWith('.mp4') || clean.endsWith('.aac')) return 'audio/mp4';
+    if (clean.endsWith('.wav')) return 'audio/wav';
+    if (clean.endsWith('.webm')) return 'audio/webm';
+    return null;
+  };
+
   const audioPayload =
     (typeof audioSrc === 'string')
       ? (isHttp(audioSrc) ? { url: audioSrc } : fs.readFileSync(audioSrc))
@@ -1073,10 +1170,15 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
          : (audioSrc && typeof audioSrc === 'object' && audioSrc.url ? { url: audioSrc.url } : null));
 
   if (!audioPayload) throw new Error('Fuente de audio inválida');
+  const inferredMime =
+    typeof audioSrc === 'string'
+      ? inferAudioMime(audioSrc)
+      : inferAudioMime(audioSrc?.url);
+  const finalMime = mimetype || inferredMime || (ptt ? 'audio/ogg; codecs=opus' : 'audio/mp4');
 
   const message = {
     audio: audioPayload,
-    mimetype: 'audio/ogg; codecs=opus',
+    mimetype: finalMime,
     ptt: !!ptt,
     ...(forwarded ? { contextInfo: { isForwarded: true, forwardingScore: 5 } } : {})
   };

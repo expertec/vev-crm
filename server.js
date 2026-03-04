@@ -842,10 +842,7 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
     const leadDoc = await db.collection('leads').doc(leadId).get();
     if (!leadDoc.exists)
       return res.status(404).json({ error: 'Lead no encontrado' });
-    const { telefono } = leadDoc.data() || {};
-    if (!telefono)
-      return res.status(400).json({ error: 'Lead sin teléfono' });
-    const result = await sendMessageToLead(telefono, message);
+    const result = await sendMessageToLead(leadId, message);
     return res.json(result);
   } catch (error) {
     console.error('Error enviando WhatsApp:', error);
@@ -994,39 +991,83 @@ app.post(
   '/api/whatsapp/send-audio',
   upload.single('audio'),
   async (req, res) => {
-    const { phone, forwarded, ptt } = req.body;
-    if (!phone || !req.file) {
+    const { phone, leadId, forwarded, ptt } = req.body;
+    if (!req.file) {
       return res
         .status(400)
-        .json({ success: false, error: 'Faltan phone o archivo' });
+        .json({ success: false, error: 'Falta archivo de audio' });
+    }
+    if (!phone && !leadId) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Falta phone o leadId' });
     }
 
     const uploadPath = req.file.path;
-    const m4aPath = `${uploadPath}.m4a`;
+    const oggPath = `${uploadPath}.ogg`;
+    const parseBool = (value, defaultValue = false) => {
+      if (value === undefined || value === null || value === '') return defaultValue;
+      if (typeof value === 'boolean') return value;
+      return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+    };
+
+    let target = phone;
+    const isPttExplicit = ptt !== undefined && ptt !== null && ptt !== '';
+    const shouldPtt = parseBool(ptt, true);
+    const shouldForward = parseBool(forwarded, false);
 
     try {
+      if (leadId) {
+        const leadDoc = await db.collection('leads').doc(String(leadId)).get();
+        if (!leadDoc.exists) {
+          return res
+            .status(404)
+            .json({ success: false, error: 'Lead no encontrado' });
+        }
+        const leadData = leadDoc.data() || {};
+        target =
+          leadData.resolvedJid ||
+          leadData.jid ||
+          leadData.telefono ||
+          phone;
+      }
+      if (!target) {
+        return res
+          .status(400)
+          .json({ success: false, error: 'Lead sin destino de WhatsApp' });
+      }
+
+      let sourcePath = uploadPath;
+      let sourceMime = req.file.mimetype || 'audio/ogg; codecs=opus';
+      let finalPtt = shouldPtt;
+
+      // Para notas de voz o formatos no compatibles, normalizar a OGG/Opus.
       await new Promise((resolve, reject) => {
         ffmpeg(uploadPath)
-          .outputOptions(['-c:a aac', '-vn'])
-          .toFormat('mp4')
-          .save(m4aPath)
+          .audioCodec('libopus')
+          .audioChannels(1)
+          .audioFrequency(48000)
+          .outputOptions(['-vbr on', '-compression_level 10'])
+          .toFormat('ogg')
+          .save(oggPath)
           .on('end', resolve)
           .on('error', reject);
       });
+      sourcePath = oggPath;
+      sourceMime = 'audio/ogg; codecs=opus';
+      finalPtt = isPttExplicit ? shouldPtt : true;
 
-      await sendAudioMessage(phone, m4aPath, {
-        ptt:
-          String(ptt).toLowerCase() === 'true' || ptt === true,
-        forwarded:
-          String(forwarded).toLowerCase() === 'true' ||
-          forwarded === true,
+      await sendAudioMessage(target, sourcePath, {
+        ptt: finalPtt,
+        forwarded: shouldForward,
+        mimetype: sourceMime,
       });
 
       try {
         fs.unlinkSync(uploadPath);
       } catch {}
       try {
-        fs.unlinkSync(m4aPath);
+        fs.unlinkSync(oggPath);
       } catch {}
 
       return res.json({ success: true });
@@ -1036,7 +1077,7 @@ app.post(
         fs.unlinkSync(uploadPath);
       } catch {}
       try {
-        fs.unlinkSync(m4aPath);
+        fs.unlinkSync(oggPath);
       } catch {}
       return res
         .status(500)
