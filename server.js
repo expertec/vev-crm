@@ -9,6 +9,7 @@ import path from 'path';
 import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import ffprobeInstaller from '@ffprobe-installer/ffprobe';
 import dayjs from 'dayjs';
 import slugify from 'slugify';
 import axios from 'axios';
@@ -18,6 +19,18 @@ dotenv.config();
 
 // ================ FFmpeg ================
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+ffmpeg.setFfprobePath(ffprobeInstaller.path);
+
+function getAudioDurationSeconds(filePath) {
+  return new Promise((resolve) => {
+    ffmpeg.ffprobe(filePath, (error, data) => {
+      if (error) return resolve(null);
+      const seconds = Number(data?.format?.duration || 0);
+      if (!Number.isFinite(seconds) || seconds <= 0) return resolve(null);
+      return resolve(seconds);
+    });
+  });
+}
 
 // ================ Firebase / WhatsApp ================
 import { admin, db } from './firebaseAdmin.js';
@@ -1037,7 +1050,7 @@ app.post(
 
     let target = phone;
     const isPttExplicit = ptt !== undefined && ptt !== null && ptt !== '';
-    const shouldPtt = parseBool(ptt, false);
+    const shouldPtt = parseBool(ptt, true);
     const shouldForward = parseBool(forwarded, false);
 
     try {
@@ -1070,7 +1083,8 @@ app.post(
         ffmpeg(uploadPath)
           .audioCodec('libopus')
           .audioChannels(1)
-          .audioFrequency(48000)
+          .audioFrequency(16000)
+          .audioBitrate('32k')
           .outputOptions(['-vbr on', '-compression_level 10', '-frame_duration 20', '-application voip'])
           .toFormat('ogg')
           .save(oggPath)
@@ -1079,10 +1093,12 @@ app.post(
       });
       sourcePath = oggPath;
       sourceMime = 'audio/ogg; codecs=opus';
-      finalPtt = isPttExplicit ? shouldPtt : false;
+      finalPtt = isPttExplicit ? shouldPtt : true;
+      const durationSeconds = await getAudioDurationSeconds(sourcePath);
 
       await sendAudioMessage(target, sourcePath, {
         ptt: finalPtt,
+        seconds: durationSeconds,
         forwarded: shouldForward,
         mimetype: sourceMime,
       });

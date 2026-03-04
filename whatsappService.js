@@ -1251,6 +1251,7 @@ export async function sendFullAudioAsDocument(phone, fileUrl) {
 
 export async function sendAudioMessage(phoneOrJid, audioSrc, {
   ptt = true,
+  seconds = null,
   forwarded = false,
   quoted = null,
   mimetype = null
@@ -1299,6 +1300,9 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
     ptt: !!ptt,
     ...(forwarded ? { contextInfo: { isForwarded: true, forwardingScore: 5 } } : {})
   };
+  if (Number.isFinite(seconds)) {
+    message.seconds = Math.max(1, Math.round(seconds));
+  }
 
   const options = { timeoutMs: 120_000 };
   if (quoted) options.quoted = quoted;
