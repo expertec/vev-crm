@@ -25,7 +25,9 @@ import {
   connectToWhatsApp,
   getLatestQR,
   getConnectionStatus,
+  getWhatsAppSock,
   sendMessageToLead,
+  sendImageToLead,
   getSessionPhone,
   sendAudioMessage,
   sendVideoNote,
@@ -848,6 +850,29 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
     console.error('Error enviando WhatsApp:', error);
     return res.status(500).json({ error: error.message });
   }
+});
+
+// Enviar imagen manual
+app.post('/api/whatsapp/send-image', async (req, res) => {
+  const { leadId, imageUrl, caption = '' } = req.body || {};
+  if (!leadId || !imageUrl) {
+    return res.status(400).json({ error: 'Faltan leadId o imageUrl' });
+  }
+
+  try {
+    const leadDoc = await db.collection('leads').doc(String(leadId)).get();
+    if (!leadDoc.exists) {
+      return res.status(404).json({ error: 'Lead no encontrado' });
+    }
+
+    const result = await sendImageToLead(String(leadId), String(imageUrl), String(caption || ''));
+    return res.json(result);
+  } catch (error) {
+    console.error('Error enviando imagen por WhatsApp:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 // Enviar mensajes masivos (secuencia)
 app.post('/api/whatsapp/send-bulk-message', async (req, res) => {
   const { phones, messages } = req.body;
@@ -984,7 +1009,6 @@ app.post('/api/whatsapp/send-bulk-sequence', async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 });
-});
 
 // Enviar audio
 app.post(
@@ -1013,7 +1037,7 @@ app.post(
 
     let target = phone;
     const isPttExplicit = ptt !== undefined && ptt !== null && ptt !== '';
-    const shouldPtt = parseBool(ptt, true);
+    const shouldPtt = parseBool(ptt, false);
     const shouldForward = parseBool(forwarded, false);
 
     try {
@@ -1047,7 +1071,7 @@ app.post(
           .audioCodec('libopus')
           .audioChannels(1)
           .audioFrequency(48000)
-          .outputOptions(['-vbr on', '-compression_level 10'])
+          .outputOptions(['-vbr on', '-compression_level 10', '-frame_duration 20', '-application voip'])
           .toFormat('ogg')
           .save(oggPath)
           .on('end', resolve)
@@ -1055,7 +1079,7 @@ app.post(
       });
       sourcePath = oggPath;
       sourceMime = 'audio/ogg; codecs=opus';
-      finalPtt = isPttExplicit ? shouldPtt : true;
+      finalPtt = isPttExplicit ? shouldPtt : false;
 
       await sendAudioMessage(target, sourcePath, {
         ptt: finalPtt,

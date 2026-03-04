@@ -314,68 +314,143 @@ async function resolveExistingLeadReference({
 }) {
   const leadsCol = db.collection('leads');
 
-  const idCandidates = [
-    String(provisionalLeadId || '').trim(),
+  const candidateMap = new Map();
+  const pushCandidate = (snap, source) => {
+    if (!snap?.exists) return;
+    const id = snap.id;
+    if (!candidateMap.has(id)) {
+      candidateMap.set(id, { snap, sources: [source] });
+      return;
+    }
+    const current = candidateMap.get(id);
+    current.sources.push(source);
+    candidateMap.set(id, current);
+  };
+
+  const unique = (items) => Array.from(new Set(items.filter(Boolean)));
+  const provisional = String(provisionalLeadId || '').trim();
+
+  const jidCandidates = unique([
     normalizeJid(resolvedJid),
     normalizeJid(jid),
     normalizeJid(lidJid),
-  ].filter(Boolean);
+    provisional.includes('@') ? normalizeJid(provisional) : null,
+  ]);
 
-  const uniqueIdCandidates = Array.from(new Set(idCandidates));
-  for (const candidate of uniqueIdCandidates) {
+  const rawPhone = String(normalizedPhone || '').replace(/\D/g, '');
+  const fromJids = jidCandidates
+    .map((value) => phoneFromJid(value))
+    .filter(Boolean);
+
+  const phoneCandidates = unique([
+    rawPhone,
+    ...fromJids,
+  ]);
+
+  const expandedPhones = new Set();
+  phoneCandidates.forEach((value) => {
+    const digits = String(value || '').replace(/\D/g, '');
+    if (!digits) return;
+    expandedPhones.add(digits);
+    expandedPhones.add(`+${digits}`);
+
+    if (/^\d{10}$/.test(digits)) {
+      expandedPhones.add(`52${digits}`);
+      expandedPhones.add(`+52${digits}`);
+      expandedPhones.add(`521${digits}`);
+      expandedPhones.add(`+521${digits}`);
+    } else if (/^52\d{10}$/.test(digits) && !digits.startsWith('521')) {
+      const tail = digits.slice(2);
+      expandedPhones.add(tail);
+      expandedPhones.add(`521${tail}`);
+      expandedPhones.add(`+521${tail}`);
+    } else if (/^521\d{10}$/.test(digits)) {
+      const tail = digits.slice(3);
+      expandedPhones.add(tail);
+      expandedPhones.add(`52${tail}`);
+      expandedPhones.add(`+52${tail}`);
+    }
+  });
+
+  const idCandidates = unique([
+    provisional,
+    ...jidCandidates,
+  ]);
+
+  for (const candidate of idCandidates) {
     const snap = await leadsCol.doc(candidate).get();
-    if (snap.exists) {
-      return {
-        leadId: snap.id,
-        leadRef: snap.ref,
-        leadSnap: snap,
-        source: `doc:${candidate}`,
-      };
-    }
+    pushCandidate(snap, `doc:${candidate}`);
   }
 
-  const jidCandidates = [
-    normalizeJid(resolvedJid),
-    normalizeJid(jid),
-    normalizeJid(lidJid),
-  ].filter(Boolean);
-
-  const uniqueJidCandidates = Array.from(new Set(jidCandidates));
-  for (const jidCandidate of uniqueJidCandidates) {
+  for (const jidCandidate of jidCandidates) {
     for (const field of ['resolvedJid', 'jid', 'lidJid']) {
-      const byField = await leadsCol.where(field, '==', jidCandidate).limit(1).get();
-      if (!byField.empty) {
-        const snap = byField.docs[0];
-        return {
-          leadId: snap.id,
-          leadRef: snap.ref,
-          leadSnap: snap,
-          source: `${field}:${jidCandidate}`,
-        };
-      }
+      const byField = await leadsCol.where(field, '==', jidCandidate).limit(10).get();
+      byField.docs.forEach((docSnap) => pushCandidate(docSnap, `${field}:${jidCandidate}`));
     }
   }
 
-  const phone = String(normalizedPhone || '').replace(/\D/g, '');
-  if (phone.length >= 10) {
-    const byPhone = await leadsCol.where('telefono', '==', phone).limit(5).get();
-    if (!byPhone.empty) {
-      const preferred =
-        byPhone.docs.find((docSnap) => {
-          const data = docSnap.data() || {};
-          return Boolean(data.assignedTo);
-        }) || byPhone.docs[0];
+  for (const phone of expandedPhones) {
+    const byPhone = await leadsCol.where('telefono', '==', phone).limit(20).get();
+    byPhone.docs.forEach((docSnap) => pushCandidate(docSnap, `telefono:${phone}`));
+  }
 
-      return {
-        leadId: preferred.id,
-        leadRef: preferred.ref,
-        leadSnap: preferred,
-        source: `telefono:${phone}`,
-      };
+  if (!candidateMap.size) return null;
+
+  const scoreCandidate = ({ snap, sources }) => {
+    const data = snap.data() || {};
+    const sourceSet = new Set(sources);
+    let score = 0;
+
+    // Prioridad: no perder ownership del chat
+    if (data.assignedTo) score += 1000;
+    if (snap.id === provisional) score += 350;
+    if (sourceSet.has(`doc:${provisional}`)) score += 250;
+
+    // Coincidencias de identidad
+    score += Array.from(sourceSet).filter((s) => s.startsWith('resolvedJid:')).length * 120;
+    score += Array.from(sourceSet).filter((s) => s.startsWith('jid:')).length * 100;
+    score += Array.from(sourceSet).filter((s) => s.startsWith('lidJid:')).length * 90;
+    score += Array.from(sourceSet).filter((s) => s.startsWith('telefono:')).length * 70;
+
+    // Conversaciones vivas tienen preferencia
+    if (data.lastMessageAt) score += 30;
+    if (Number(data.unreadCount || 0) > 0) score += 20;
+    if (Array.isArray(data.secuenciasActivas) && data.secuenciasActivas.length > 0) score += 10;
+
+    const lastMsgMs = (() => {
+      const value = data.lastMessageAt;
+      if (!value) return 0;
+      if (typeof value?.toMillis === 'function') return value.toMillis();
+      const parsed = new Date(value).getTime();
+      return Number.isFinite(parsed) ? parsed : 0;
+    })();
+
+    return { score, lastMsgMs };
+  };
+
+  let best = null;
+  for (const entry of candidateMap.values()) {
+    const metrics = scoreCandidate(entry);
+    if (!best) {
+      best = { ...entry, ...metrics };
+      continue;
+    }
+
+    const betterScore = metrics.score > best.score;
+    const sameScoreButNewer = metrics.score === best.score && metrics.lastMsgMs > best.lastMsgMs;
+    if (betterScore || sameScoreButNewer) {
+      best = { ...entry, ...metrics };
     }
   }
 
-  return null;
+  if (!best) return null;
+
+  return {
+    leadId: best.snap.id,
+    leadRef: best.snap.ref,
+    leadSnap: best.snap,
+    source: best.sources.join('|'),
+  };
 }
 
 /* ---------------------------- conexión WA ---------------------------- */
@@ -605,6 +680,12 @@ export async function connectToWhatsApp() {
           const leadRef = leadResolution?.leadRef || db.collection('leads').doc(leadId);
           const leadSnap = leadResolution?.leadSnap || await leadRef.get();
           const existingLeadData = leadSnap.exists ? (leadSnap.data() || {}) : null;
+
+          if (!leadSnap.exists) {
+            console.log(
+              `[WA] 🆕 Creando lead nuevo para mensaje entrante: ${leadId} (stable=${stableLeadId})`
+            );
+          }
 
           const adSignal = sender === 'lead' ? detectMetaAdSignal(msg) : { isFromMetaAd: false, indicator: null, path: null };
           const inboundFromMetaAd = sender === 'lead' && adSignal.isFromMetaAd;
@@ -1064,9 +1145,7 @@ export function getConnectionStatus() { return connectionStatus; }
 export function getWhatsAppSock() { return whatsappSock; }
 export function getSessionPhone() { return sessionPhone; }
 
-export async function sendMessageToLead(phoneOrJid, messageContent) {
-  if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
-
+async function resolveLeadAndTarget(phoneOrJid) {
   const raw = String(phoneOrJid || '');
   const isJidInput = raw.includes('@');
   const normalizedInputJid = isJidInput ? normalizeJid(raw) : null;
@@ -1097,6 +1176,14 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
     if (candidateJid) targetJid = candidateJid;
   }
 
+  return { leadId, targetJid, num, leadData };
+}
+
+export async function sendMessageToLead(phoneOrJid, messageContent) {
+  if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
+
+  const { leadId, targetJid } = await resolveLeadAndTarget(phoneOrJid);
+
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
   await whatsappSock.sendMessage(
@@ -1110,6 +1197,36 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
     await db.collection('leads').doc(leadId).collection('messages').add(outMsg);
     await db.collection('leads').doc(leadId).update({ lastMessageAt: outMsg.timestamp });
   }
+  return { success: true };
+}
+
+export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
+  if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
+
+  const { leadId, targetJid } = await resolveLeadAndTarget(phoneOrJid);
+  if (!targetJid) throw new Error('No se pudo resolver JID de destino');
+
+  await whatsappSock.sendMessage(
+    targetJid,
+    {
+      image: { url: imageUrl },
+      caption: caption || '',
+    },
+    { timeoutMs: 120_000 }
+  );
+
+  if (leadId) {
+    const outMsg = {
+      content: caption || '',
+      mediaType: 'image',
+      mediaUrl: imageUrl,
+      sender: 'business',
+      timestamp: now(),
+    };
+    await db.collection('leads').doc(leadId).collection('messages').add(outMsg);
+    await db.collection('leads').doc(leadId).update({ lastMessageAt: outMsg.timestamp });
+  }
+
   return { success: true };
 }
 
