@@ -91,6 +91,30 @@ function tpl(str, lead) {
 }
 function now() { return new Date(); }
 
+function messageDocIdFromWaId(waMessageId) {
+  const clean = String(waMessageId || '')
+    .trim()
+    .replace(/[^\w.-]/g, '_');
+  if (!clean) return null;
+  return `wa_${clean}`;
+}
+
+async function persistLeadMessage(leadRef, msgData, waMessageId = null) {
+  const payload = {
+    ...msgData,
+    ...(waMessageId ? { waMessageId: String(waMessageId) } : {}),
+  };
+
+  const docId = messageDocIdFromWaId(waMessageId);
+  if (docId) {
+    await leadRef.collection('messages').doc(docId).set(payload, { merge: true });
+    return docId;
+  }
+
+  const snap = await leadRef.collection('messages').add(payload);
+  return snap.id;
+}
+
 function getMessageTimestampMs(msg) {
   const raw = msg?.messageTimestamp;
   if (!raw) return null;
@@ -891,7 +915,7 @@ export async function connectToWhatsApp() {
               lastMessageAt: msgData.timestamp,
             }, { merge: true });
 
-            await leadRef.collection('messages').add(msgData);
+            await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
 
             // Comandos administrativos
             const textLower = String(content || '').toLowerCase();
@@ -1118,7 +1142,7 @@ export async function connectToWhatsApp() {
             sender,
             timestamp: now(),
           };
-          await leadRef.collection('messages').add(msgData);
+          await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
 
           const upd = { lastMessageAt: msgData.timestamp };
           if (sender === 'lead') upd.unreadCount = FieldValue.increment(1);
@@ -1186,7 +1210,7 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
 
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
-  await whatsappSock.sendMessage(
+  const sent = await whatsappSock.sendMessage(
     targetJid,
     { text: messageContent, linkPreview: false },
     { timeoutMs: 60_000 }
@@ -1194,8 +1218,9 @@ export async function sendMessageToLead(phoneOrJid, messageContent) {
 
   if (leadId) {
     const outMsg = { content: messageContent, sender: 'business', timestamp: now() };
-    await db.collection('leads').doc(leadId).collection('messages').add(outMsg);
-    await db.collection('leads').doc(leadId).update({ lastMessageAt: outMsg.timestamp });
+    const leadRef = db.collection('leads').doc(leadId);
+    await persistLeadMessage(leadRef, outMsg, sent?.key?.id || null);
+    await leadRef.update({ lastMessageAt: outMsg.timestamp });
   }
   return { success: true };
 }
@@ -1206,7 +1231,7 @@ export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
   const { leadId, targetJid } = await resolveLeadAndTarget(phoneOrJid);
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
-  await whatsappSock.sendMessage(
+  const sent = await whatsappSock.sendMessage(
     targetJid,
     {
       image: { url: imageUrl },
@@ -1223,8 +1248,9 @@ export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
       sender: 'business',
       timestamp: now(),
     };
-    await db.collection('leads').doc(leadId).collection('messages').add(outMsg);
-    await db.collection('leads').doc(leadId).update({ lastMessageAt: outMsg.timestamp });
+    const leadRef = db.collection('leads').doc(leadId);
+    await persistLeadMessage(leadRef, outMsg, sent?.key?.id || null);
+    await leadRef.update({ lastMessageAt: outMsg.timestamp });
   }
 
   return { success: true };
@@ -1369,11 +1395,12 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
     msg.seconds = Math.max(1, Math.round(secondsHint));
   }
 
-  await sock.sendMessage(jid, msg, { timeoutMs: 120_000 });
+  const sent = await sock.sendMessage(jid, msg, { timeoutMs: 120_000 });
 
   const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
   if (!q.empty) {
     const leadId = q.docs[0].id;
+    const leadRef = db.collection('leads').doc(leadId);
     const msgData = {
       content: '',
       mediaType: 'audio_ptt',
@@ -1381,8 +1408,8 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
       sender: 'business',
       timestamp: new Date()
     };
-    await db.collection('leads').doc(leadId).collection('messages').add(msgData);
-    await db.collection('leads').doc(leadId).update({ lastMessageAt: msgData.timestamp });
+    await persistLeadMessage(leadRef, msgData, sent?.key?.id || null);
+    await leadRef.update({ lastMessageAt: msgData.timestamp });
   }
 }
 
@@ -1404,10 +1431,11 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
   };
 
   const isHttp = String(videoUrlOrPath).startsWith('http');
+  let sentMsg = null;
 
   if (isHttp) {
     try {
-      await sock.sendMessage(jid, buildMsg({ url: videoUrlOrPath }), opts);
+      sentMsg = await sock.sendMessage(jid, buildMsg({ url: videoUrlOrPath }), opts);
       console.log(`✅ videonota enviada por URL a ${jid}`);
     } catch (e1) {
       console.warn(`[videonota] fallo por URL: ${e1?.message || e1}`);
@@ -1419,7 +1447,7 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
         const msg = buildMsg(buf);
         if (ct.startsWith('video/')) msg.mimetype = ct;
 
-        await sock.sendMessage(jid, msg, opts);
+        sentMsg = await sock.sendMessage(jid, msg, opts);
         console.log(`✅ videonota enviada como buffer a ${jid} (mime=${msg.mimetype})`);
       } catch (e2) {
         console.error(`❌ videonota falló también con buffer: ${e2?.message || e2}`);
@@ -1428,13 +1456,14 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
     }
   } else {
     const buf = fs.readFileSync(videoUrlOrPath);
-    await sock.sendMessage(jid, buildMsg(buf), opts);
+    sentMsg = await sock.sendMessage(jid, buildMsg(buf), opts);
     console.log(`✅ videonota enviada desde archivo local a ${jid}`);
   }
 
   const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
   if (!q.empty) {
     const leadId = q.docs[0].id;
+    const leadRef = db.collection('leads').doc(leadId);
     const msgData = {
       content: '',
       mediaType: 'video_note',
@@ -1442,7 +1471,7 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
       sender: 'business',
       timestamp: new Date()
     };
-    await db.collection('leads').doc(leadId).collection('messages').add(msgData);
-    await db.collection('leads').doc(leadId).update({ lastMessageAt: msgData.timestamp });
+    await persistLeadMessage(leadRef, msgData, sentMsg?.key?.id || null);
+    await leadRef.update({ lastMessageAt: msgData.timestamp });
   }
 }
