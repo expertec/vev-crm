@@ -1081,60 +1081,39 @@ app.post(
       // Para notas de voz o formatos no compatibles, normalizar a OGG/Opus.
       await new Promise((resolve, reject) => {
         ffmpeg(uploadPath)
+          .noVideo()
           .audioCodec('libopus')
           .audioChannels(1)
-          .audioFrequency(16000)
+          .audioFrequency(48000)
           .audioBitrate('32k')
-          .outputOptions(['-vbr on', '-compression_level 10', '-frame_duration 20', '-application voip'])
+          .outputOptions([
+            '-vbr on',
+            '-compression_level 10',
+            '-frame_duration 20',
+            '-application voip',
+            '-avoid_negative_ts make_zero',
+          ])
           .toFormat('ogg')
           .save(oggPath)
           .on('end', resolve)
           .on('error', reject);
       });
       sourcePath = oggPath;
-      sourceMime = 'audio/ogg';
+      sourceMime = 'audio/ogg; codecs=opus';
       finalPtt = isPttExplicit ? shouldPtt : true;
-      const durationSeconds = await getAudioDurationSeconds(sourcePath);
-
-      let sent = false;
-
-      // Enviar por URL pública reduce errores de media no disponible en iOS.
-      try {
-        const fileBuffer = fs.readFileSync(sourcePath);
-        const filePath = `audios/outbound/${Date.now()}-${path.basename(sourcePath)}`;
-        const bucketFile = admin.storage().bucket().file(filePath);
-        await bucketFile.save(fileBuffer, {
-          contentType: 'audio/ogg',
-          resumable: false,
-          validation: false,
-          metadata: {
-            cacheControl: 'public,max-age=31536000',
-          },
-        });
-        const [signedUrl] = await bucketFile.getSignedUrl({
-          action: 'read',
-          expires: '03-01-2500',
-        });
-
-        await sendAudioMessage(target, { url: signedUrl }, {
-          ptt: finalPtt,
-          seconds: durationSeconds,
-          forwarded: shouldForward,
-          mimetype: sourceMime,
-        });
-        sent = true;
-      } catch (urlErr) {
-        console.warn('[send-audio] fallback a envío local:', urlErr?.message || urlErr);
-      }
-
-      if (!sent) {
-        await sendAudioMessage(target, sourcePath, {
-          ptt: finalPtt,
-          seconds: durationSeconds,
-          forwarded: shouldForward,
-          mimetype: sourceMime,
-        });
-      }
+      const sourceSizeBytes = fs.statSync(sourcePath).size;
+      console.log('[send-audio] Enviando audio convertido', {
+        target: String(target),
+        ptt: finalPtt,
+        mimetype: sourceMime,
+        bytes: sourceSizeBytes,
+      });
+      await sendAudioMessage(target, sourcePath, {
+        ptt: finalPtt,
+        forwarded: shouldForward,
+        mimetype: sourceMime,
+      });
+      console.log('[send-audio] Audio enviado OK', { target: String(target) });
 
       try {
         fs.unlinkSync(uploadPath);
