@@ -75,6 +75,9 @@ const APPEND_MAX_AGE_MS = Number.isFinite(APPEND_MAX_AGE_MS_ENV) && APPEND_MAX_A
 const PROCESSED_MESSAGE_ID_TTL_MS = Number(process.env.WA_MSG_ID_TTL_MS) > 0
   ? Number(process.env.WA_MSG_ID_TTL_MS)
   : 6 * 60 * 60 * 1000;
+const META_AUTO_REARM_MS = Number(process.env.WA_META_AUTO_REARM_MS) > 0
+  ? Number(process.env.WA_META_AUTO_REARM_MS)
+  : 2 * 60 * 60 * 1000;
 const processedInboundMessageIds = new Map();
 const ENABLE_LID_APPEND_META_FALLBACK = process.env.WA_LID_APPEND_META_FALLBACK !== '0';
 
@@ -263,13 +266,32 @@ function shouldBlockSequences(leadData, nextTrigger) {
   return false;
 }
 
-function hasTriggerScheduleHistory(leadData, trigger = '') {
-  const next = String(trigger || '').toLowerCase();
-  if (!next) return false;
-  const history = Array.isArray(leadData?.sequenceDeliveredTriggers)
-    ? leadData.sequenceDeliveredTriggers
-    : [];
-  return history.some((t) => String(t || '').toLowerCase() === next);
+function toMillisSafe(value) {
+  if (!value) return 0;
+  if (typeof value?.toMillis === 'function') {
+    const ms = value.toMillis();
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function hasRecentMetaAutoSchedule(leadData, refDate = now()) {
+  const refMs = toMillisSafe(refDate);
+  if (!refMs) return false;
+  const lastMs = Math.max(
+    toMillisSafe(leadData?.lastMetaAutoScheduledAt),
+    toMillisSafe(leadData?.lastMetaSequenceAt)
+  );
+  if (!lastMs) return false;
+  return (refMs - lastMs) < META_AUTO_REARM_MS;
 }
 
 function isLeadFromMetaAds(leadData) {
@@ -452,6 +474,56 @@ async function resolveExistingLeadReference({
 
   if (!candidateMap.size) return null;
 
+  const resolveCanonicalLead = async (snap) => {
+    let current = snap;
+    const visited = new Set([snap.id]);
+    for (let depth = 0; depth < 4; depth += 1) {
+      const data = current.data() || {};
+      const mergedInto = String(data.mergedInto || '').trim();
+      if (!mergedInto || mergedInto === current.id || visited.has(mergedInto)) break;
+      const nextSnap = await leadsCol.doc(mergedInto).get();
+      if (!nextSnap.exists) break;
+      visited.add(mergedInto);
+      current = nextSnap;
+    }
+    return current;
+  };
+
+  const canonicalMap = new Map();
+  for (const entry of candidateMap.values()) {
+    const originalSnap = entry.snap;
+    const originalData = originalSnap.data() || {};
+    let canonicalSnap = originalSnap;
+
+    if (String(originalData.mergedInto || '').trim()) {
+      canonicalSnap = await resolveCanonicalLead(originalSnap);
+    }
+
+    const canonicalId = canonicalSnap.id;
+    const prev = canonicalMap.get(canonicalId);
+    if (!prev) {
+      canonicalMap.set(canonicalId, {
+        snap: canonicalSnap,
+        sources: [
+          ...entry.sources,
+          ...(canonicalId !== originalSnap.id ? [`mergedFrom:${originalSnap.id}`] : []),
+        ],
+      });
+      continue;
+    }
+
+    canonicalMap.set(canonicalId, {
+      snap: canonicalSnap,
+      sources: [
+        ...prev.sources,
+        ...entry.sources,
+        ...(canonicalId !== originalSnap.id ? [`mergedFrom:${originalSnap.id}`] : []),
+      ],
+    });
+  }
+
+  if (!canonicalMap.size) return null;
+
   const scoreCandidate = ({ snap, sources }) => {
     const data = snap.data() || {};
     const sourceSet = new Set(sources);
@@ -485,7 +557,7 @@ async function resolveExistingLeadReference({
   };
 
   let best = null;
-  for (const entry of candidateMap.values()) {
+  for (const entry of canonicalMap.values()) {
     const metrics = scoreCandidate(entry);
     if (!best) {
       best = { ...entry, ...metrics };
@@ -505,7 +577,7 @@ async function resolveExistingLeadReference({
     leadId: best.snap.id,
     leadRef: best.snap.ref,
     leadSnap: best.snap,
-    source: best.sources.join('|'),
+    source: Array.from(new Set(best.sources)).join('|'),
   };
 }
 
@@ -819,7 +891,15 @@ export async function connectToWhatsApp() {
                   if (!blocked && hasReachableTarget) {
                     try {
                       await scheduleSequenceForLead(leadId, detectedTrigger, inboundAt);
-                      await leadRef.set({ hasActiveSequences: true, estado: 'nuevo' }, { merge: true });
+                      await leadRef.set(
+                        {
+                          hasActiveSequences: true,
+                          estado: 'nuevo',
+                          lastMetaAutoScheduledAt: inboundAt,
+                          lastMetaSequenceAt: inboundAt,
+                        },
+                        { merge: true }
+                      );
                       console.log(`[WA] 🎯 Meta Ads inbound → secuencia '${detectedTrigger}' programada para ${leadId}`);
                     } catch (seqErr) {
                       console.error(`[WA] ❌ Error programando secuencia desde Meta Ads: ${seqErr?.message || seqErr}`);
@@ -844,14 +924,22 @@ export async function connectToWhatsApp() {
 
                 if (shouldTreatAsMetaAdInbound) {
                   const alreadyHas = hasSameTrigger(current.secuenciasActivas, detectedTrigger);
-                  const alreadyScheduled = hasTriggerScheduleHistory(current, detectedTrigger);
                   const blocked = shouldBlockSequences(current, detectedTrigger);
+                  const metaCooldownActive = hasRecentMetaAutoSchedule(current, inboundAt);
 
-                  if (!blocked && !alreadyHas && !alreadyScheduled && hasReachableTarget) {
+                  if (!blocked && !alreadyHas && !metaCooldownActive && hasReachableTarget) {
                     try {
                       const programmed = await scheduleSequenceForLead(leadId, detectedTrigger, inboundAt);
                       if (programmed > 0) {
-                        await leadRef.set({ hasActiveSequences: true, estado: 'nuevo' }, { merge: true });
+                        await leadRef.set(
+                          {
+                            hasActiveSequences: true,
+                            estado: 'nuevo',
+                            lastMetaAutoScheduledAt: inboundAt,
+                            lastMetaSequenceAt: inboundAt,
+                          },
+                          { merge: true }
+                        );
                         console.log(`[WA] 🎯 Meta Ads inbound → secuencia '${detectedTrigger}' programada para ${leadId}`);
                       } else {
                         console.log(`[WA] ⏭️ Meta Ads inbound sin reprogramar para ${leadId}: schedule-omit`);
@@ -862,7 +950,9 @@ export async function connectToWhatsApp() {
                   } else if (!hasReachableTarget) {
                     console.log(`[WA] ⏭️ Meta Ads inbound sin ruta de envío (${leadId}); secuencia pendiente de resolución de JID.`);
                   } else {
-                    console.log(`[WA] ⏭️ Meta Ads inbound sin reprogramar para ${leadId}: blocked=${blocked}, alreadyHas=${alreadyHas}, alreadyScheduled=${alreadyScheduled}`);
+                    console.log(
+                      `[WA] ⏭️ Meta Ads inbound sin reprogramar para ${leadId}: blocked=${blocked}, alreadyHas=${alreadyHas}, cooldown=${metaCooldownActive}`
+                    );
                   }
                 } else {
                   console.log(`[WA] ⏭️ Mensaje no desencriptado sin indicador Meta Ads para ${leadId}; no se activa WebPromo.`);
@@ -1092,6 +1182,17 @@ export async function connectToWhatsApp() {
             const canSchedule = hasReachableTarget && !shouldBlockSequences({}, trigger);
             if (canSchedule) {
               await scheduleSequenceForLead(leadId, trigger, inboundAt);
+              if (triggerSource === 'meta_ad') {
+                await leadRef.set(
+                  {
+                    hasActiveSequences: true,
+                    estado: 'nuevo',
+                    lastMetaAutoScheduledAt: inboundAt,
+                    lastMetaSequenceAt: inboundAt,
+                  },
+                  { merge: true }
+                );
+              }
               console.log('[WA] ✅ Lead CREADO + secuencia programada:', { leadId, phone: normNum, trigger, source: triggerSource });
             } else if (!hasReachableTarget) {
               console.log('[WA] ⏭️ Lead CREADO sin ruta de envío; secuencia pendiente de resolución:', { leadId, trigger, source: triggerSource });
@@ -1128,16 +1229,23 @@ export async function connectToWhatsApp() {
 
             const blocked = shouldBlockSequences(current, trigger);
             const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
-            const alreadyScheduled = hasTriggerScheduleHistory(current, trigger);
             const isMetaAutoTrigger = triggerSource === 'meta_ad';
             const isSchedulableSource = triggerSource === 'hashtag' || triggerSource === 'db' || isMetaAutoTrigger;
-            const skipByMetaHistory = isMetaAutoTrigger && alreadyScheduled;
+            const metaCooldownActive = isMetaAutoTrigger && hasRecentMetaAutoSchedule(current, inboundAt);
 
-            if (!blocked && !alreadyHas && !skipByMetaHistory && hasReachableTarget && isSchedulableSource) {
+            if (!blocked && !alreadyHas && !metaCooldownActive && hasReachableTarget && isSchedulableSource) {
               const programmed = await scheduleSequenceForLead(leadId, trigger, inboundAt);
               if (programmed > 0) {
                 if (triggerSource === 'meta_ad') {
-                  await leadRef.set({ estado: 'nuevo', hasActiveSequences: true }, { merge: true });
+                  await leadRef.set(
+                    {
+                      estado: 'nuevo',
+                      hasActiveSequences: true,
+                      lastMetaAutoScheduledAt: inboundAt,
+                      lastMetaSequenceAt: inboundAt,
+                    },
+                    { merge: true }
+                  );
                 }
                 console.log('[WA] ✅ Lead ACTUALIZADO (reprogramado):', { leadId, trigger, source: triggerSource });
               } else {
@@ -1161,7 +1269,7 @@ export async function connectToWhatsApp() {
                     ? 'bloqueado'
                     : (alreadyHas
                       ? 'ya-activo'
-                      : (skipByMetaHistory ? 'meta-ya-programada' : 'trigger=default')))
+                      : (metaCooldownActive ? 'meta-cooldown' : 'trigger=default')))
               });
             }
           }

@@ -1386,6 +1386,7 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
     stageId: inputStageId,
     stageName: rawStageName,
     stageKey: rawStageKey,
+    stageColor: rawStageColor,
     sequenceTrigger: rawSequenceTrigger,
     stopSequences: rawStopSequences,
     isClosed: rawIsClosed,
@@ -1414,6 +1415,7 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
     return res.status(400).json({ error: 'Falta stageId o stageName' });
   }
   const stageStatusInput = String(rawLeadStatus || '').trim();
+  const stageColorInput = String(rawStageColor || '').trim();
   const sequenceTriggerInput = String(rawSequenceTrigger || '').trim();
   const normalizeStageKey = (value) => {
     const slug = slugify(String(value || ''), { lower: true, strict: true });
@@ -1422,6 +1424,12 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
       .trim()
       .toLowerCase()
       .replace(/\s+/g, '_');
+  };
+  const normalizeStageColor = (value, fallback = '#2563eb') => {
+    const raw = String(value || '').trim();
+    if (!raw) return fallback;
+    if (/^#[0-9a-fA-F]{6}$/.test(raw)) return raw.toLowerCase();
+    return fallback;
   };
 
   try {
@@ -1478,6 +1486,9 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
     const leadStatus = clearStage
       ? ''
       : String(stageData?.leadStatus || stageStatusInput || '').trim();
+    const stageColor = clearStage
+      ? ''
+      : normalizeStageColor(stageData?.color || stageColorInput || '', '#2563eb');
 
     if (!clearStage && !stageName && !stageKey) {
       return res.status(400).json({ error: 'No se pudo resolver la etapa' });
@@ -1539,6 +1550,7 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
     if (clearStage) {
       leadPatch.etapa = admin.firestore.FieldValue.delete();
       leadPatch.etapaNombre = admin.firestore.FieldValue.delete();
+      leadPatch.etapaColor = admin.firestore.FieldValue.delete();
       leadPatch.funnelStageId = admin.firestore.FieldValue.delete();
       if (!String(currentData.estado || '').trim()) {
         leadPatch.estado = 'nuevo';
@@ -1546,6 +1558,7 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
     } else {
       leadPatch.etapa = stageKey || stageName;
       leadPatch.etapaNombre = stageName || stageKey;
+      leadPatch.etapaColor = stageColor;
       if (stageDocId) leadPatch.funnelStageId = stageDocId;
 
       if (leadStatus) {
@@ -1580,6 +1593,7 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
         key: clearStage ? 'leads_nuevos' : (stageKey || stageName),
         stopSequences: clearStage ? false : (shouldStopSequences || isClosed),
         isClosed: clearStage ? false : isClosed,
+        color: clearStage ? '#60a5fa' : stageColor,
         base: clearStage,
       },
       sequence: {
