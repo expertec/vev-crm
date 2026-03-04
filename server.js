@@ -72,10 +72,12 @@ import { createProcessInformationRouter } from './routes/processInformationRoute
 
 // (opcional) queue helpers
 let cancelSequences = null;
+let cancelAllSequences = null;
 let scheduleSequenceForLead = null;
 try {
   const q = await import('./queue.js');
   cancelSequences = q.cancelSequences || null;
+  cancelAllSequences = q.cancelAllSequences || null;
   scheduleSequenceForLead = q.scheduleSequenceForLead || null;
 } catch {
   /* noop */
@@ -1371,6 +1373,223 @@ app.post('/api/whatsapp/force-sequence', async (req, res) => {
     });
   } catch (err) {
     console.error('[force-sequence] Error:', err);
+    return res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+// Aplicar etapa de embudo: cancela secuencias previas y activa la configurada para la etapa
+app.post('/api/whatsapp/apply-stage', async (req, res) => {
+  const {
+    leadId: inputLeadId,
+    phone,
+    leadPhone,
+    stageId: inputStageId,
+    stageName: rawStageName,
+    stageKey: rawStageKey,
+    sequenceTrigger: rawSequenceTrigger,
+    stopSequences: rawStopSequences,
+    isClosed: rawIsClosed,
+    leadStatus: rawLeadStatus,
+    clearStage: rawClearStage,
+  } = req.body || {};
+
+  const phoneInput = String(phone || leadPhone || '').trim();
+  const stageId = String(inputStageId || '').trim();
+  const stageNameInput = String(rawStageName || '').trim();
+  const stageKeyInput = String(rawStageKey || '').trim();
+
+  if (!inputLeadId && !phoneInput) {
+    return res.status(400).json({ error: 'Falta leadId o phone' });
+  }
+  const parseBool = (value, defaultValue = false) => {
+    if (value === undefined || value === null || value === '') return defaultValue;
+    if (typeof value === 'boolean') return value;
+    return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+  };
+
+  const boolStopInput = parseBool(rawStopSequences, false);
+  const boolClosedInput = parseBool(rawIsClosed, false);
+  const clearStage = parseBool(rawClearStage, false);
+  if (!clearStage && !stageId && !stageNameInput && !stageKeyInput) {
+    return res.status(400).json({ error: 'Falta stageId o stageName' });
+  }
+  const stageStatusInput = String(rawLeadStatus || '').trim();
+  const sequenceTriggerInput = String(rawSequenceTrigger || '').trim();
+  const normalizeStageKey = (value) => {
+    const slug = slugify(String(value || ''), { lower: true, strict: true });
+    if (slug) return slug;
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '_');
+  };
+
+  try {
+    const e164 = phoneInput ? toE164(phoneInput) : '';
+    const phoneDigits = e164 ? e164.replace(/\D/g, '') : '';
+    const leadIdFromPhone = e164 ? e164ToLeadId(e164) : '';
+
+    let finalLeadId = String(inputLeadId || leadIdFromPhone || '').trim();
+    if (!finalLeadId) {
+      return res.status(400).json({ error: 'No se pudo resolver leadId' });
+    }
+
+    let leadRef = db.collection('leads').doc(finalLeadId);
+    let leadSnap = await leadRef.get();
+
+    if (!leadSnap.exists && phoneDigits) {
+      const byPhone = await db
+        .collection('leads')
+        .where('telefono', '==', phoneDigits)
+        .limit(1)
+        .get();
+      if (!byPhone.empty) {
+        leadRef = byPhone.docs[0].ref;
+        leadSnap = byPhone.docs[0];
+        finalLeadId = byPhone.docs[0].id;
+      }
+    }
+
+    let stageDocId = '';
+    let stageData = null;
+    if (!clearStage && stageId) {
+      const stageSnap = await db.collection('funnelStages').doc(stageId).get();
+      if (stageSnap.exists) {
+        stageDocId = stageSnap.id;
+        stageData = stageSnap.data() || {};
+      }
+    }
+
+    const stageName = clearStage
+      ? ''
+      : String(stageData?.name || stageNameInput || stageKeyInput || stageId || '').trim();
+    const stageKey = clearStage
+      ? ''
+      : normalizeStageKey(stageData?.key || stageKeyInput || stageName);
+    const sequenceTrigger = clearStage
+      ? ''
+      : String(stageData?.sequenceTrigger || sequenceTriggerInput || '').trim();
+    const shouldStopSequences = clearStage
+      ? false
+      : Boolean(stageData?.stopSequences ?? boolStopInput ?? false);
+    const isClosed = clearStage
+      ? false
+      : Boolean(stageData?.isClosed ?? boolClosedInput ?? false);
+    const leadStatus = clearStage
+      ? ''
+      : String(stageData?.leadStatus || stageStatusInput || '').trim();
+
+    if (!clearStage && !stageName && !stageKey) {
+      return res.status(400).json({ error: 'No se pudo resolver la etapa' });
+    }
+    if (!clearStage && sequenceTrigger && typeof scheduleSequenceForLead !== 'function') {
+      return res.status(503).json({ error: 'Scheduler de secuencias no disponible' });
+    }
+
+    const existingData = leadSnap.exists ? (leadSnap.data() || {}) : {};
+    const existingResolvedJid = String(existingData.resolvedJid || '');
+    const existingJid = String(existingData.jid || '');
+    const candidateJid =
+      (existingResolvedJid.includes('@s.whatsapp.net') && existingResolvedJid) ||
+      (existingJid.includes('@s.whatsapp.net') && existingJid) ||
+      (String(finalLeadId).includes('@s.whatsapp.net') ? String(finalLeadId) : '') ||
+      (phoneDigits ? `${phoneDigits}@s.whatsapp.net` : '');
+
+    const now = new Date();
+
+    if (!leadSnap.exists) {
+      await leadRef.set({
+        nombre: '',
+        fecha_creacion: now,
+        unreadCount: 0,
+        ...(phoneDigits ? { telefono: phoneDigits } : {}),
+        ...(candidateJid ? { jid: candidateJid, resolvedJid: candidateJid, needsJidResolution: false } : {}),
+      });
+      leadSnap = await leadRef.get();
+    }
+
+    const currentData = leadSnap.data() || {};
+    const activeTriggers = Array.isArray(currentData.secuenciasActivas)
+      ? currentData.secuenciasActivas
+          .map((item) => String(item?.trigger || '').trim())
+          .filter(Boolean)
+      : [];
+
+    if (typeof cancelAllSequences === 'function') {
+      await cancelAllSequences(finalLeadId).catch((err) => {
+        console.warn('[apply-stage] cancelAllSequences:', err?.message || err);
+      });
+    } else if (typeof cancelSequences === 'function' && activeTriggers.length > 0) {
+      await cancelSequences(finalLeadId, activeTriggers).catch((err) => {
+        console.warn('[apply-stage] cancelSequences:', err?.message || err);
+      });
+    }
+
+    const stageTag = clearStage ? 'etapa:leads_nuevos' : `etapa:${stageKey || stageName}`;
+    const leadPatch = {
+      funnelUpdatedAt: now,
+      lastStageChangeAt: now,
+      hasActiveSequences: false,
+      stopSequences: clearStage ? false : (shouldStopSequences || isClosed),
+      etiquetas: admin.firestore.FieldValue.arrayUnion(stageTag, 'Embudo'),
+      ...(phoneDigits ? { telefono: phoneDigits } : {}),
+      ...(candidateJid ? { jid: candidateJid, resolvedJid: candidateJid, needsJidResolution: false } : {}),
+    };
+
+    if (clearStage) {
+      leadPatch.etapa = admin.firestore.FieldValue.delete();
+      leadPatch.etapaNombre = admin.firestore.FieldValue.delete();
+      leadPatch.funnelStageId = admin.firestore.FieldValue.delete();
+      if (!String(currentData.estado || '').trim()) {
+        leadPatch.estado = 'nuevo';
+      }
+    } else {
+      leadPatch.etapa = stageKey || stageName;
+      leadPatch.etapaNombre = stageName || stageKey;
+      if (stageDocId) leadPatch.funnelStageId = stageDocId;
+
+      if (leadStatus) {
+        leadPatch.estado = leadStatus;
+      } else if (isClosed) {
+        leadPatch.estado = 'compro';
+      }
+    }
+
+    await leadRef.set(leadPatch, { merge: true });
+
+    let scheduled = false;
+    if (!clearStage && sequenceTrigger && !shouldStopSequences && !isClosed) {
+      await scheduleSequenceForLead(finalLeadId, sequenceTrigger, now);
+      await leadRef.set(
+        {
+          hasActiveSequences: true,
+          stopSequences: false,
+          etiquetas: admin.firestore.FieldValue.arrayUnion(sequenceTrigger),
+        },
+        { merge: true }
+      );
+      scheduled = true;
+    }
+
+    return res.json({
+      ok: true,
+      leadId: finalLeadId,
+      stage: {
+        id: clearStage ? null : (stageDocId || null),
+        name: clearStage ? 'Leads nuevos' : stageName,
+        key: clearStage ? 'leads_nuevos' : (stageKey || stageName),
+        stopSequences: clearStage ? false : (shouldStopSequences || isClosed),
+        isClosed: clearStage ? false : isClosed,
+        base: clearStage,
+      },
+      sequence: {
+        trigger: sequenceTrigger || null,
+        scheduled,
+      },
+      canceledPrevious: activeTriggers.length,
+    });
+  } catch (err) {
+    console.error('[apply-stage] Error:', err);
     return res.status(500).json({ error: err.message || String(err) });
   }
 });
