@@ -388,7 +388,7 @@ async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb') 
   return { trigger: defaultTrigger, cancel: [], source: 'default' };
 }
 
-function shouldBlockSequences(leadData, nextTrigger) {
+function getSequenceBlockReason(leadData, nextTrigger) {
   const etiquetas = Array.isArray(leadData?.etiquetas)
     ? leadData.etiquetas.map((t) => String(t || '').toLowerCase())
     : [];
@@ -396,17 +396,38 @@ function shouldBlockSequences(leadData, nextTrigger) {
   const estado = (leadData?.estado || '').toLowerCase();
   const trigger = String(nextTrigger || '').toLowerCase();
 
-  if (leadData?.seqPaused) return true;
-  if (leadData?.stopSequences) return true;
-  if (estado === 'compro' || etiquetas.includes('compro')) return true;
+  if (leadData?.seqPaused) return 'seq_paused';
+  if (leadData?.stopSequences) return 'stop_sequences';
+  if (estado === 'compro' || etiquetas.includes('compro')) return 'estado_compro';
 
   const hasCompletedForm = etapa === 'form_submitted'
     || etiquetas.includes('formok')
     || etiquetas.includes('formulariocompletado');
   if (hasCompletedForm) {
-    if (FORM_COMPLETED_BLOCKED_TRIGGERS.has(trigger)) return true;
+    if (FORM_COMPLETED_BLOCKED_TRIGGERS.has(trigger)) return 'form_completed';
   }
-  return false;
+  return '';
+}
+
+function shouldBlockSequences(leadData, nextTrigger) {
+  return Boolean(getSequenceBlockReason(leadData, nextTrigger));
+}
+
+function shouldBypassMetaBlock(blockReason = '') {
+  const reason = String(blockReason || '').trim().toLowerCase();
+  if (!reason) return false;
+  return reason === 'estado_compro' || reason === 'form_completed';
+}
+
+function resolveSequenceBlockState(leadData, nextTrigger, { isMetaAd = false } = {}) {
+  const reason = getSequenceBlockReason(leadData, nextTrigger);
+  if (!reason) return { blocked: false, reason: 'none', overridden: false };
+
+  if (isMetaAd && shouldBypassMetaBlock(reason)) {
+    return { blocked: false, reason, overridden: true };
+  }
+
+  return { blocked: true, reason, overridden: false };
 }
 
 function toMillisSafe(value) {
@@ -1232,8 +1253,14 @@ export async function connectToWhatsApp() {
 
                 if (shouldTreatAsMetaAdInbound) {
                   const alreadyHas = hasSameTrigger(current.secuenciasActivas, detectedTrigger);
-                  const blocked = shouldBlockSequences(current, detectedTrigger);
+                  const blockState = resolveSequenceBlockState(current, detectedTrigger, { isMetaAd: true });
+                  const blocked = blockState.blocked;
                   const metaCooldownActive = hasRecentMetaAutoSchedule(current, inboundAt);
+                  if (blockState.overridden) {
+                    console.log(
+                      `[WA] ♻️ Meta Ads override bloque suave (${blockState.reason}) para ${leadId}`
+                    );
+                  }
 
                   if (!blocked && !alreadyHas && !metaCooldownActive && hasReachableTarget) {
                     try {
@@ -1259,7 +1286,7 @@ export async function connectToWhatsApp() {
                     console.log(`[WA] ⏭️ Meta Ads inbound sin ruta de envío (${leadId}); secuencia pendiente de resolución de JID.`);
                   } else {
                     console.log(
-                      `[WA] ⏭️ Meta Ads inbound sin reprogramar para ${leadId}: blocked=${blocked}, alreadyHas=${alreadyHas}, cooldown=${metaCooldownActive}`
+                      `[WA] ⏭️ Meta Ads inbound sin reprogramar para ${leadId}: blocked=${blocked}, reason=${blockState.reason}, alreadyHas=${alreadyHas}, cooldown=${metaCooldownActive}`
                     );
                   }
                 } else {
@@ -1456,9 +1483,15 @@ export async function connectToWhatsApp() {
 
                   const currentSnap = await leadRef.get();
                   const current = currentSnap.exists ? (currentSnap.data() || {}) : {};
-                  const blocked = shouldBlockSequences(current, trigger);
+                  const blockState = resolveSequenceBlockState(current, trigger, { isMetaAd: true });
+                  const blocked = blockState.blocked;
                   const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
                   const cooldown = hasRecentMetaAutoSchedule(current, inboundAt);
+                  if (blockState.overridden) {
+                    console.log(
+                      `[WA] ♻️ fromMe@lid override bloque suave (${blockState.reason}) para ${leadId}`
+                    );
+                  }
 
                   if (!blocked && !alreadyHas && !cooldown && hasReachableTarget) {
                     const programmed = await scheduleSequenceForLead(leadId, trigger, inboundAt);
@@ -1483,7 +1516,7 @@ export async function connectToWhatsApp() {
                     }
                   } else {
                     console.log(
-                      `[WA] ⏭️ fromMe@lid fallback sin reprogramar para ${leadId}: blocked=${blocked}, alreadyHas=${alreadyHas}, cooldown=${cooldown}, reachable=${hasReachableTarget}`
+                      `[WA] ⏭️ fromMe@lid fallback sin reprogramar para ${leadId}: blocked=${blocked}, reason=${blockState.reason}, alreadyHas=${alreadyHas}, cooldown=${cooldown}, reachable=${hasReachableTarget}`
                     );
                   }
                 }
@@ -1604,11 +1637,17 @@ export async function connectToWhatsApp() {
 
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
 
-            const blocked = shouldBlockSequences(current, trigger);
-            const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
             const isMetaAutoTrigger = triggerSource === 'meta_ad';
+            const blockState = resolveSequenceBlockState(current, trigger, { isMetaAd: isMetaAutoTrigger });
+            const blocked = blockState.blocked;
+            const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
             const isSchedulableSource = triggerSource === 'hashtag' || triggerSource === 'db' || isMetaAutoTrigger;
             const metaCooldownActive = isMetaAutoTrigger && hasRecentMetaAutoSchedule(current, inboundAt);
+            if (blockState.overridden) {
+              console.log(
+                `[WA] ♻️ Inbound override bloque suave (${blockState.reason}) para ${leadId} trigger=${trigger}`
+              );
+            }
 
             if (!blocked && !alreadyHas && !metaCooldownActive && hasReachableTarget && isSchedulableSource) {
               const programmed = await scheduleSequenceForLead(leadId, trigger, inboundAt);
@@ -1643,7 +1682,7 @@ export async function connectToWhatsApp() {
                 reason: !hasReachableTarget
                   ? 'sin-ruta-envio'
                   : (blocked
-                    ? 'bloqueado'
+                    ? `bloqueado:${blockState.reason}`
                     : (alreadyHas
                       ? 'ya-activo'
                       : (metaCooldownActive ? 'meta-cooldown' : 'trigger=default')))
