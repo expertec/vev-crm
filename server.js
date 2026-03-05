@@ -1103,12 +1103,8 @@ app.post(
             .status(404)
             .json({ success: false, error: 'Lead no encontrado' });
         }
-        const leadData = leadDoc.data() || {};
-        target =
-          leadData.resolvedJid ||
-          leadData.jid ||
-          leadData.telefono ||
-          phone;
+        // Delegar resolución de destino a whatsappService para evitar enviar a IDs @lid convertidos.
+        target = String(leadId);
       }
       if (!target) {
         return res

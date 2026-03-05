@@ -237,6 +237,23 @@ function isUserJid(jid) {
   return String(normalizeJid(jid) || '').endsWith('@s.whatsapp.net');
 }
 
+function isLidJid(jid) {
+  return /@lid$/i.test(String(normalizeJid(jid) || '').trim());
+}
+
+function jidUserDigits(jid) {
+  const normalized = String(normalizeJid(jid) || '');
+  const [user] = normalized.split('@');
+  return String(user || '').split(':')[0].replace(/\D/g, '');
+}
+
+function isSuspiciousPseudoPhoneJid(jid) {
+  const normalized = String(normalizeJid(jid) || '');
+  if (!normalized.endsWith('@s.whatsapp.net')) return false;
+  const digits = jidUserDigits(normalized);
+  return digits.length > 13;
+}
+
 function getMessageTimestampMs(msg) {
   const raw = msg?.messageTimestamp;
   if (!raw) return null;
@@ -420,12 +437,12 @@ function resolveSenderFromLid(msg) {
   // Prioridad 3: Extraer de remoteJid antes del @lid
   const remoteJid = String(msg?.key?.remoteJid || '');
   if (remoteJid.endsWith('@lid')) {
-    const phoneDigits = remoteJid.replace('@lid', '').replace(/\D/g, '');
-    if (phoneDigits.length >= 10) {
-      const normalized = normalizePhoneForWA(phoneDigits);
-      const jid = `${normalized}@s.whatsapp.net`;
-      console.log(`[resolveSenderFromLid] ✅ Extraído de remoteJid: ${remoteJid} → ${jid}`);
-      return jid;
+    const normalizedLid = normalizeJid(remoteJid);
+    if (normalizedLid) {
+      console.warn(
+        `[resolveSenderFromLid] ⚠️ remoteJid @lid sin remoteJidAlt; se conserva provisional: ${normalizedLid}`
+      );
+      return normalizedLid;
     }
   }
 
@@ -461,11 +478,13 @@ function resolveSenderFromLid(msg) {
 }
 
 function buildStableLeadId({ normalizedPhone, resolvedJid, fallbackJid }) {
-  const phone = String(normalizedPhone || '').replace(/\D/g, '');
-  if (phone.length >= 10) return `${phone}@s.whatsapp.net`;
   const resolved = normalizeJid(resolvedJid);
-  if (resolved) return resolved;
+  if (resolved && (isUserJid(resolved) || isLidJid(resolved))) return resolved;
   const fallback = normalizeJid(fallbackJid);
+  if (fallback && (isUserJid(fallback) || isLidJid(fallback))) return fallback;
+  const phone = String(normalizedPhone || '').replace(/\D/g, '');
+  if (phone.length >= 10 && phone.length <= 13) return `${phone}@s.whatsapp.net`;
+  if (resolved) return resolved;
   if (fallback) return fallback;
   return '';
 }
@@ -808,32 +827,35 @@ export async function connectToWhatsApp() {
             if (!remoteJidAlt) {
               const realSender = resolveSenderFromLid(msg);
 
-              if (realSender && realSender.includes('@s.whatsapp.net')) {
-                console.log(`   ✅ JID real extraído correctamente: ${realSender}`);
-                jidToUse = realSender; // ✅ Usar el número real del lead
-              } else {
-                // ⚠️ FALLBACK: Si no se puede resolver, intentar extraer del remoteJid
-                const phoneDigits = String(rawJid || '').replace('@lid', '').replace(/\D/g, '');
-                if (phoneDigits.length >= 10) {
-                  const normalized = normalizePhoneForWA(phoneDigits);
-                  jidToUse = `${normalized}@s.whatsapp.net`;
-                  console.log(`   ⚠️ FALLBACK: Usando dígitos del remoteJid: ${jidToUse}`);
+              if (realSender) {
+                const normalizedRealSender = normalizeJid(realSender);
+                jidToUse = normalizedRealSender;
+                if (isUserJid(normalizedRealSender)) {
+                  console.log(`   ✅ JID real extraído correctamente: ${normalizedRealSender}`);
+                } else if (isLidJid(normalizedRealSender)) {
+                  console.warn(
+                    `   ⚠️ Sin número real; usando JID @lid provisional: ${normalizedRealSender}`
+                  );
                 } else {
-                  const fallbackJid = normalizeJid(rawJid) || normalizeJid(msg?.key?.participant);
-                  if (fallbackJid) {
-                    jidToUse = fallbackJid;
-                    console.warn(`   ⚠️ JID real no resuelto; guardando lead provisional con ${fallbackJid}`);
-                  } else {
-                    console.error(`   ❌ NO SE PUDO RESOLVER JID REAL - Mensaje será ignorado`);
-                    console.log(`   🔍 Estructura completa del mensaje:`);
-                    console.log(JSON.stringify({
-                      key: msg.key,
-                      pushName: msg.pushName,
-                      hasMessage: !!msg.message
-                    }, null, 2));
-                    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
-                    continue; // ❌ Saltar este mensaje si no se puede resolver ningún JID
-                  }
+                  console.warn(
+                    `   ⚠️ JID no estándar recuperado; usando provisional: ${normalizedRealSender}`
+                  );
+                }
+              } else {
+                const fallbackJid = normalizeJid(rawJid) || normalizeJid(msg?.key?.participant);
+                if (fallbackJid) {
+                  jidToUse = fallbackJid;
+                  console.warn(`   ⚠️ JID real no resuelto; guardando lead provisional con ${fallbackJid}`);
+                } else {
+                  console.error(`   ❌ NO SE PUDO RESOLVER JID REAL - Mensaje será ignorado`);
+                  console.log(`   🔍 Estructura completa del mensaje:`);
+                  console.log(JSON.stringify({
+                    key: msg.key,
+                    pushName: msg.pushName,
+                    hasMessage: !!msg.message
+                  }, null, 2));
+                  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+                  continue; // ❌ Saltar este mensaje si no se puede resolver ningún JID
                 }
               }
             } else {
@@ -858,11 +880,18 @@ export async function connectToWhatsApp() {
 
           const phoneFromResolved = phoneFromJid(jidResolved);
           const phoneFromFinalJid = phoneFromJid(finalJid);
-          const normNum  = phoneFromResolved || phoneFromFinalJid || normalizePhoneForWA(cleanUser);
+          const derivedPhoneFromUser = jidDomain === 's.whatsapp.net'
+            ? normalizePhoneForWA(cleanUser)
+            : '';
+          const normNum  = phoneFromResolved || phoneFromFinalJid || derivedPhoneFromUser;
           const hasReachableTarget = Boolean(
-            phoneFromResolved
+            isUserJid(jidResolved)
+            || isUserJid(finalJid)
+            || isLidJid(jidResolved)
+            || isLidJid(finalJid)
+            || phoneFromResolved
             || phoneFromFinalJid
-            || (typeof normNum === 'string' && normNum.length >= 10)
+            || (typeof derivedPhoneFromUser === 'string' && derivedPhoneFromUser.length >= 10)
           );
           const stableLeadId = buildStableLeadId({
             normalizedPhone: normNum,
@@ -1452,9 +1481,26 @@ async function resolveLeadAndTarget(phoneOrJid) {
 
   if (leadData) {
     const candidateJid = normalizeJid(leadData.resolvedJid || leadData.jid || leadId);
-    if (isUserJid(candidateJid)) {
+    const lidCandidate = normalizeJid(leadData.lidJid || '');
+    const hasLidContext = isLidJid(lidCandidate) || isLidJid(normalizedInputJid);
+    const canUseNumericFallback = Boolean(
+      num
+      && (
+        /^521\d{10}$/.test(String(num))
+        || (!hasLidContext && String(num).length >= 10)
+      )
+    );
+    const candidateLooksWrongForLid = Boolean(
+      hasLidContext
+      && isUserJid(candidateJid)
+      && isSuspiciousPseudoPhoneJid(candidateJid)
+    );
+
+    if (candidateLooksWrongForLid && isLidJid(lidCandidate)) {
+      targetJid = lidCandidate;
+    } else if (isUserJid(candidateJid) || isLidJid(candidateJid)) {
       targetJid = candidateJid;
-    } else if (num) {
+    } else if (canUseNumericFallback) {
       targetJid = `${num}@s.whatsapp.net`;
     } else if (candidateJid) {
       targetJid = candidateJid;
@@ -1624,14 +1670,30 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
 
   const raw = String(phoneOrJid || '').trim();
-  const normalizedInputJid = raw.includes('@') ? normalizeJid(raw) : null;
-  const digits = raw.replace(/\D/g, '');
-  const normalizedPhone = (() => {
-    if (/^\d{10}$/.test(digits)) return `521${digits}`;
-    if (/^52\d{10}$/.test(digits)) return `521${digits.slice(2)}`;
-    return digits;
-  })();
-  const jid = normalizedInputJid || (normalizedPhone ? `${normalizedPhone}@s.whatsapp.net` : null);
+  let jid = null;
+
+  if (raw && !raw.includes('@')) {
+    try {
+      const byId = await db.collection('leads').doc(raw).get();
+      if (byId.exists) {
+        const resolved = await resolveLeadAndTarget(raw);
+        jid = normalizeJid(resolved?.targetJid);
+      }
+    } catch (error) {
+      console.warn('[sendAudioMessage] No se pudo resolver leadId, se intentará como teléfono:', error?.message || error);
+    }
+  }
+
+  if (!jid) {
+    const normalizedInputJid = raw.includes('@') ? normalizeJid(raw) : null;
+    const digits = raw.replace(/\D/g, '');
+    const normalizedPhone = (() => {
+      if (/^\d{10}$/.test(digits)) return `521${digits}`;
+      if (/^52\d{10}$/.test(digits)) return `521${digits.slice(2)}`;
+      return digits;
+    })();
+    jid = normalizedInputJid || (normalizedPhone ? `${normalizedPhone}@s.whatsapp.net` : null);
+  }
   if (!jid) throw new Error('Número o JID de destino inválido');
 
   const isHttp = (v) => typeof v === 'string' && /^https?:/i.test(v);
