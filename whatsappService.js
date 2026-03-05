@@ -684,12 +684,126 @@ async function resolveExistingLeadReference({
 
   if (!best) return null;
 
+  const aliasMap = new Map();
+  for (const entry of candidateMap.values()) {
+    const snap = entry?.snap;
+    if (!snap?.exists) continue;
+    if (snap.id === best.snap.id) continue;
+    aliasMap.set(snap.id, {
+      id: snap.id,
+      data: snap.data() || {},
+    });
+  }
+  for (const entry of canonicalMap.values()) {
+    const snap = entry?.snap;
+    if (!snap?.exists) continue;
+    if (snap.id === best.snap.id) continue;
+    if (!aliasMap.has(snap.id)) {
+      aliasMap.set(snap.id, {
+        id: snap.id,
+        data: snap.data() || {},
+      });
+    }
+  }
+  const aliasLeads = Array.from(aliasMap.values());
+
   return {
     leadId: best.snap.id,
     leadRef: best.snap.ref,
     leadSnap: best.snap,
     source: Array.from(new Set(best.sources)).join('|'),
+    aliasLeads,
   };
+}
+
+async function consolidateLeadAliasesToCanonical({
+  canonicalLeadId,
+  canonicalLeadRef = null,
+  aliasLeads = [],
+  normalizedPhone = '',
+  targetJid = '',
+  resolvedJid = '',
+  lidJid = '',
+  addressingMode = '',
+  allowUnsafeTarget = false,
+}) {
+  const canonicalId = String(canonicalLeadId || '').trim();
+  if (!canonicalId) return;
+
+  const leadsCol = db.collection('leads');
+  const canonicalRef = canonicalLeadRef || leadsCol.doc(canonicalId);
+
+  const jidToPersist = normalizeJid(resolvedJid || targetJid || '');
+  const lidToPersist = normalizeJid(lidJid || '');
+  const phoneDigits = String(normalizedPhone || '').replace(/\D/g, '');
+  const hasReachable = Boolean(
+    isUserJid(jidToPersist)
+    || isLidJid(jidToPersist)
+    || isLidJid(lidToPersist)
+    || (phoneDigits.length >= 10)
+  );
+
+  const canonicalPatch = {};
+  if (phoneDigits) canonicalPatch.telefono = phoneDigits;
+  if (jidToPersist) canonicalPatch.jid = jidToPersist;
+  if (isUserJid(jidToPersist)) {
+    canonicalPatch.resolvedJid = jidToPersist;
+  }
+  if (isLidJid(jidToPersist) || isLidJid(lidToPersist)) {
+    canonicalPatch.lidJid = normalizeJid(lidToPersist || jidToPersist);
+  } else if (lidToPersist) {
+    canonicalPatch.lidJid = lidToPersist;
+  }
+  canonicalPatch.needsJidResolution = !hasReachable;
+  if (addressingMode) canonicalPatch.addressingMode = addressingMode;
+  if (allowUnsafeTarget) canonicalPatch.allowUnsafeTarget = true;
+
+  const aliasById = new Map();
+  (Array.isArray(aliasLeads) ? aliasLeads : []).forEach((item) => {
+    const id = String(item?.id || '').trim();
+    if (!id || id === canonicalId) return;
+    aliasById.set(id, item);
+  });
+
+  const writeOps = [];
+  if (Object.keys(canonicalPatch).length > 0) {
+    writeOps.push({ ref: canonicalRef, patch: canonicalPatch });
+  }
+
+  const mergedAt = now();
+  for (const item of aliasById.values()) {
+    const aliasData = item?.data || {};
+    if (String(aliasData.mergedInto || '').trim() === canonicalId) continue;
+
+    const aliasPatch = {
+      mergedInto: canonicalId,
+      mergedAt,
+      ...(phoneDigits ? { telefono: phoneDigits } : {}),
+      ...(jidToPersist ? { jid: jidToPersist } : {}),
+      ...(isUserJid(jidToPersist) ? { resolvedJid: jidToPersist } : {}),
+      ...(isLidJid(jidToPersist) || isLidJid(lidToPersist)
+        ? { lidJid: normalizeJid(lidToPersist || jidToPersist) }
+        : (lidToPersist ? { lidJid: lidToPersist } : {})),
+      needsJidResolution: !hasReachable,
+      ...(addressingMode ? { addressingMode } : {}),
+      ...((allowUnsafeTarget || aliasData.allowUnsafeTarget === true)
+        ? { allowUnsafeTarget: true }
+        : {}),
+    };
+
+    writeOps.push({ ref: leadsCol.doc(item.id), patch: aliasPatch });
+  }
+
+  if (!writeOps.length) return;
+
+  for (let i = 0; i < writeOps.length; i += 350) {
+    const chunk = writeOps.slice(i, i + 350);
+    const batch = db.batch();
+    chunk.forEach(({ ref, patch }) => {
+      batch.set(ref, patch, { merge: true });
+    });
+    await batch.commit();
+  }
 }
 
 /* ---------------------------- conexión WA ---------------------------- */
@@ -898,6 +1012,7 @@ export async function connectToWhatsApp() {
             || phoneFromFinalJid
             || (typeof derivedPhoneFromUser === 'string' && derivedPhoneFromUser.length >= 10)
           );
+          const sender = msg.key.fromMe ? 'business' : 'lead';
           const shouldTrustUnsafeTarget = sender === 'lead' && (
             isSuspiciousPseudoPhoneJid(jidResolved)
             || isSuspiciousPseudoPhoneJid(finalJid)
@@ -913,7 +1028,6 @@ export async function connectToWhatsApp() {
           }
 
           let leadId = stableLeadId;
-          const sender   = msg.key.fromMe ? 'business' : 'lead';
           const jid      = finalJid;
           const leadResolution = await resolveExistingLeadReference({
             provisionalLeadId: stableLeadId,
@@ -933,6 +1047,35 @@ export async function connectToWhatsApp() {
           const leadRef = leadResolution?.leadRef || db.collection('leads').doc(leadId);
           const leadSnap = leadResolution?.leadSnap || await leadRef.get();
           const existingLeadData = leadSnap.exists ? (leadSnap.data() || {}) : null;
+          const aliasLeads = Array.isArray(leadResolution?.aliasLeads) ? leadResolution.aliasLeads : [];
+          const allowUnsafeFromAliases = aliasLeads.some(
+            (item) => item?.data?.allowUnsafeTarget === true
+          );
+
+          if (aliasLeads.length > 0) {
+            try {
+              await consolidateLeadAliasesToCanonical({
+                canonicalLeadId: leadId,
+                canonicalLeadRef: leadRef,
+                aliasLeads,
+                normalizedPhone: normNum,
+                targetJid: jidResolved || finalJid,
+                resolvedJid: jidResolved || '',
+                lidJid,
+                addressingMode,
+                allowUnsafeTarget: Boolean(
+                  shouldTrustUnsafeTarget
+                  || allowUnsafeFromAliases
+                  || existingLeadData?.allowUnsafeTarget === true
+                ),
+              });
+            } catch (error) {
+              console.warn(
+                `[WA] No se pudo consolidar duplicados para ${leadId}:`,
+                error?.message || error
+              );
+            }
+          }
 
           if (!leadSnap.exists) {
             console.log(
@@ -1487,6 +1630,8 @@ async function resolveLeadAndTarget(phoneOrJid) {
     leadRef = bestRef.leadRef;
     leadData = bestRef.leadSnap?.data?.() || bestRef.leadSnap?.data() || leadData;
   }
+  const aliasLeads = Array.isArray(bestRef?.aliasLeads) ? bestRef.aliasLeads : [];
+  const allowUnsafeFromAliases = aliasLeads.some((item) => item?.data?.allowUnsafeTarget === true);
 
   if (!num && leadData) {
     num = normalizePhoneForWA(leadData.telefono || '') || phoneFromJid(leadData.resolvedJid || leadData.jid || leadId);
@@ -1495,7 +1640,7 @@ async function resolveLeadAndTarget(phoneOrJid) {
   if (leadData) {
     const candidateJid = normalizeJid(leadData.resolvedJid || leadData.jid || leadId);
     const lidCandidate = normalizeJid(leadData.lidJid || '');
-    const allowUnsafeTarget = leadData?.allowUnsafeTarget === true;
+    const allowUnsafeTarget = leadData?.allowUnsafeTarget === true || allowUnsafeFromAliases;
     const hasLidContext = isLidJid(lidCandidate) || isLidJid(normalizedInputJid);
     const candidateIsSuspicious = isSuspiciousPseudoPhoneJid(candidateJid);
     const canUseNumericFallback = Boolean(
@@ -1536,6 +1681,28 @@ async function resolveLeadAndTarget(phoneOrJid) {
 
   if (!leadId && num && isSafePhoneForJidFallback(num)) {
     leadId = `${num}@s.whatsapp.net`;
+  }
+
+  if (leadId && aliasLeads.length > 0) {
+    const allowUnsafeTarget = leadData?.allowUnsafeTarget === true || allowUnsafeFromAliases;
+    try {
+      await consolidateLeadAliasesToCanonical({
+        canonicalLeadId: leadId,
+        canonicalLeadRef: leadRef,
+        aliasLeads,
+        normalizedPhone: num,
+        targetJid: targetJid || (leadData?.jid || ''),
+        resolvedJid: leadData?.resolvedJid || '',
+        lidJid: leadData?.lidJid || '',
+        addressingMode: leadData?.addressingMode || '',
+        allowUnsafeTarget,
+      });
+    } catch (error) {
+      console.warn(
+        `[WA] No se pudo consolidar aliases para lead ${leadId}:`,
+        error?.message || error
+      );
+    }
   }
 
   return { leadId, targetJid, num, leadData, leadRef, provisionalLeadId };
@@ -1606,7 +1773,7 @@ async function syncAliasLeadToCanonical({
 export async function sendMessageToLead(phoneOrJid, messageContent, options = {}) {
   if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
 
-  const { leadId, targetJid, num, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
+  const { leadId, targetJid, num, leadData, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
 
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
@@ -1648,6 +1815,15 @@ export async function sendMessageToLead(phoneOrJid, messageContent, options = {}
   }
 
   if (leadId) {
+    const sentRemoteJid = normalizeJid(sent?.key?.remoteJid || sent?.key?.remoteJidAlt || '');
+    const resolvedOutboundJid = (
+      isUserJid(sentRemoteJid) && !isSuspiciousPseudoPhoneJid(sentRemoteJid)
+    )
+      ? sentRemoteJid
+      : '';
+    const jidToPersist = normalizeJid(resolvedOutboundJid || targetJid || '');
+    const allowUnsafeTarget = leadData?.allowUnsafeTarget === true;
+
     const outMsg = {
       content: messageContent,
       sender: 'business',
@@ -1666,14 +1842,60 @@ export async function sendMessageToLead(phoneOrJid, messageContent, options = {}
       {
         ...buildLeadLastMessagePatch(outMsg),
         ...(num ? { telefono: num } : {}),
-        ...(targetJid ? { jid: targetJid } : {}),
-        ...(isUserJid(targetJid) && !isSuspiciousPseudoPhoneJid(targetJid)
-          ? { resolvedJid: targetJid, needsJidResolution: false }
+        ...(jidToPersist ? { jid: jidToPersist } : {}),
+        ...(isUserJid(jidToPersist) && (!isSuspiciousPseudoPhoneJid(jidToPersist) || allowUnsafeTarget)
+          ? { resolvedJid: jidToPersist, needsJidResolution: false }
           : {}),
-        ...(isLidJid(targetJid) ? { lidJid: targetJid, needsJidResolution: true } : {}),
+        ...(isLidJid(jidToPersist)
+          ? { lidJid: jidToPersist, needsJidResolution: true }
+          : (isLidJid(leadData?.lidJid || '') ? { lidJid: normalizeJid(leadData.lidJid), needsJidResolution: true } : {})),
+        ...(allowUnsafeTarget ? { allowUnsafeTarget: true } : {}),
       },
       { merge: true }
     );
+
+    if (resolvedOutboundJid) {
+      try {
+        const reconcile = await resolveExistingLeadReference({
+          provisionalLeadId: leadId,
+          normalizedPhone: num,
+          resolvedJid: resolvedOutboundJid,
+          jid: resolvedOutboundJid,
+          lidJid: leadData?.lidJid || (isLidJid(targetJid) ? targetJid : ''),
+        });
+        const aliasLeads = [
+          ...(Array.isArray(reconcile?.aliasLeads) ? reconcile.aliasLeads : []),
+          ...(
+            reconcile?.leadId && reconcile.leadId !== leadId
+              ? [{
+                id: reconcile.leadId,
+                data: reconcile.leadSnap?.data?.() || reconcile.leadSnap?.data() || {},
+              }]
+              : []
+          ),
+        ];
+
+        if (aliasLeads.length > 0) {
+          await consolidateLeadAliasesToCanonical({
+            canonicalLeadId: leadId,
+            canonicalLeadRef: canonicalRef,
+            aliasLeads,
+            normalizedPhone: num,
+            targetJid: jidToPersist,
+            resolvedJid: resolvedOutboundJid,
+            lidJid: leadData?.lidJid || '',
+            addressingMode: leadData?.addressingMode || '',
+            allowUnsafeTarget,
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `[WA] No se pudo reconciliar lead por remoteJid enviado (${leadId} -> ${resolvedOutboundJid}):`,
+          error?.message || error
+        );
+      }
+    }
+
     await syncAliasLeadToCanonical({
       provisionalLeadId,
       canonicalLeadId: leadId,
@@ -1687,7 +1909,7 @@ export async function sendMessageToLead(phoneOrJid, messageContent, options = {}
 export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
   if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
 
-  const { leadId, targetJid, num, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
+  const { leadId, targetJid, num, leadData, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
   const sent = await whatsappSock.sendMessage(
@@ -1700,6 +1922,15 @@ export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
   );
 
   if (leadId) {
+    const sentRemoteJid = normalizeJid(sent?.key?.remoteJid || sent?.key?.remoteJidAlt || '');
+    const resolvedOutboundJid = (
+      isUserJid(sentRemoteJid) && !isSuspiciousPseudoPhoneJid(sentRemoteJid)
+    )
+      ? sentRemoteJid
+      : '';
+    const jidToPersist = normalizeJid(resolvedOutboundJid || targetJid || '');
+    const allowUnsafeTarget = leadData?.allowUnsafeTarget === true;
+
     const outMsg = {
       content: caption || '',
       mediaType: 'image',
@@ -1718,14 +1949,60 @@ export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
       {
         ...buildLeadLastMessagePatch(outMsg),
         ...(num ? { telefono: num } : {}),
-        ...(targetJid ? { jid: targetJid } : {}),
-        ...(isUserJid(targetJid) && !isSuspiciousPseudoPhoneJid(targetJid)
-          ? { resolvedJid: targetJid, needsJidResolution: false }
+        ...(jidToPersist ? { jid: jidToPersist } : {}),
+        ...(isUserJid(jidToPersist) && (!isSuspiciousPseudoPhoneJid(jidToPersist) || allowUnsafeTarget)
+          ? { resolvedJid: jidToPersist, needsJidResolution: false }
           : {}),
-        ...(isLidJid(targetJid) ? { lidJid: targetJid, needsJidResolution: true } : {}),
+        ...(isLidJid(jidToPersist)
+          ? { lidJid: jidToPersist, needsJidResolution: true }
+          : (isLidJid(leadData?.lidJid || '') ? { lidJid: normalizeJid(leadData.lidJid), needsJidResolution: true } : {})),
+        ...(allowUnsafeTarget ? { allowUnsafeTarget: true } : {}),
       },
       { merge: true }
     );
+
+    if (resolvedOutboundJid) {
+      try {
+        const reconcile = await resolveExistingLeadReference({
+          provisionalLeadId: leadId,
+          normalizedPhone: num,
+          resolvedJid: resolvedOutboundJid,
+          jid: resolvedOutboundJid,
+          lidJid: leadData?.lidJid || (isLidJid(targetJid) ? targetJid : ''),
+        });
+        const aliasLeads = [
+          ...(Array.isArray(reconcile?.aliasLeads) ? reconcile.aliasLeads : []),
+          ...(
+            reconcile?.leadId && reconcile.leadId !== leadId
+              ? [{
+                id: reconcile.leadId,
+                data: reconcile.leadSnap?.data?.() || reconcile.leadSnap?.data() || {},
+              }]
+              : []
+          ),
+        ];
+
+        if (aliasLeads.length > 0) {
+          await consolidateLeadAliasesToCanonical({
+            canonicalLeadId: leadId,
+            canonicalLeadRef: canonicalRef,
+            aliasLeads,
+            normalizedPhone: num,
+            targetJid: jidToPersist,
+            resolvedJid: resolvedOutboundJid,
+            lidJid: leadData?.lidJid || '',
+            addressingMode: leadData?.addressingMode || '',
+            allowUnsafeTarget,
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `[WA] No se pudo reconciliar lead por remoteJid de imagen (${leadId} -> ${resolvedOutboundJid}):`,
+          error?.message || error
+        );
+      }
+    }
+
     await syncAliasLeadToCanonical({
       provisionalLeadId,
       canonicalLeadId: leadId,
