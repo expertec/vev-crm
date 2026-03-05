@@ -71,10 +71,13 @@ const FORM_COMPLETED_BLOCKED_TRIGGERS = new Set([
 const APPEND_MAX_AGE_MS_ENV = Number(process.env.WA_APPEND_MAX_AGE_MS);
 const APPEND_MAX_AGE_MS = Number.isFinite(APPEND_MAX_AGE_MS_ENV) && APPEND_MAX_AGE_MS_ENV >= 0
   ? APPEND_MAX_AGE_MS_ENV
-  : 6 * 60 * 60 * 1000;
+  : 24 * 60 * 60 * 1000;
 const PROCESSED_MESSAGE_ID_TTL_MS = Number(process.env.WA_MSG_ID_TTL_MS) > 0
   ? Number(process.env.WA_MSG_ID_TTL_MS)
   : 6 * 60 * 60 * 1000;
+const PROCESSING_MESSAGE_STALE_MS = Number(process.env.WA_MSG_PROCESSING_STALE_MS) > 0
+  ? Number(process.env.WA_MSG_PROCESSING_STALE_MS)
+  : 45 * 1000;
 const META_AUTO_REARM_MS = Number(process.env.WA_META_AUTO_REARM_MS) > 0
   ? Number(process.env.WA_META_AUTO_REARM_MS)
   : 2 * 60 * 60 * 1000;
@@ -281,20 +284,51 @@ function getMessageDedupKey(msg) {
 }
 
 function cleanupProcessedMessageIds(refNow = Date.now()) {
-  for (const [key, seenAt] of processedInboundMessageIds.entries()) {
-    if ((refNow - seenAt) > PROCESSED_MESSAGE_ID_TTL_MS) {
+  for (const [key, state] of processedInboundMessageIds.entries()) {
+    const seenAt = typeof state === 'number' ? state : Number(state?.at || 0);
+    if (!Number.isFinite(seenAt) || (refNow - seenAt) > PROCESSED_MESSAGE_ID_TTL_MS) {
       processedInboundMessageIds.delete(key);
     }
   }
 }
 
-function markMessageAsProcessed(msg, refNow = Date.now()) {
+function acquireMessageProcessingSlot(msg, refNow = Date.now()) {
   const key = getMessageDedupKey(msg);
-  if (!key) return true;
+  if (!key) return { allowed: true, key: null };
   cleanupProcessedMessageIds(refNow);
-  if (processedInboundMessageIds.has(key)) return false;
-  processedInboundMessageIds.set(key, refNow);
-  return true;
+  const state = processedInboundMessageIds.get(key);
+
+  if (!state) {
+    processedInboundMessageIds.set(key, { status: 'processing', at: refNow });
+    return { allowed: true, key };
+  }
+
+  if (typeof state === 'number') {
+    return { allowed: false, key };
+  }
+
+  if (state.status === 'done') {
+    return { allowed: false, key };
+  }
+
+  if (state.status === 'processing') {
+    const age = refNow - Number(state.at || 0);
+    if (age > PROCESSING_MESSAGE_STALE_MS) {
+      processedInboundMessageIds.set(key, { status: 'processing', at: refNow });
+      return { allowed: true, key };
+    }
+  }
+
+  return { allowed: false, key };
+}
+
+function finalizeMessageProcessing(key, success = true, refNow = Date.now()) {
+  if (!key) return;
+  if (success) {
+    processedInboundMessageIds.set(key, { status: 'done', at: refNow });
+    return;
+  }
+  processedInboundMessageIds.delete(key);
 }
 
 function shouldProcessAppendMessage(msg, refNow = Date.now()) {
@@ -887,10 +921,12 @@ export async function connectToWhatsApp() {
       console.log(`[WA] 📩 Procesando ${messagesToProcess.length} mensaje(s) | tipo: ${type} | ${new Date().toISOString()}`);
 
       for (const msg of messagesToProcess) {
-        if (!markMessageAsProcessed(msg)) {
+        const processingSlot = acquireMessageProcessingSlot(msg);
+        if (!processingSlot.allowed) {
           console.log(`[WA] ⏭️ Mensaje duplicado omitido: id=${msg?.key?.id || 'N/A'} tipo=${type}`);
           continue;
         }
+        let messageHandledOk = true;
         try {
           if (type === 'append') {
             const tsMs = getMessageTimestampMs(msg);
@@ -1564,7 +1600,10 @@ export async function connectToWhatsApp() {
 
           console.log('[WA] Guardado mensaje →', leadId, { mediaType, hasText: !!content, hasMedia: !!mediaUrl });
         } catch (err) {
+          messageHandledOk = false;
           console.error('[WA] ❌ Error procesando mensaje:', err);
+        } finally {
+          finalizeMessageProcessing(processingSlot.key, messageHandledOk);
         }
       }
     });
