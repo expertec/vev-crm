@@ -645,6 +645,8 @@ function serializeNegocio(negocioId, negocioData = {}, context = {}) {
   if (!negocioId || !negocioData) return null;
   const siteUrl = buildSiteUrl(negocioData);
   const panelUrl = getPanelAccessUrl();
+  const planStartAt = negocioData.planStartAt || negocioData.planStartDate || null;
+  const expiresAt = negocioData.expiresAt || negocioData.planRenewalDate || null;
 
   return {
     id: negocioId,
@@ -663,16 +665,22 @@ function serializeNegocio(negocioId, negocioData = {}, context = {}) {
         negocioData?.briefWeb?.slug ||
         ''
     ),
+    dominio: String(negocioData.dominio || ''),
     siteUrl,
     panelUrl,
     trialActive: negocioData.trialActive === true,
     templateId: String(negocioData.templateId || ''),
+    schema: (negocioData?.schema && typeof negocioData.schema === 'object') ? negocioData.schema : null,
+    businessStory: String(negocioData.businessStory || ''),
+    brief: serializeBrief(negocioData),
     createdAt: toIsoOrNull(negocioData.createdAt),
     updatedAt: toIsoOrNull(negocioData.updatedAt),
-    planStartDate: toIsoOrNull(negocioData.planStartDate),
+    planStartDate: toIsoOrNull(planStartAt),
     planActivatedAt: toIsoOrNull(negocioData.planActivatedAt),
-    planRenewalDate: toIsoOrNull(negocioData.planRenewalDate),
-    planExpiresAt: toIsoOrNull(negocioData.planExpiresAt || negocioData.expiresAt),
+    planRenewalDate: toIsoOrNull(expiresAt),
+    planStartAt: toIsoOrNull(planStartAt),
+    expiresAt: toIsoOrNull(expiresAt),
+    planExpiresAt: toIsoOrNull(negocioData.planExpiresAt || expiresAt),
   };
 }
 
@@ -682,6 +690,204 @@ async function sendLeadTextMessage({ leadId = '', phoneDigits = '', content = ''
   if (!target) throw new Error('No se pudo resolver destino para WhatsApp');
   if (!message) throw new Error('Mensaje vacío');
   return sendMessageToLead(target, message);
+}
+
+function isPaidPlan(plan = '') {
+  const key = String(plan || '').trim().toLowerCase();
+  return ['basic', 'pro', 'premium'].includes(key);
+}
+
+function parseDateInputToTimestamp(value, fieldLabel = 'fecha') {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) {
+    throw new Error(`Fecha inválida en ${fieldLabel}`);
+  }
+  return Timestamp.fromDate(parsed);
+}
+
+function normalizeDomainInput(value = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+
+  const withoutProto = raw.replace(/^https?:\/\//, '');
+  const noPath = withoutProto.split('/')[0];
+  const noPort = noPath.split(':')[0];
+  const clean = noPort.replace(/^\.+|\.+$/g, '');
+
+  if (!clean) return '';
+  return clean;
+}
+
+function hasUsefulBriefData(negocioData = {}) {
+  const brief = negocioData?.advancedBrief;
+  if (brief && typeof brief === 'object') {
+    const objectValues = Object.values(brief).flatMap((item) => {
+      if (Array.isArray(item)) return item;
+      if (item && typeof item === 'object') return Object.values(item);
+      return [item];
+    });
+    const hasContent = objectValues.some((item) => String(item || '').trim().length > 0);
+    if (hasContent) return true;
+  }
+
+  const infoStatus = String(negocioData?.infoStatus || '').toLowerCase();
+  if (infoStatus === 'informacion pendiente' || infoStatus === 'informacion procesada') return true;
+  if (negocioData?.infoSubmittedAt) return true;
+  if (negocioData?.infoProcessedAt) return true;
+  return false;
+}
+
+function getAppBaseUrl() {
+  return (
+    process.env.NEXT_PUBLIC_SITE_URL
+    || process.env.REACT_APP_SITE_URL
+    || process.env.CLIENT_APP_BASE_URL
+    || 'https://app.negociosweb.mx'
+  );
+}
+
+function buildInformationFormUrl(phoneDigits = '') {
+  const safePhone = normalizePhoneDigits(phoneDigits);
+  if (!safePhone) return '';
+  const base = String(getAppBaseUrl()).replace(/\/+$/, '');
+  return `${base}/informacion/${safePhone}`;
+}
+
+function buildBriefInviteMessage({ companyName = '', briefUrl = '' } = {}) {
+  const safeName = String(companyName || '').trim() || 'tu negocio';
+  const safeUrl = String(briefUrl || '').trim();
+  return (
+    `Hola ${safeName}.\n\n`
+    + `Te comparto tu formulario de información para preparar tu sitio:\n${safeUrl}\n\n`
+    + 'Cuando lo completes, te confirmo por este medio.'
+  );
+}
+
+function serializeBrief(negocioData = {}) {
+  const advancedBrief = (negocioData?.advancedBrief && typeof negocioData.advancedBrief === 'object')
+    ? negocioData.advancedBrief
+    : null;
+
+  return {
+    isFilled: hasUsefulBriefData(negocioData),
+    infoStatus: String(negocioData?.infoStatus || ''),
+    infoSubmittedAt: toIsoOrNull(negocioData?.infoSubmittedAt),
+    infoProcessedAt: toIsoOrNull(negocioData?.infoProcessedAt),
+    advancedBrief,
+  };
+}
+
+async function sendWhatsappFallbackMessage({
+  leadId = '',
+  phoneDigits = '',
+  message = '',
+} = {}) {
+  const safeMessage = String(message || '').trim();
+  if (!safeMessage) throw new Error('Mensaje vacío');
+
+  const safeLeadId = String(leadId || '').trim();
+  const safePhone = normalizePhoneDigits(phoneDigits || '');
+
+  let lastError = null;
+
+  if (safePhone) {
+    try {
+      await sendLeadTextMessage({ phoneDigits: safePhone, content: safeMessage });
+      return { sent: true, method: 'send-direct', target: safePhone };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (safePhone) {
+    try {
+      await sendLeadTextMessage({ phoneDigits: safePhone, content: safeMessage });
+      return { sent: true, method: 'send-bulk-message', target: safePhone };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (safeLeadId) {
+    try {
+      await sendLeadTextMessage({ leadId: safeLeadId, content: safeMessage });
+      return { sent: true, method: 'send-message', target: safeLeadId };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw new Error(lastError?.message || 'No se pudo enviar el mensaje por WhatsApp');
+}
+
+function getVercelHeaders() {
+  const token = String(process.env.VERCEL_TOKEN || '').trim();
+  if (!token) throw new Error('Falta VERCEL_TOKEN');
+  return {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  };
+}
+
+async function syncCustomDomain({
+  slug = '',
+  domain = '',
+  previousDomain = '',
+} = {}) {
+  const projectId = String(process.env.VERCEL_PROJECT_ID || '').trim();
+  const edgeConfigId = String(process.env.VERCEL_EDGE_CONFIG || '').trim();
+  if (!projectId) throw new Error('Falta VERCEL_PROJECT_ID');
+  if (!edgeConfigId) throw new Error('Falta VERCEL_EDGE_CONFIG');
+
+  const headers = getVercelHeaders();
+  const nextDomain = normalizeDomainInput(domain);
+  const prevDomain = normalizeDomainInput(previousDomain);
+  const safeSlug = String(slug || '').trim();
+
+  const edgeItems = [];
+  if (prevDomain && prevDomain !== nextDomain) {
+    edgeItems.push({ operation: 'delete', key: prevDomain });
+  }
+  if (nextDomain) {
+    edgeItems.push({ operation: 'upsert', key: nextDomain, value: safeSlug });
+  }
+
+  if (edgeItems.length > 0) {
+    await axios.patch(
+      `https://api.vercel.com/v1/edge-config/${edgeConfigId}/items`,
+      { items: edgeItems },
+      { headers }
+    );
+  }
+
+  if (prevDomain && prevDomain !== nextDomain) {
+    try {
+      await axios.delete(
+        `https://api.vercel.com/v10/projects/${projectId}/domains/${encodeURIComponent(prevDomain)}`,
+        { headers }
+      );
+    } catch {
+      // Best-effort: un dominio previo puede no existir en Vercel.
+    }
+  }
+
+  if (nextDomain) {
+    try {
+      await axios.post(
+        `https://api.vercel.com/v10/projects/${projectId}/domains`,
+        { name: nextDomain },
+        { headers }
+      );
+    } catch (error) {
+      const detail = String(error?.response?.data?.error?.message || error?.message || '');
+      if (!/already|exists|conflict|in use/i.test(detail)) {
+        throw error;
+      }
+    }
+  }
+
+  return { domain: nextDomain, previousDomain: prevDomain };
 }
 
 // ================== Personalización por giro ==================
@@ -1173,6 +1379,64 @@ app.get('/api/whatsapp/number', (_req, res) => {
   return res.status(503).json({ error: 'WhatsApp no conectado' });
 });
 
+app.post('/api/whatsapp/send-direct', async (req, res) => {
+  const { phone = '', message = '', leadId = '' } = req.body || {};
+  const safePhone = normalizePhoneDigits(phone);
+  const safeLeadId = String(leadId || '').trim();
+  const safeMessage = String(message || '').trim();
+
+  if (!safeMessage) {
+    return res.status(400).json({ error: 'Falta message.' });
+  }
+  if (!safePhone && !safeLeadId) {
+    return res.status(400).json({ error: 'Falta phone o leadId.' });
+  }
+
+  try {
+    const result = await sendLeadTextMessage({
+      leadId: safeLeadId,
+      phoneDigits: safePhone,
+      content: safeMessage,
+    });
+    return res.json({ success: true, result });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/admin/custom-domain', async (req, res) => {
+  const {
+    negocioId = '',
+    slug = '',
+    domain = '',
+    previousDomain = '',
+  } = req.body || {};
+
+  const safeNegocioId = String(negocioId || '').trim();
+  const safeSlug = String(slug || '').trim();
+  const safeDomain = normalizeDomainInput(domain);
+  const safePreviousDomain = normalizeDomainInput(previousDomain);
+
+  if (!safeNegocioId) {
+    return res.status(400).json({ error: 'Falta negocioId.' });
+  }
+  if (safeDomain && !safeSlug) {
+    return res.status(400).json({ error: 'Slug requerido cuando domain tiene valor.' });
+  }
+
+  try {
+    const sync = await syncCustomDomain({
+      slug: safeSlug,
+      domain: safeDomain,
+      previousDomain: safePreviousDomain,
+    });
+    return res.json({ success: true, ...sync });
+  } catch (error) {
+    console.error('[admin/custom-domain] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 app.get('/api/crm/lead-business', async (req, res) => {
   const { leadId = '', phone = '', negocioId = '' } = req.query || {};
 
@@ -1492,6 +1756,299 @@ app.post('/api/crm/lead-business/send-form-link', async (req, res) => {
     });
   } catch (error) {
     console.error('[crm/send-form-link] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/update', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    negocioId = '',
+    plan = '',
+    status = '',
+    contactEmail = '',
+    businessStory = '',
+    descripcion = '',
+    templateId = '',
+    schema = null,
+    slug = '',
+    planStartAt = '',
+    expiresAt = '',
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId, phone o negocioId.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    if (!negocioCtx.negocioRef || !negocioCtx.negocioData) {
+      return res.status(404).json({ error: 'No existe negocio vinculado para este lead.' });
+    }
+
+    const startTs = parseDateInputToTimestamp(planStartAt, 'planStartAt');
+    const endTs = parseDateInputToTimestamp(expiresAt, 'expiresAt');
+    if (startTs && endTs && endTs.toMillis() < startTs.toMillis()) {
+      return res.status(400).json({ error: 'La fecha de expiración no puede ser menor al inicio.' });
+    }
+
+    const patch = { updatedAt: Timestamp.now() };
+    const safePlan = String(plan || '').trim().toLowerCase();
+    if (safePlan) patch.plan = safePlan;
+    if (String(status || '').trim()) patch.status = String(status || '').trim();
+    if (String(contactEmail || '').trim()) patch.contactEmail = String(contactEmail || '').trim();
+
+    const story = String(descripcion || businessStory || '').trim();
+    if (story) patch.businessStory = story;
+    if (String(templateId || '').trim()) patch.templateId = String(templateId || '').trim();
+    if (String(slug || '').trim()) patch.slug = String(slug || '').trim();
+    if (schema && typeof schema === 'object') patch.schema = schema;
+
+    if (startTs) {
+      patch.planStartAt = startTs;
+      patch.planStartDate = startTs;
+    }
+    if (endTs) {
+      patch.expiresAt = endTs;
+      patch.planRenewalDate = endTs;
+      patch.planExpiresAt = endTs;
+    }
+
+    await negocioCtx.negocioRef.set(patch, { merge: true });
+    const updatedSnap = await negocioCtx.negocioRef.get();
+    const updatedData = updatedSnap.data() || {};
+
+    return res.json({
+      success: true,
+      negocio: serializeNegocio(updatedSnap.id, updatedData, {
+        leadId: leadCtx.leadId,
+        phoneDigits: leadCtx.phoneDigits,
+      }),
+    });
+  } catch (error) {
+    console.error('[crm/lead-business/update] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/domain', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    negocioId = '',
+    domain = '',
+    slug = '',
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId, phone o negocioId.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    if (!negocioCtx.negocioRef || !negocioCtx.negocioData) {
+      return res.status(404).json({ error: 'No existe negocio vinculado para este lead.' });
+    }
+
+    const current = negocioCtx.negocioData || {};
+    const safeDomain = normalizeDomainInput(domain);
+    const safePreviousDomain = normalizeDomainInput(current.dominio || '');
+    const safeSlug = String(slug || current.slug || current?.schema?.slug || '').trim();
+    const currentPlan = String(current.plan || '').trim().toLowerCase();
+
+    if (safeDomain && currentPlan !== 'premium') {
+      return res.status(400).json({ error: 'Solo el plan premium puede usar dominio personalizado.' });
+    }
+    if (safeDomain && !safeSlug) {
+      return res.status(400).json({ error: 'Slug requerido para asignar dominio personalizado.' });
+    }
+
+    const changedDomain = safeDomain !== safePreviousDomain;
+    const changedSlug = Boolean(safeSlug) && safeSlug !== String(current.slug || '').trim();
+    const shouldSync = Boolean(safeDomain || safePreviousDomain);
+
+    if (changedDomain || changedSlug) {
+      await negocioCtx.negocioRef.set(
+        {
+          dominio: safeDomain || null,
+          ...(safeSlug ? { slug: safeSlug } : {}),
+          updatedAt: Timestamp.now(),
+        },
+        { merge: true }
+      );
+    } else if (!shouldSync) {
+      return res.json({
+        success: true,
+        noChange: true,
+        negocio: serializeNegocio(negocioCtx.negocioId, current, {
+          leadId: leadCtx.leadId,
+          phoneDigits: leadCtx.phoneDigits,
+        }),
+      });
+    }
+
+    if (shouldSync) {
+      await syncCustomDomain({
+        slug: safeSlug,
+        domain: safeDomain,
+        previousDomain: safePreviousDomain,
+      });
+    }
+
+    const updatedSnap = await negocioCtx.negocioRef.get();
+    return res.json({
+      success: true,
+      negocio: serializeNegocio(updatedSnap.id, updatedSnap.data() || {}, {
+        leadId: leadCtx.leadId,
+        phoneDigits: leadCtx.phoneDigits,
+      }),
+    });
+  } catch (error) {
+    console.error('[crm/lead-business/domain] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/resend-info', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    negocioId = '',
+    message = '',
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId, phone o negocioId.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    if (!negocioCtx.negocioData) {
+      return res.status(404).json({ error: 'No existe negocio vinculado para este lead.' });
+    }
+
+    const negocio = negocioCtx.negocioData;
+    const targetPhone = normalizePhoneDigits(
+      negocio.contactWhatsapp || negocio.leadPhone || leadCtx.phoneDigits || leadCtx.leadData?.telefono || ''
+    );
+    if (!targetPhone) {
+      return res.status(400).json({ error: 'No se encontró teléfono para reenviar información.' });
+    }
+
+    const briefUrl = buildInformationFormUrl(targetPhone);
+    if (!briefUrl) {
+      return res.status(500).json({ error: 'No se pudo construir la URL del formulario.' });
+    }
+
+    const finalMessage = String(message || '').trim() || buildBriefInviteMessage({
+      companyName: String(negocio.companyInfo || leadCtx.leadData?.nombre || ''),
+      briefUrl,
+    });
+
+    const sent = await sendWhatsappFallbackMessage({
+      leadId: String(leadCtx.leadId || negocio.leadId || ''),
+      phoneDigits: targetPhone,
+      message: finalMessage,
+    });
+
+    return res.json({
+      success: true,
+      briefUrl,
+      sentVia: sent.method,
+      target: sent.target,
+    });
+  } catch (error) {
+    console.error('[crm/lead-business/resend-info] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/delete', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    negocioId = '',
+    force = false,
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId, phone o negocioId.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    if (!negocioCtx.negocioRef || !negocioCtx.negocioData) {
+      return res.status(404).json({ error: 'No existe negocio vinculado para este lead.' });
+    }
+
+    const negocio = negocioCtx.negocioData || {};
+    const paidActive = isPaidPlan(negocio.plan) && String(negocio.status || '').toLowerCase() === 'activo';
+    if (paidActive && !parseBooleanInput(force, false)) {
+      return res.status(409).json({
+        error: 'Este negocio tiene plan pagado activo. Confirma eliminación con force=true.',
+      });
+    }
+
+    const domain = normalizeDomainInput(negocio.dominio || '');
+    const slug = String(negocio.slug || negocio?.schema?.slug || '').trim();
+    let customDomainCleared = false;
+    let archivoDeleted = false;
+
+    if (domain && slug) {
+      try {
+        await syncCustomDomain({
+          slug,
+          domain: '',
+          previousDomain: domain,
+        });
+        customDomainCleared = true;
+      } catch (error) {
+        console.warn('[crm/lead-business/delete] No se pudo limpiar custom domain:', error?.message || error);
+      }
+    }
+
+    await negocioCtx.negocioRef.delete();
+
+    try {
+      await db.collection('ArchivoNegocios').doc(negocioCtx.negocioId).delete();
+      archivoDeleted = true;
+    } catch (error) {
+      console.warn('[crm/lead-business/delete] ArchivoNegocios best-effort falló:', error?.message || error);
+    }
+
+    return res.json({
+      success: true,
+      negocioId: negocioCtx.negocioId,
+      customDomainCleared,
+      archivoDeleted,
+    });
+  } catch (error) {
+    console.error('[crm/lead-business/delete] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
