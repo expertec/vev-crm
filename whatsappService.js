@@ -911,13 +911,13 @@ export async function connectToWhatsApp() {
 
     /* -------------------- 🔧 FIX: recepción de mensajes -------------------- */
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      // ✅ CORRECCIÓN: Procesar notify + append recientes (con dedupe) según documentación oficial de Baileys
+      // ✅ CORRECCIÓN: Procesar notify + append + prepend recientes (con dedupe) según documentación oficial de Baileys
       // https://baileys.wiki/docs/socket/receiving-updates/
       // type === 'notify': mensajes NUEVOS entrantes (lo que necesitamos)
       // type === 'append': puede incluir mensajes recientes tras reconexión
-      // type === 'prepend': historial antiguo (ignorar)
-      if (!['notify', 'append'].includes(type || '')) {
-        console.log(`[WA] ⏭️ Ignorando mensajes tipo '${type || 'undefined'}' (solo notify/append)`);
+      // type === 'prepend': historial sincronizado; filtrar por antigüedad para recuperar perdidos
+      if (!['notify', 'append', 'prepend'].includes(type || '')) {
+        console.log(`[WA] ⏭️ Ignorando mensajes tipo '${type || 'undefined'}' (solo notify/append/prepend)`);
         return;
       }
 
@@ -925,15 +925,15 @@ export async function connectToWhatsApp() {
       let messagesToProcess = incomingMessages;
       if (messagesToProcess.length === 0) return;
 
-      if (type === 'append') {
+      if (type === 'append' || type === 'prepend') {
         const refNow = Date.now();
         messagesToProcess = messagesToProcess.filter((m) => shouldProcessAppendMessage(m, refNow));
         const skippedByAge = incomingMessages.length - messagesToProcess.length;
         if (skippedByAge > 0) {
-          console.log(`[WA] ⏭️ append: ${skippedByAge} mensaje(s) descartados por antigüedad (> ${Math.round(APPEND_MAX_AGE_MS / 60000)} min)`);
+          console.log(`[WA] ⏭️ ${type}: ${skippedByAge} mensaje(s) descartados por antigüedad (> ${Math.round(APPEND_MAX_AGE_MS / 60000)} min)`);
         }
         if (messagesToProcess.length === 0) {
-          console.log('[WA] ⏭️ append sin mensajes recientes para procesar');
+          console.log(`[WA] ⏭️ ${type} sin mensajes recientes para procesar`);
           return;
         }
       }
@@ -949,9 +949,9 @@ export async function connectToWhatsApp() {
         }
         let messageHandledOk = true;
         try {
-          if (type === 'append') {
+          if (type === 'append' || type === 'prepend') {
             const tsMs = getMessageTimestampMs(msg);
-            console.log(`[WA] ℹ️ append aceptado: id=${msg?.key?.id || 'N/A'} ts=${tsMs ? new Date(tsMs).toISOString() : 'sin-timestamp'}`);
+            console.log(`[WA] ℹ️ ${type} aceptado: id=${msg?.key?.id || 'N/A'} ts=${tsMs ? new Date(tsMs).toISOString() : 'sin-timestamp'}`);
           }
 
           // Validación de JID
