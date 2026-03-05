@@ -69,6 +69,7 @@ import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
 // ================ 🆕 AUTENTICACIÓN DE CLIENTE ================
 import { loginCliente, verificarSesion, logoutCliente } from './clienteAuthRoutes.js';
 import { createProcessInformationRouter } from './routes/processInformationRoutes.js';
+import { generarPIN, generarMensajeCredenciales } from './pinUtils.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
@@ -418,6 +419,269 @@ function e164ToLeadId(e164) {
 }
 function firstName(n = '') {
   return String(n).trim().split(/\s+/)[0] || '';
+}
+
+function toIsoOrNull(value) {
+  if (!value) return null;
+  if (typeof value?.toDate === 'function') {
+    try {
+      return value.toDate().toISOString();
+    } catch {
+      return null;
+    }
+  }
+  if (value instanceof Date) return value.toISOString();
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+function parseBooleanInput(value, defaultValue = false) {
+  if (value === undefined || value === null || value === '') return defaultValue;
+  if (typeof value === 'boolean') return value;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+}
+
+function normalizePhoneDigits(value = '') {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function expandPhoneCandidates(value = '') {
+  const digits = normalizePhoneDigits(value);
+  if (!digits) return [];
+
+  const set = new Set([digits]);
+  if (/^\d{10}$/.test(digits)) {
+    set.add(`52${digits}`);
+    set.add(`521${digits}`);
+  } else if (/^52\d{10}$/.test(digits) && !digits.startsWith('521')) {
+    const tail = digits.slice(2);
+    set.add(tail);
+    set.add(`521${tail}`);
+  } else if (/^521\d{10}$/.test(digits)) {
+    const tail = digits.slice(3);
+    set.add(tail);
+    set.add(`52${tail}`);
+  }
+
+  return Array.from(set);
+}
+
+function followMergedIntoChain(maxDepth = 5) {
+  return async (snap) => {
+    if (!snap?.exists) return snap;
+    const leadsCol = db.collection('leads');
+    let current = snap;
+    const visited = new Set([snap.id]);
+
+    for (let depth = 0; depth < maxDepth; depth += 1) {
+      const data = current.data() || {};
+      const mergedInto = String(data.mergedInto || '').trim();
+      if (!mergedInto || mergedInto === current.id || visited.has(mergedInto)) break;
+      const next = await leadsCol.doc(mergedInto).get();
+      if (!next.exists) break;
+      visited.add(mergedInto);
+      current = next;
+    }
+
+    return current;
+  };
+}
+
+const resolveCanonicalLeadSnap = followMergedIntoChain(6);
+
+async function resolveLeadByIdentity({ leadId = '', phone = '' } = {}) {
+  const leadsCol = db.collection('leads');
+  const requestedLeadId = String(leadId || '').trim();
+  const phoneRaw = String(phone || '').trim();
+
+  const e164 = phoneRaw ? toE164(phoneRaw) : '';
+  let phoneDigits = normalizePhoneDigits(e164 || phoneRaw);
+
+  let leadSnap = null;
+  let finalLeadId = requestedLeadId;
+
+  if (requestedLeadId) {
+    const byId = await leadsCol.doc(requestedLeadId).get();
+    if (byId.exists) {
+      leadSnap = await resolveCanonicalLeadSnap(byId);
+      finalLeadId = leadSnap.id;
+    }
+  }
+
+  if (!leadSnap && requestedLeadId.includes('@')) {
+    for (const field of ['resolvedJid', 'jid', 'lidJid']) {
+      const byJid = await leadsCol.where(field, '==', requestedLeadId).limit(1).get();
+      if (!byJid.empty) {
+        leadSnap = await resolveCanonicalLeadSnap(byJid.docs[0]);
+        finalLeadId = leadSnap.id;
+        break;
+      }
+    }
+  }
+
+  const inferredFromLeadId = normalizePhoneDigits(requestedLeadId.split('@')[0] || '');
+  const phoneCandidates = expandPhoneCandidates(phoneDigits || inferredFromLeadId);
+
+  if (!leadSnap) {
+    for (const candidate of phoneCandidates) {
+      const byPhone = await leadsCol.where('telefono', '==', candidate).limit(1).get();
+      if (!byPhone.empty) {
+        leadSnap = await resolveCanonicalLeadSnap(byPhone.docs[0]);
+        finalLeadId = leadSnap.id;
+        break;
+      }
+    }
+  }
+
+  if (!leadSnap) {
+    for (const candidate of phoneCandidates) {
+      const byPhoneId = await leadsCol.doc(`${candidate}@s.whatsapp.net`).get();
+      if (byPhoneId.exists) {
+        leadSnap = await resolveCanonicalLeadSnap(byPhoneId);
+        finalLeadId = leadSnap.id;
+        break;
+      }
+    }
+  }
+
+  let leadData = leadSnap?.data?.() || null;
+  if (!phoneDigits) {
+    phoneDigits = normalizePhoneDigits(leadData?.telefono || phoneCandidates[0] || '');
+  }
+  if (!finalLeadId && phoneDigits) {
+    finalLeadId = `${phoneDigits}@s.whatsapp.net`;
+  }
+
+  return {
+    requestedLeadId,
+    leadId: finalLeadId,
+    leadRef: finalLeadId ? leadsCol.doc(finalLeadId) : null,
+    leadSnap,
+    leadData,
+    phoneDigits,
+    phoneCandidates: expandPhoneCandidates(phoneDigits),
+  };
+}
+
+async function resolveNegocioByIdentity({
+  negocioId = '',
+  leadId = '',
+  phoneDigits = '',
+} = {}) {
+  const negociosCol = db.collection('Negocios');
+  const requestedNegocioId = String(negocioId || '').trim();
+  const finalLeadId = String(leadId || '').trim();
+  const phoneCandidates = expandPhoneCandidates(phoneDigits);
+
+  let negocioSnap = null;
+
+  if (requestedNegocioId) {
+    const byId = await negociosCol.doc(requestedNegocioId).get();
+    if (byId.exists) negocioSnap = byId;
+  }
+
+  if (!negocioSnap && finalLeadId) {
+    const byLeadId = await negociosCol.where('leadId', '==', finalLeadId).limit(1).get();
+    if (!byLeadId.empty) negocioSnap = byLeadId.docs[0];
+  }
+
+  if (!negocioSnap) {
+    for (const candidate of phoneCandidates) {
+      const byLeadPhone = await negociosCol.where('leadPhone', '==', candidate).limit(1).get();
+      if (!byLeadPhone.empty) {
+        negocioSnap = byLeadPhone.docs[0];
+        break;
+      }
+    }
+  }
+
+  return {
+    negocioSnap,
+    negocioId: negocioSnap?.id || '',
+    negocioRef: negocioSnap?.ref || null,
+    negocioData: negocioSnap?.data?.() || null,
+  };
+}
+
+function getPanelAccessUrl() {
+  return process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login';
+}
+
+function getDefaultFormUrl() {
+  return process.env.WEB_FORM_URL || process.env.CLIENT_FORM_URL || 'https://app.negociosweb.mx';
+}
+
+function buildLeadFormUrl(baseUrl, { negocioId = '', leadId = '', phone = '' } = {}) {
+  const safeBase = String(baseUrl || '').trim() || getDefaultFormUrl();
+  const safeNegocioId = String(negocioId || '').trim();
+  const safeLeadId = String(leadId || '').trim();
+  const safePhone = normalizePhoneDigits(phone);
+
+  try {
+    const url = new URL(safeBase);
+    if (safeNegocioId) url.searchParams.set('negocioId', safeNegocioId);
+    if (safeLeadId) url.searchParams.set('leadId', safeLeadId);
+    if (safePhone) url.searchParams.set('phone', safePhone);
+    return url.toString();
+  } catch {
+    return safeBase;
+  }
+}
+
+function buildSiteUrl(negocioData = {}) {
+  const slug = String(
+    negocioData?.slug ||
+      negocioData?.schema?.slug ||
+      negocioData?.briefWeb?.slug ||
+      ''
+  ).trim();
+
+  if (!slug) return '';
+  return `https://negociosweb.mx/site/${slug}`;
+}
+
+function serializeNegocio(negocioId, negocioData = {}, context = {}) {
+  if (!negocioId || !negocioData) return null;
+  const siteUrl = buildSiteUrl(negocioData);
+  const panelUrl = getPanelAccessUrl();
+
+  return {
+    id: negocioId,
+    companyInfo: String(negocioData.companyInfo || ''),
+    status: String(negocioData.status || ''),
+    leadId: String(negocioData.leadId || context.leadId || ''),
+    leadPhone: normalizePhoneDigits(negocioData.leadPhone || context.phoneDigits || ''),
+    contactWhatsapp: normalizePhoneDigits(negocioData.contactWhatsapp || ''),
+    contactEmail: String(negocioData.contactEmail || ''),
+    plan: String(negocioData.plan || ''),
+    planNombre: String(negocioData.planNombre || ''),
+    pin: String(negocioData.pin || ''),
+    slug: String(
+      negocioData.slug ||
+        negocioData?.schema?.slug ||
+        negocioData?.briefWeb?.slug ||
+        ''
+    ),
+    siteUrl,
+    panelUrl,
+    trialActive: negocioData.trialActive === true,
+    templateId: String(negocioData.templateId || ''),
+    createdAt: toIsoOrNull(negocioData.createdAt),
+    updatedAt: toIsoOrNull(negocioData.updatedAt),
+    planStartDate: toIsoOrNull(negocioData.planStartDate),
+    planActivatedAt: toIsoOrNull(negocioData.planActivatedAt),
+    planRenewalDate: toIsoOrNull(negocioData.planRenewalDate),
+    planExpiresAt: toIsoOrNull(negocioData.planExpiresAt || negocioData.expiresAt),
+  };
+}
+
+async function sendLeadTextMessage({ leadId = '', phoneDigits = '', content = '' } = {}) {
+  const target = String(leadId || '').trim() || normalizePhoneDigits(phoneDigits);
+  const message = String(content || '').trim();
+  if (!target) throw new Error('No se pudo resolver destino para WhatsApp');
+  if (!message) throw new Error('Mensaje vacío');
+  return sendMessageToLead(target, message);
 }
 
 // ================== Personalización por giro ==================
@@ -907,6 +1171,329 @@ app.get('/api/whatsapp/number', (_req, res) => {
   const phone = getSessionPhone();
   if (phone) return res.json({ phone });
   return res.status(503).json({ error: 'WhatsApp no conectado' });
+});
+
+app.get('/api/crm/lead-business', async (req, res) => {
+  const { leadId = '', phone = '', negocioId = '' } = req.query || {};
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    const negocio = serializeNegocio(
+      negocioCtx.negocioId,
+      negocioCtx.negocioData,
+      { leadId: leadCtx.leadId, phoneDigits: leadCtx.phoneDigits }
+    );
+
+    const formUrl = buildLeadFormUrl(getDefaultFormUrl(), {
+      negocioId: negocioCtx.negocioId,
+      leadId: leadCtx.leadId,
+      phone: leadCtx.phoneDigits,
+    });
+
+    return res.json({
+      success: true,
+      lead: {
+        id: String(leadCtx.leadId || ''),
+        phone: normalizePhoneDigits(leadCtx.phoneDigits || leadCtx.leadData?.telefono || ''),
+        name: String(leadCtx.leadData?.nombre || ''),
+        estado: String(leadCtx.leadData?.estado || ''),
+        etapa: String(leadCtx.leadData?.etapa || leadCtx.leadData?.etapaNombre || ''),
+      },
+      negocio,
+      panelUrl: getPanelAccessUrl(),
+      formUrl,
+    });
+  } catch (error) {
+    console.error('[crm/lead-business] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/activate-plan', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    negocioId = '',
+    plan = '',
+    email = '',
+    sendAccess = true,
+    autoCreateBusiness = true,
+  } = req.body || {};
+
+  const safePlan = String(plan || '').trim().toLowerCase();
+  if (!safePlan || !['basic', 'pro', 'premium'].includes(safePlan)) {
+    return res.status(400).json({ error: 'Plan inválido. Usa: basic, pro o premium.' });
+  }
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId, phone o negocioId.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    let negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    const shouldAutoCreate = parseBooleanInput(autoCreateBusiness, true);
+    if (!negocioCtx.negocioRef) {
+      if (!shouldAutoCreate) {
+        return res.status(404).json({ error: 'No existe negocio vinculado para este lead.' });
+      }
+
+      const leadPhone = normalizePhoneDigits(leadCtx.phoneDigits || leadCtx.leadData?.telefono || '');
+      if (!leadCtx.leadId && !leadPhone) {
+        return res.status(400).json({ error: 'No se pudo resolver lead para crear negocio.' });
+      }
+
+      const newData = {
+        leadId: String(leadCtx.leadId || ''),
+        leadPhone,
+        companyInfo: String(leadCtx.leadData?.nombre || '').trim() || 'Cliente',
+        status: 'Sin procesar',
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+      };
+      const ref = await db.collection('Negocios').add(newData);
+      const snap = await ref.get();
+      negocioCtx = {
+        negocioRef: ref,
+        negocioId: ref.id,
+        negocioSnap: snap,
+        negocioData: snap.data() || newData,
+      };
+    }
+
+    const current = negocioCtx.negocioData || {};
+    const currentPin = String(current.pin || '').trim();
+    const finalPin = /^\d{4}$/.test(currentPin) ? currentPin : generarPIN();
+
+    let planDurationDays = 30;
+    if (safePlan === 'premium') planDurationDays = 365;
+    if (safePlan === 'basic') planDurationDays = 365;
+
+    const nowDate = new Date();
+    const renewalDate = dayjs(nowDate).add(planDurationDays, 'day').toDate();
+    const leadPhone = normalizePhoneDigits(
+      current.leadPhone || leadCtx.phoneDigits || leadCtx.leadData?.telefono || ''
+    );
+    const contactWhatsapp = normalizePhoneDigits(current.contactWhatsapp || leadPhone || '');
+
+    const updateData = {
+      plan: safePlan,
+      pin: finalPin,
+      pinCreatedAt: Timestamp.now(),
+      planStartDate: Timestamp.fromDate(nowDate),
+      planRenewalDate: Timestamp.fromDate(renewalDate),
+      planDurationDays,
+      planActivatedAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+      subscriptionStatus: 'active',
+      websiteArchived: false,
+      leadId: String(current.leadId || leadCtx.leadId || ''),
+      leadPhone,
+      contactWhatsapp,
+    };
+    if (String(email || '').trim()) {
+      updateData.contactEmail = String(email || '').trim();
+    }
+
+    await negocioCtx.negocioRef.set(updateData, { merge: true });
+    const updatedSnap = await negocioCtx.negocioRef.get();
+    const updatedData = updatedSnap.data() || {};
+
+    const shouldSendAccess = parseBooleanInput(sendAccess, true);
+    let whatsappSent = false;
+    let whatsappError = '';
+
+    if (shouldSendAccess) {
+      const companyName = String(updatedData.companyInfo || current.companyInfo || leadCtx.leadData?.nombre || 'Tu negocio');
+      const accessPhone = normalizePhoneDigits(updatedData.leadPhone || updatedData.contactWhatsapp || leadPhone);
+      const panelUrl = getPanelAccessUrl();
+      const message = generarMensajeCredenciales({
+        companyName,
+        pin: finalPin,
+        phone: accessPhone || leadCtx.phoneDigits || '',
+        plan: safePlan,
+        loginUrl: panelUrl,
+      });
+
+      try {
+        await sendLeadTextMessage({
+          leadId: String(leadCtx.leadId || updatedData.leadId || ''),
+          phoneDigits: accessPhone || leadCtx.phoneDigits,
+          content: message,
+        });
+        whatsappSent = true;
+      } catch (sendError) {
+        whatsappError = String(sendError?.message || sendError);
+        console.warn('[crm/activate-plan] No se pudo enviar acceso por WhatsApp:', whatsappError);
+      }
+    }
+
+    return res.json({
+      success: true,
+      negocio: serializeNegocio(updatedSnap.id, updatedData, {
+        leadId: leadCtx.leadId,
+        phoneDigits: leadCtx.phoneDigits,
+      }),
+      panelUrl: getPanelAccessUrl(),
+      formUrl: buildLeadFormUrl(getDefaultFormUrl(), {
+        negocioId: updatedSnap.id,
+        leadId: String(updatedData.leadId || leadCtx.leadId || ''),
+        phone: normalizePhoneDigits(updatedData.leadPhone || leadCtx.phoneDigits || ''),
+      }),
+      whatsappSent,
+      ...(whatsappError ? { whatsappError } : {}),
+    });
+  } catch (error) {
+    console.error('[crm/activate-plan] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/send-access', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    negocioId = '',
+    autoGeneratePin = true,
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId, phone o negocioId.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    if (!negocioCtx.negocioRef || !negocioCtx.negocioData) {
+      return res.status(404).json({ error: 'No existe negocio vinculado para este lead.' });
+    }
+
+    const current = negocioCtx.negocioData || {};
+    const shouldAutoGeneratePin = parseBooleanInput(autoGeneratePin, true);
+    let finalPin = String(current.pin || '').trim();
+    if (!/^\d{4}$/.test(finalPin)) {
+      if (!shouldAutoGeneratePin) {
+        return res.status(400).json({ error: 'Este negocio no tiene PIN. Activa un plan primero.' });
+      }
+      finalPin = generarPIN();
+      await negocioCtx.negocioRef.set(
+        {
+          pin: finalPin,
+          pinCreatedAt: Timestamp.now(),
+          updatedAt: Timestamp.now(),
+        },
+        { merge: true }
+      );
+    }
+
+    const companyName = String(current.companyInfo || leadCtx.leadData?.nombre || 'Tu negocio');
+    const accessPhone = normalizePhoneDigits(
+      current.leadPhone || current.contactWhatsapp || leadCtx.phoneDigits || leadCtx.leadData?.telefono || ''
+    );
+    const panelUrl = getPanelAccessUrl();
+    const message = generarMensajeCredenciales({
+      companyName,
+      pin: finalPin,
+      phone: accessPhone || leadCtx.phoneDigits || '',
+      plan: String(current.plan || 'basic'),
+      loginUrl: panelUrl,
+    });
+
+    await sendLeadTextMessage({
+      leadId: String(leadCtx.leadId || current.leadId || ''),
+      phoneDigits: accessPhone || leadCtx.phoneDigits,
+      content: message,
+    });
+
+    const updatedSnap = await negocioCtx.negocioRef.get();
+    return res.json({
+      success: true,
+      negocio: serializeNegocio(updatedSnap.id, updatedSnap.data() || {}, {
+        leadId: leadCtx.leadId,
+        phoneDigits: leadCtx.phoneDigits,
+      }),
+      panelUrl,
+    });
+  } catch (error) {
+    console.error('[crm/send-access] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/send-form-link', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    negocioId = '',
+    formUrl = '',
+    message = '',
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId, phone o negocioId.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    const safeFormUrl = buildLeadFormUrl(formUrl || getDefaultFormUrl(), {
+      negocioId: negocioCtx.negocioId || negocioId,
+      leadId: leadCtx.leadId,
+      phone: leadCtx.phoneDigits,
+    });
+
+    const customMessage = String(message || '').trim();
+    const finalMessage =
+      customMessage ||
+      `¡Hola! 👋 Gracias por tu interés.\n\nPara crear tu muestra GRATIS, llena este formulario de 2 minutos:\n${safeFormUrl}\n\nCuando lo termines me avisas por aquí y continuamos.`;
+
+    await sendLeadTextMessage({
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+      content: finalMessage,
+    });
+
+    if (leadCtx.leadRef) {
+      await leadCtx.leadRef.set(
+        {
+          formLinkSentAt: new Date(),
+          formLinkSentUrl: safeFormUrl,
+          etiquetas: admin.firestore.FieldValue.arrayUnion('FormLinkSent'),
+        },
+        { merge: true }
+      );
+    }
+
+    return res.json({
+      success: true,
+      formUrl: safeFormUrl,
+      negocioId: negocioCtx.negocioId || '',
+    });
+  } catch (error) {
+    console.error('[crm/send-form-link] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
 });
 
 // Enviar mensaje manual
