@@ -89,6 +89,64 @@ const OpenAICtor = OpenAIImport?.OpenAI || OpenAIImport;
 
 import { classifyBusiness } from './utils/businessClassifier.js';
 
+function normalizeJidCandidate(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!raw.includes('@')) return '';
+  const [user, domain] = raw.split('@');
+  const cleanUser = String(user || '').split(':')[0].replace(/\s+/g, '');
+  return `${cleanUser}@${domain}`;
+}
+
+function isSuspiciousPseudoPhoneJid(value = '') {
+  const normalized = normalizeJidCandidate(value);
+  if (!normalized.endsWith('@s.whatsapp.net')) return false;
+  const [user] = normalized.split('@');
+  const digits = String(user || '').replace(/\D/g, '');
+  return digits.length > 13;
+}
+
+function isSafeMxPhone(value = '') {
+  const digits = String(value || '').replace(/\D/g, '');
+  return /^\d{10}$/.test(digits) || /^52\d{10}$/.test(digits) || /^521\d{10}$/.test(digits);
+}
+
+function getUnsafeLeadTargetError(leadId, leadData = {}) {
+  const resolvedJid = String(leadData.resolvedJid || '').trim();
+  const jid = String(leadData.jid || '').trim();
+  const lidJid = String(leadData.lidJid || '').trim();
+  const phone = String(leadData.telefono || '').replace(/\D/g, '');
+
+  const suspicious = [resolvedJid, jid].find((candidate) => isSuspiciousPseudoPhoneJid(candidate));
+  if (!suspicious) return '';
+  if (lidJid && /@lid$/i.test(lidJid)) return '';
+  if (isSafeMxPhone(phone)) return '';
+
+  return `Lead ${leadId} tiene un destino WhatsApp no confiable (${suspicious}). Espera un mensaje entrante para resolver su JID real.`;
+}
+
+function getUnsafeIdentifierTargetError(identifier = '') {
+  const raw = String(identifier || '').trim();
+  if (!raw) return 'Lead sin identificador de destino.';
+
+  const normalizedJid = normalizeJidCandidate(raw);
+  if (normalizedJid) {
+    if (isSuspiciousPseudoPhoneJid(normalizedJid)) {
+      return `Destino WhatsApp no confiable (${normalizedJid}). Espera un mensaje entrante para resolver su JID real.`;
+    }
+    return '';
+  }
+
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) {
+    return `Lead ${raw} no existe y no tiene un identificador de WhatsApp válido para registrarlo automáticamente.`;
+  }
+  if (!isSafeMxPhone(digits)) {
+    return `Destino WhatsApp no confiable (${raw}). Usa un número MX válido o espera un mensaje entrante.`;
+  }
+  return '';
+}
+
 function buildUnsplashFeaturedQueries(summary = {}) {
   const objetivoMap = {
     ecommerce: 'tienda online,productos',
@@ -863,8 +921,17 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
 
   try {
     const leadDoc = await db.collection('leads').doc(leadId).get();
-    if (!leadDoc.exists)
-      return res.status(404).json({ error: 'Lead no encontrado' });
+    if (leadDoc.exists) {
+      const unsafeTargetError = getUnsafeLeadTargetError(String(leadId), leadDoc.data() || {});
+      if (unsafeTargetError) {
+        return res.status(409).json({ error: unsafeTargetError });
+      }
+    } else {
+      const unsafeIdentifierError = getUnsafeIdentifierTargetError(String(leadId));
+      if (unsafeIdentifierError) {
+        return res.status(409).json({ error: unsafeIdentifierError });
+      }
+    }
     const result = await sendMessageToLead(leadId, message, {
       replyToWaMessageId,
       replyPreview,
@@ -886,8 +953,16 @@ app.post('/api/whatsapp/send-image', async (req, res) => {
 
   try {
     const leadDoc = await db.collection('leads').doc(String(leadId)).get();
-    if (!leadDoc.exists) {
-      return res.status(404).json({ error: 'Lead no encontrado' });
+    if (leadDoc.exists) {
+      const unsafeTargetError = getUnsafeLeadTargetError(String(leadId), leadDoc.data() || {});
+      if (unsafeTargetError) {
+        return res.status(409).json({ error: unsafeTargetError });
+      }
+    } else {
+      const unsafeIdentifierError = getUnsafeIdentifierTargetError(String(leadId));
+      if (unsafeIdentifierError) {
+        return res.status(409).json({ error: unsafeIdentifierError });
+      }
     }
 
     const result = await sendImageToLead(String(leadId), String(imageUrl), String(caption || ''));
@@ -913,8 +988,16 @@ app.post('/api/whatsapp/send-audio-url', async (req, res) => {
 
   try {
     const leadDoc = await db.collection('leads').doc(String(leadId)).get();
-    if (!leadDoc.exists) {
-      return res.status(404).json({ error: 'Lead no encontrado' });
+    if (leadDoc.exists) {
+      const unsafeTargetError = getUnsafeLeadTargetError(String(leadId), leadDoc.data() || {});
+      if (unsafeTargetError) {
+        return res.status(409).json({ error: unsafeTargetError });
+      }
+    } else {
+      const unsafeIdentifierError = getUnsafeIdentifierTargetError(String(leadId));
+      if (unsafeIdentifierError) {
+        return res.status(409).json({ error: unsafeIdentifierError });
+      }
     }
 
     await sendAudioMessage(String(leadId), String(audioUrl), {
@@ -1098,10 +1181,20 @@ app.post(
     try {
       if (leadId) {
         const leadDoc = await db.collection('leads').doc(String(leadId)).get();
-        if (!leadDoc.exists) {
-          return res
-            .status(404)
-            .json({ success: false, error: 'Lead no encontrado' });
+        if (leadDoc.exists) {
+          const unsafeTargetError = getUnsafeLeadTargetError(String(leadId), leadDoc.data() || {});
+          if (unsafeTargetError) {
+            return res
+              .status(409)
+              .json({ success: false, error: unsafeTargetError });
+          }
+        } else {
+          const unsafeIdentifierError = getUnsafeIdentifierTargetError(String(leadId));
+          if (unsafeIdentifierError) {
+            return res
+              .status(409)
+              .json({ success: false, error: unsafeIdentifierError });
+          }
         }
         // Delegar resolución de destino a whatsappService para evitar enviar a IDs @lid convertidos.
         target = String(leadId);

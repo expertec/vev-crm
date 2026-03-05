@@ -254,6 +254,11 @@ function isSuspiciousPseudoPhoneJid(jid) {
   return digits.length > 13;
 }
 
+function isSafePhoneForJidFallback(phone = '') {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return /^\d{10}$/.test(digits) || /^52\d{10}$/.test(digits) || /^521\d{10}$/.test(digits);
+}
+
 function getMessageTimestampMs(msg) {
   const raw = msg?.messageTimestamp;
   if (!raw) return null;
@@ -1435,8 +1440,9 @@ async function resolveLeadAndTarget(phoneOrJid) {
   let num = isJidInput ? phoneFromJid(normalizedInputJid) : normalizePhoneForWA(raw);
 
   const provisionalLeadId = normalizedInputJid || null;
+  const initialNumericTarget = isSafePhoneForJidFallback(num) ? `${num}@s.whatsapp.net` : null;
   let leadId = normalizedInputJid || null;
-  let targetJid = normalizedInputJid || (num ? `${num}@s.whatsapp.net` : null);
+  let targetJid = normalizedInputJid || initialNumericTarget;
   let leadData = null;
   let leadRef = null;
 
@@ -1483,33 +1489,84 @@ async function resolveLeadAndTarget(phoneOrJid) {
     const candidateJid = normalizeJid(leadData.resolvedJid || leadData.jid || leadId);
     const lidCandidate = normalizeJid(leadData.lidJid || '');
     const hasLidContext = isLidJid(lidCandidate) || isLidJid(normalizedInputJid);
+    const candidateIsSuspicious = isSuspiciousPseudoPhoneJid(candidateJid);
     const canUseNumericFallback = Boolean(
       num
       && (
         /^521\d{10}$/.test(String(num))
-        || (!hasLidContext && String(num).length >= 10)
+        || (!hasLidContext && /^52\d{10}$/.test(String(num)))
+        || (!hasLidContext && /^\d{10}$/.test(String(num)))
       )
     );
     const candidateLooksWrongForLid = Boolean(
-      hasLidContext
-      && isUserJid(candidateJid)
-      && isSuspiciousPseudoPhoneJid(candidateJid)
+      hasLidContext && isUserJid(candidateJid) && candidateIsSuspicious
     );
 
     if (candidateLooksWrongForLid && isLidJid(lidCandidate)) {
       targetJid = lidCandidate;
-    } else if (isUserJid(candidateJid) || isLidJid(candidateJid)) {
+    } else if (isUserJid(candidateJid) && !candidateIsSuspicious) {
       targetJid = candidateJid;
+    } else if (isLidJid(candidateJid)) {
+      targetJid = candidateJid;
+    } else if (isLidJid(lidCandidate)) {
+      targetJid = lidCandidate;
     } else if (canUseNumericFallback) {
       targetJid = `${num}@s.whatsapp.net`;
-    } else if (candidateJid) {
+    } else if (candidateJid && !candidateIsSuspicious) {
       targetJid = candidateJid;
+    } else {
+      targetJid = null;
+      if (candidateIsSuspicious) {
+        console.warn(
+          `[WA] Destino bloqueado por JID sospechoso (${candidateJid}) para lead ${leadId}.`
+        );
+      }
     }
   } else if (num) {
-    targetJid = `${num}@s.whatsapp.net`;
+    targetJid = isSafePhoneForJidFallback(num) ? `${num}@s.whatsapp.net` : null;
+  }
+
+  if (!leadId && num && isSafePhoneForJidFallback(num)) {
+    leadId = `${num}@s.whatsapp.net`;
   }
 
   return { leadId, targetJid, num, leadData, leadRef, provisionalLeadId };
+}
+
+async function ensureLeadDocForOutbound({
+  leadRef,
+  leadId,
+  targetJid,
+  num,
+}) {
+  const targetRef = leadRef || (leadId ? db.collection('leads').doc(String(leadId)) : null);
+  if (!targetRef) return null;
+
+  const snap = await targetRef.get();
+  if (snap.exists) return targetRef;
+
+  const normalizedTarget = normalizeJid(targetJid || leadId || '');
+  const phone = String(num || phoneFromJid(normalizedTarget) || '').replace(/\D/g, '');
+
+  const patch = {
+    fecha_creacion: now(),
+    estado: 'nuevo',
+    source: 'manual',
+    unreadCount: 0,
+    ...(phone ? { telefono: phone } : {}),
+    ...(normalizedTarget ? { jid: normalizedTarget } : {}),
+  };
+
+  if (isUserJid(normalizedTarget) && !isSuspiciousPseudoPhoneJid(normalizedTarget)) {
+    patch.resolvedJid = normalizedTarget;
+    patch.needsJidResolution = false;
+  } else if (isLidJid(normalizedTarget)) {
+    patch.lidJid = normalizedTarget;
+    patch.needsJidResolution = true;
+  }
+
+  await targetRef.set(patch, { merge: true });
+  return targetRef;
 }
 
 async function syncAliasLeadToCanonical({
@@ -1590,9 +1647,25 @@ export async function sendMessageToLead(phoneOrJid, messageContent, options = {}
       ...(replyToWaMessageId ? { replyToWaMessageId } : {}),
       ...(replyPreview ? { replyToPreview: replyPreview.slice(0, 160) } : {}),
     };
-    const canonicalRef = leadRef || db.collection('leads').doc(leadId);
+    const canonicalRef = await ensureLeadDocForOutbound({
+      leadRef,
+      leadId,
+      targetJid,
+      num,
+    });
     await persistLeadMessage(canonicalRef, outMsg, sent?.key?.id || null);
-    await canonicalRef.update(buildLeadLastMessagePatch(outMsg));
+    await canonicalRef.set(
+      {
+        ...buildLeadLastMessagePatch(outMsg),
+        ...(num ? { telefono: num } : {}),
+        ...(targetJid ? { jid: targetJid } : {}),
+        ...(isUserJid(targetJid) && !isSuspiciousPseudoPhoneJid(targetJid)
+          ? { resolvedJid: targetJid, needsJidResolution: false }
+          : {}),
+        ...(isLidJid(targetJid) ? { lidJid: targetJid, needsJidResolution: true } : {}),
+      },
+      { merge: true }
+    );
     await syncAliasLeadToCanonical({
       provisionalLeadId,
       canonicalLeadId: leadId,
@@ -1626,9 +1699,25 @@ export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
       sender: 'business',
       timestamp: now(),
     };
-    const canonicalRef = leadRef || db.collection('leads').doc(leadId);
+    const canonicalRef = await ensureLeadDocForOutbound({
+      leadRef,
+      leadId,
+      targetJid,
+      num,
+    });
     await persistLeadMessage(canonicalRef, outMsg, sent?.key?.id || null);
-    await canonicalRef.update(buildLeadLastMessagePatch(outMsg));
+    await canonicalRef.set(
+      {
+        ...buildLeadLastMessagePatch(outMsg),
+        ...(num ? { telefono: num } : {}),
+        ...(targetJid ? { jid: targetJid } : {}),
+        ...(isUserJid(targetJid) && !isSuspiciousPseudoPhoneJid(targetJid)
+          ? { resolvedJid: targetJid, needsJidResolution: false }
+          : {}),
+        ...(isLidJid(targetJid) ? { lidJid: targetJid, needsJidResolution: true } : {}),
+      },
+      { merge: true }
+    );
     await syncAliasLeadToCanonical({
       provisionalLeadId,
       canonicalLeadId: leadId,
