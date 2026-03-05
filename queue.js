@@ -794,6 +794,25 @@ async function persistSystemMessage(leadId, content) {
   }
 }
 
+async function disableLeadSequencesMissingTarget(leadRef, leadData = {}, reason = '') {
+  const safeReason = String(reason || 'Lead sin JID ni teléfono').trim();
+  await leadRef.set({
+    hasActiveSequences: false,
+    secuenciasActivas: [],
+    nextSequenceRunAt: FieldValue.delete(),
+    sequenceSentSteps: FieldValue.delete(),
+    sequenceBlockedReason: 'missing_destination',
+    sequenceBlockedDetail: safeReason,
+    sequenceBlockedAt: Timestamp.now(),
+    sequenceBlockedMeta: {
+      jid: String(leadData?.jid || ''),
+      resolvedJid: String(leadData?.resolvedJid || ''),
+      telefono: cleanLeadPhone(leadData?.telefono || ''),
+      lidJid: String(leadData?.lidJid || ''),
+    },
+  }, { merge: true });
+}
+
 export async function processLeadSequences(leadId) {
   const leadRef = db.collection('leads').doc(leadId);
   const lock = await takeSequenceLock(leadRef);
@@ -820,6 +839,17 @@ export async function processLeadSequences(leadId) {
         hasActiveSequences: false
       }, { merge: true });
       return { processed: 0, reason: 'empty' };
+    }
+
+    const destination = resolveLeadJidAndPhone(data);
+    if (!destination?.jid) {
+      await disableLeadSequencesMissingTarget(
+        leadRef,
+        data,
+        `Lead sin JID ni teléfono: ${leadId}`
+      );
+      await persistSystemMessage(leadId, '[sequence] pausada: destino WhatsApp no resoluble');
+      return { processed: 0, reason: 'missing_destination' };
     }
 
     const now = new Date();
@@ -903,7 +933,14 @@ export async function processSequenceLeadsBatch({ limit = MAX_SEQUENCE_BATCH } =
       const res = await processLeadSequences(doc.id);
       total += res?.processed || 0;
     } catch (err) {
-      console.error('[processSequenceLeadsBatch] error:', err?.message || err);
+      const msg = String(err?.message || err || '');
+      console.error('[processSequenceLeadsBatch] error:', msg);
+
+      if (/Lead sin JID ni teléfono/i.test(msg)) {
+        const leadData = doc.data() || {};
+        await disableLeadSequencesMissingTarget(doc.ref, leadData, msg).catch(() => {});
+        await persistSystemMessage(doc.id, '[sequence] desactivada automáticamente por destino inválido').catch(() => {});
+      }
     }
   }
   return total;

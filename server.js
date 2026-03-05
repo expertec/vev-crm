@@ -823,6 +823,7 @@ async function sendWhatsappFallbackMessage({
 
 const FINANCE_SERVICES_COLLECTION = 'CrmFinanceServices';
 const FINANCE_TRANSACTIONS_COLLECTION = 'CrmFinanceTransactions';
+const FINANCE_CATALOG_COLLECTION = 'CrmFinanceCatalog';
 const FINANCE_SERVICE_STATUSES = new Set(['pendiente', 'en_proceso', 'pagado', 'cancelado']);
 const FINANCE_TRANSACTION_TYPES = new Set(['income', 'expense']);
 
@@ -941,6 +942,8 @@ function serializeFinanceService(serviceId, serviceData = {}) {
     serviceName: String(serviceData.serviceName || '').trim(),
     category: String(serviceData.category || '').trim(),
     description: String(serviceData.description || '').trim(),
+    catalogItemId: String(serviceData.catalogItemId || '').trim(),
+    catalogItemName: String(serviceData.catalogItemName || '').trim(),
     currency: String(serviceData.currency || 'MXN'),
     status,
     leadId: String(serviceData.leadId || '').trim(),
@@ -962,6 +965,23 @@ function serializeFinanceService(serviceId, serviceData = {}) {
     isOverdue,
     createdAt: toIsoOrNull(serviceData.createdAt),
     updatedAt: toIsoOrNull(serviceData.updatedAt),
+  };
+}
+
+function serializeFinanceCatalogItem(itemId, itemData = {}) {
+  if (!itemId || !itemData) return null;
+  const unitPrice = Math.max(0, roundMoney(toMoneyNumber(itemData.unitPrice, 0)));
+  return {
+    id: itemId,
+    name: String(itemData.name || '').trim(),
+    category: String(itemData.category || '').trim(),
+    description: String(itemData.description || '').trim(),
+    unitPrice,
+    currency: String(itemData.currency || 'MXN').trim().toUpperCase() || 'MXN',
+    sku: String(itemData.sku || '').trim(),
+    active: itemData.active !== false,
+    createdAt: toIsoOrNull(itemData.createdAt),
+    updatedAt: toIsoOrNull(itemData.updatedAt),
   };
 }
 
@@ -2450,6 +2470,150 @@ app.post('/api/crm/lead-business/delete', async (req, res) => {
   }
 });
 
+app.get('/api/crm/finance/catalog', async (req, res) => {
+  try {
+    const onlyActive = parseBooleanInput(req.query?.active, false);
+    const maxDocs = Math.max(20, Math.min(1000, Number(req.query?.maxDocs || 300)));
+
+    const snap = await db
+      .collection(FINANCE_CATALOG_COLLECTION)
+      .orderBy('updatedAt', 'desc')
+      .limit(maxDocs)
+      .get();
+
+    let items = snap.docs
+      .map((docSnap) => serializeFinanceCatalogItem(docSnap.id, docSnap.data() || {}))
+      .filter(Boolean);
+
+    if (onlyActive) {
+      items = items.filter((item) => item.active !== false);
+    }
+
+    return res.json({
+      success: true,
+      items,
+    });
+  } catch (error) {
+    console.error('[crm/finance/catalog] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/finance/catalog', async (req, res) => {
+  const {
+    name = '',
+    category = '',
+    description = '',
+    unitPrice = '',
+    currency = 'MXN',
+    sku = '',
+    active = true,
+  } = req.body || {};
+
+  try {
+    const safeName = String(name || '').trim();
+    if (!safeName) {
+      return res.status(400).json({ error: 'Falta name.' });
+    }
+
+    const safePrice = parseMoneyInput(unitPrice, 'unitPrice', {
+      required: true,
+      allowZero: true,
+      min: 0,
+    });
+    const safeCategory = String(category || '').trim().slice(0, 120);
+    const safeDescription = String(description || '').trim().slice(0, 2000);
+    const safeCurrency = String(currency || 'MXN').trim().toUpperCase().slice(0, 8) || 'MXN';
+    const safeSku = String(sku || '').trim().slice(0, 60);
+    const safeActive = parseBooleanInput(active, true);
+
+    const ref = await db.collection(FINANCE_CATALOG_COLLECTION).add({
+      name: safeName,
+      category: safeCategory,
+      description: safeDescription,
+      unitPrice: safePrice,
+      currency: safeCurrency,
+      sku: safeSku,
+      active: safeActive,
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+    });
+
+    const created = await ref.get();
+    return res.status(201).json({
+      success: true,
+      item: serializeFinanceCatalogItem(created.id, created.data() || {}),
+    });
+  } catch (error) {
+    console.error('[crm/finance/catalog:create] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/finance/catalog/:itemId', async (req, res) => {
+  const itemId = String(req.params?.itemId || '').trim();
+  if (!itemId) return res.status(400).json({ error: 'Falta itemId.' });
+
+  const {
+    name,
+    category,
+    description,
+    unitPrice,
+    currency,
+    sku,
+    active,
+  } = req.body || {};
+
+  try {
+    const ref = db.collection(FINANCE_CATALOG_COLLECTION).doc(itemId);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ error: 'Item de catálogo no encontrado.' });
+
+    const patch = { updatedAt: Timestamp.now() };
+    if (name !== undefined) patch.name = String(name || '').trim().slice(0, 160);
+    if (category !== undefined) patch.category = String(category || '').trim().slice(0, 120);
+    if (description !== undefined) patch.description = String(description || '').trim().slice(0, 2000);
+    if (unitPrice !== undefined) {
+      patch.unitPrice = parseMoneyInput(unitPrice, 'unitPrice', {
+        required: true,
+        allowZero: true,
+        min: 0,
+      });
+    }
+    if (currency !== undefined) {
+      patch.currency = String(currency || 'MXN').trim().toUpperCase().slice(0, 8) || 'MXN';
+    }
+    if (sku !== undefined) patch.sku = String(sku || '').trim().slice(0, 60);
+    if (active !== undefined) patch.active = parseBooleanInput(active, true);
+
+    await ref.set(patch, { merge: true });
+    const updated = await ref.get();
+    return res.json({
+      success: true,
+      item: serializeFinanceCatalogItem(updated.id, updated.data() || {}),
+    });
+  } catch (error) {
+    console.error('[crm/finance/catalog:update] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.delete('/api/crm/finance/catalog/:itemId', async (req, res) => {
+  const itemId = String(req.params?.itemId || '').trim();
+  if (!itemId) return res.status(400).json({ error: 'Falta itemId.' });
+
+  try {
+    const ref = db.collection(FINANCE_CATALOG_COLLECTION).doc(itemId);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ error: 'Item de catálogo no encontrado.' });
+    await ref.delete();
+    return res.json({ success: true, itemId });
+  } catch (error) {
+    console.error('[crm/finance/catalog:delete] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 app.get('/api/crm/finance/overview', async (req, res) => {
   try {
     const fromMs = parseDateRangeBound(req.query?.from);
@@ -2505,6 +2669,9 @@ app.get('/api/crm/finance/services', async (req, res) => {
     const maxDocs = Math.max(100, Math.min(4000, Number(req.query?.maxDocs || 1800)));
     const safeStatusRaw = String(req.query?.status || '').trim().toLowerCase();
     const safeSearch = String(req.query?.search || '').trim().toLowerCase();
+    const safeLeadId = String(req.query?.leadId || '').trim();
+    const safeLeadPhone = normalizePhoneDigits(req.query?.leadPhone || '');
+    const safeNegocioId = String(req.query?.negocioId || '').trim();
     const onlyPending = parseBooleanInput(req.query?.onlyPending, false);
 
     const snap = await db
@@ -2520,6 +2687,16 @@ app.get('/api/crm/finance/services', async (req, res) => {
     if (safeStatusRaw && safeStatusRaw !== 'all') {
       const normalizedStatus = normalizeFinanceStatus(safeStatusRaw);
       items = items.filter((item) => item.status === normalizedStatus);
+    }
+
+    if (safeLeadId) {
+      items = items.filter((item) => String(item.leadId || '').trim() === safeLeadId);
+    }
+    if (safeLeadPhone) {
+      items = items.filter((item) => normalizePhoneDigits(item.leadPhone || '') === safeLeadPhone);
+    }
+    if (safeNegocioId) {
+      items = items.filter((item) => String(item.negocioId || '').trim() === safeNegocioId);
     }
 
     if (onlyPending) {
@@ -2584,6 +2761,8 @@ app.post('/api/crm/finance/services', async (req, res) => {
   const {
     clientName = '',
     serviceName = '',
+    catalogItemId = '',
+    catalogItemName = '',
     category = '',
     description = '',
     leadId = '',
@@ -2632,6 +2811,8 @@ app.post('/api/crm/finance/services', async (req, res) => {
     const safeLeadId = String(leadId || '').trim();
     const safeLeadPhone = normalizePhoneDigits(leadPhone);
     const safeNegocioId = String(negocioId || '').trim();
+    const safeCatalogItemId = String(catalogItemId || '').trim();
+    const safeCatalogItemName = String(catalogItemName || '').trim();
     const safeCurrency = String(currency || 'MXN').trim().toUpperCase().slice(0, 8) || 'MXN';
     const safeCategory = String(category || '').trim().slice(0, 120);
     const safeDescription = String(description || '').trim().slice(0, 2000);
@@ -2658,6 +2839,8 @@ app.post('/api/crm/finance/services', async (req, res) => {
       const basePayload = {
         clientName: safeClientName || safeLeadPhone || safeLeadId || 'Cliente',
         serviceName: safeServiceName,
+        catalogItemId: safeCatalogItemId,
+        catalogItemName: safeCatalogItemName,
         category: safeCategory,
         description: safeDescription,
         leadId: safeLeadId,
@@ -2763,6 +2946,12 @@ app.post('/api/crm/finance/services/:serviceId', async (req, res) => {
     }
     if (Object.prototype.hasOwnProperty.call(body, 'serviceName')) {
       patch.serviceName = String(body.serviceName || '').trim().slice(0, 160);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'catalogItemId')) {
+      patch.catalogItemId = String(body.catalogItemId || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'catalogItemName')) {
+      patch.catalogItemName = String(body.catalogItemName || '').trim().slice(0, 180);
     }
     if (Object.prototype.hasOwnProperty.call(body, 'category')) {
       patch.category = String(body.category || '').trim().slice(0, 120);
