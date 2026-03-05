@@ -821,6 +821,403 @@ async function sendWhatsappFallbackMessage({
   throw new Error(lastError?.message || 'No se pudo enviar el mensaje por WhatsApp');
 }
 
+const FINANCE_SERVICES_COLLECTION = 'CrmFinanceServices';
+const FINANCE_TRANSACTIONS_COLLECTION = 'CrmFinanceTransactions';
+const FINANCE_SERVICE_STATUSES = new Set(['pendiente', 'en_proceso', 'pagado', 'cancelado']);
+const FINANCE_TRANSACTION_TYPES = new Set(['income', 'expense']);
+
+function roundMoney(value) {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num)) return 0;
+  return Math.round((num + Number.EPSILON) * 100) / 100;
+}
+
+function toMoneyNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === '') return fallback;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const raw = String(value).trim();
+  if (!raw) return fallback;
+
+  let normalized = raw.replace(/[^\d,.-]/g, '');
+  if (normalized.includes(',') && normalized.includes('.')) {
+    normalized = normalized.replace(/,/g, '');
+  } else if (normalized.includes(',') && !normalized.includes('.')) {
+    normalized = normalized.replace(/,/g, '.');
+  }
+
+  const amount = Number(normalized);
+  return Number.isFinite(amount) ? amount : fallback;
+}
+
+function parseMoneyInput(value, fieldLabel = 'monto', {
+  required = false,
+  min = 0,
+  allowZero = true,
+} = {}) {
+  if (value === null || value === undefined || value === '') {
+    if (required) throw new Error(`Falta ${fieldLabel}`);
+    return null;
+  }
+
+  const amount = toMoneyNumber(value, Number.NaN);
+  if (!Number.isFinite(amount)) throw new Error(`${fieldLabel} inválido`);
+  if (amount < min) throw new Error(`${fieldLabel} debe ser mayor o igual a ${min}`);
+  if (!allowZero && amount === 0) throw new Error(`${fieldLabel} debe ser mayor a 0`);
+  return roundMoney(amount);
+}
+
+function normalizeFinanceStatus(value = '') {
+  const key = String(value || '').trim().toLowerCase();
+  if (!key) return 'pendiente';
+  if (key === 'pendiente' || key === 'nuevo') return 'pendiente';
+  if (key === 'en proceso' || key === 'en_proceso' || key === 'proceso') return 'en_proceso';
+  if (key === 'pagado' || key === 'completado' || key === 'cerrado') return 'pagado';
+  if (key === 'cancelado' || key === 'cancelada') return 'cancelado';
+  return FINANCE_SERVICE_STATUSES.has(key) ? key : 'pendiente';
+}
+
+function normalizeFinanceType(value = '') {
+  const key = String(value || '').trim().toLowerCase();
+  if (key === 'income' || key === 'ingreso') return 'income';
+  if (key === 'expense' || key === 'egreso') return 'expense';
+  return '';
+}
+
+function parseDateInputToTimestampOrNull(value, fieldLabel = 'fecha') {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) {
+    throw new Error(`${fieldLabel} inválida`);
+  }
+  return Timestamp.fromDate(parsed);
+}
+
+function parseDateRangeBound(value, { endOfDay = false } = {}) {
+  if (!value) return null;
+  const parsed = new Date(String(value));
+  if (!Number.isFinite(parsed.getTime())) return null;
+  if (endOfDay) {
+    parsed.setHours(23, 59, 59, 999);
+  } else {
+    parsed.setHours(0, 0, 0, 0);
+  }
+  return parsed.getTime();
+}
+
+function serializeFinanceService(serviceId, serviceData = {}) {
+  if (!serviceId || !serviceData) return null;
+
+  const totalAmount = Math.max(0, roundMoney(toMoneyNumber(serviceData.totalAmount, 0)));
+  const paidAmount = Math.max(0, roundMoney(toMoneyNumber(serviceData.paidAmount, 0)));
+  const pendingAmountStored = roundMoney(toMoneyNumber(serviceData.pendingAmount, Math.max(0, totalAmount - paidAmount)));
+  const pendingAmount = Math.max(0, pendingAmountStored);
+
+  const advancePercentRaw = toMoneyNumber(serviceData.advancePercent, 50);
+  const advancePercent = Math.max(0, Math.min(100, roundMoney(advancePercentRaw)));
+  const advanceAmount = roundMoney(
+    toMoneyNumber(serviceData.advanceAmount, totalAmount * (advancePercent / 100))
+  );
+  const advancePendingAmount = Math.max(0, roundMoney(advanceAmount - paidAmount));
+
+  const estimatedCostAmount = Math.max(0, roundMoney(toMoneyNumber(serviceData.estimatedCostAmount, 0)));
+  const actualCostAmount = Math.max(0, roundMoney(toMoneyNumber(serviceData.actualCostAmount, 0)));
+  const estimatedProfitAmount = roundMoney(totalAmount - estimatedCostAmount);
+  const realizedProfitAmount = roundMoney(paidAmount - actualCostAmount);
+
+  const status = normalizeFinanceStatus(serviceData.status || '');
+  const dueDateIso = toIsoOrNull(serviceData.dueDate);
+  const dueDateMs = dueDateIso ? new Date(dueDateIso).getTime() : 0;
+  const isOverdue = Boolean(
+    pendingAmount > 0
+      && status !== 'cancelado'
+      && Number.isFinite(dueDateMs)
+      && dueDateMs > 0
+      && dueDateMs < Date.now()
+  );
+
+  return {
+    id: serviceId,
+    clientName: String(serviceData.clientName || '').trim(),
+    serviceName: String(serviceData.serviceName || '').trim(),
+    category: String(serviceData.category || '').trim(),
+    description: String(serviceData.description || '').trim(),
+    currency: String(serviceData.currency || 'MXN'),
+    status,
+    leadId: String(serviceData.leadId || '').trim(),
+    leadPhone: normalizePhoneDigits(serviceData.leadPhone || ''),
+    negocioId: String(serviceData.negocioId || '').trim(),
+    totalAmount,
+    paidAmount,
+    pendingAmount,
+    advancePercent,
+    advanceAmount,
+    advancePendingAmount,
+    estimatedCostAmount,
+    actualCostAmount,
+    estimatedProfitAmount,
+    realizedProfitAmount,
+    lastPaymentAt: toIsoOrNull(serviceData.lastPaymentAt),
+    lastExpenseAt: toIsoOrNull(serviceData.lastExpenseAt),
+    dueDate: dueDateIso,
+    isOverdue,
+    createdAt: toIsoOrNull(serviceData.createdAt),
+    updatedAt: toIsoOrNull(serviceData.updatedAt),
+  };
+}
+
+function serializeFinanceTransaction(transactionId, txData = {}) {
+  if (!transactionId || !txData) return null;
+  const type = normalizeFinanceType(txData.type || '');
+  const amount = Math.max(0, roundMoney(toMoneyNumber(txData.amount, 0)));
+  const sign = type === 'expense' ? -1 : 1;
+  return {
+    id: transactionId,
+    type,
+    amount,
+    signedAmount: roundMoney(amount * sign),
+    category: String(txData.category || '').trim(),
+    paymentMethod: String(txData.paymentMethod || '').trim(),
+    notes: String(txData.notes || '').trim(),
+    reference: String(txData.reference || '').trim(),
+    serviceId: String(txData.serviceId || '').trim(),
+    serviceName: String(txData.serviceName || '').trim(),
+    clientName: String(txData.clientName || '').trim(),
+    leadId: String(txData.leadId || '').trim(),
+    leadPhone: normalizePhoneDigits(txData.leadPhone || ''),
+    negocioId: String(txData.negocioId || '').trim(),
+    isAdvance: txData.isAdvance === true,
+    occurredAt: toIsoOrNull(txData.occurredAt),
+    createdAt: toIsoOrNull(txData.createdAt),
+    updatedAt: toIsoOrNull(txData.updatedAt),
+  };
+}
+
+function buildFinanceSummary({ services = [], transactions = [] } = {}) {
+  const incomeTotal = roundMoney(
+    transactions
+      .filter((item) => item.type === 'income')
+      .reduce((acc, item) => acc + toMoneyNumber(item.amount, 0), 0)
+  );
+  const expenseTotal = roundMoney(
+    transactions
+      .filter((item) => item.type === 'expense')
+      .reduce((acc, item) => acc + toMoneyNumber(item.amount, 0), 0)
+  );
+  const netProfit = roundMoney(incomeTotal - expenseTotal);
+
+  const receivableTotal = roundMoney(
+    services
+      .filter((item) => item.status !== 'cancelado')
+      .reduce((acc, item) => acc + toMoneyNumber(item.pendingAmount, 0), 0)
+  );
+  const advanceReceivableTotal = roundMoney(
+    services
+      .filter((item) => item.status !== 'cancelado')
+      .reduce((acc, item) => acc + toMoneyNumber(item.advancePendingAmount, 0), 0)
+  );
+  const totalBilled = roundMoney(
+    services
+      .filter((item) => item.status !== 'cancelado')
+      .reduce((acc, item) => acc + toMoneyNumber(item.totalAmount, 0), 0)
+  );
+  const totalCollected = roundMoney(
+    services
+      .filter((item) => item.status !== 'cancelado')
+      .reduce((acc, item) => acc + toMoneyNumber(item.paidAmount, 0), 0)
+  );
+  const estimatedProfitTotal = roundMoney(
+    services
+      .filter((item) => item.status !== 'cancelado')
+      .reduce((acc, item) => acc + toMoneyNumber(item.estimatedProfitAmount, 0), 0)
+  );
+  const marginPercent = incomeTotal > 0 ? roundMoney((netProfit / incomeTotal) * 100) : 0;
+
+  const overdueCount = services.filter((item) => item.isOverdue).length;
+  const paidServices = services.filter((item) => item.status === 'pagado').length;
+  const pendingServices = services.filter((item) => item.pendingAmount > 0 && item.status !== 'cancelado').length;
+
+  const categoryMap = new Map();
+  transactions.forEach((item) => {
+    const key = String(item.category || 'sin_categoria').trim() || 'sin_categoria';
+    const current = categoryMap.get(key) || { category: key, income: 0, expense: 0, net: 0 };
+    if (item.type === 'expense') {
+      current.expense = roundMoney(current.expense + toMoneyNumber(item.amount, 0));
+    } else {
+      current.income = roundMoney(current.income + toMoneyNumber(item.amount, 0));
+    }
+    current.net = roundMoney(current.income - current.expense);
+    categoryMap.set(key, current);
+  });
+
+  const monthlyMap = new Map();
+  transactions.forEach((item) => {
+    const occurredAt = item.occurredAt ? new Date(item.occurredAt) : null;
+    if (!occurredAt || !Number.isFinite(occurredAt.getTime())) return;
+    const ym = `${occurredAt.getFullYear()}-${String(occurredAt.getMonth() + 1).padStart(2, '0')}`;
+    const current = monthlyMap.get(ym) || { month: ym, income: 0, expense: 0, net: 0 };
+    if (item.type === 'expense') {
+      current.expense = roundMoney(current.expense + toMoneyNumber(item.amount, 0));
+    } else {
+      current.income = roundMoney(current.income + toMoneyNumber(item.amount, 0));
+    }
+    current.net = roundMoney(current.income - current.expense);
+    monthlyMap.set(ym, current);
+  });
+
+  const topReceivables = [...services]
+    .filter((item) => item.pendingAmount > 0 && item.status !== 'cancelado')
+    .sort((a, b) => b.pendingAmount - a.pendingAmount)
+    .slice(0, 15);
+
+  return {
+    metrics: {
+      incomeTotal,
+      expenseTotal,
+      netProfit,
+      marginPercent,
+      receivableTotal,
+      advanceReceivableTotal,
+      totalBilled,
+      totalCollected,
+      estimatedProfitTotal,
+      totalServices: services.length,
+      pendingServices,
+      paidServices,
+      overdueCount,
+    },
+    byCategory: Array.from(categoryMap.values()).sort(
+      (a, b) => Math.abs(b.net) - Math.abs(a.net)
+    ),
+    byMonth: Array.from(monthlyMap.values())
+      .sort((a, b) => a.month.localeCompare(b.month))
+      .slice(-12),
+    topReceivables,
+  };
+}
+
+async function createFinanceTransaction({
+  type = '',
+  amount = 0,
+  category = '',
+  paymentMethod = '',
+  notes = '',
+  reference = '',
+  serviceId = '',
+  leadId = '',
+  leadPhone = '',
+  negocioId = '',
+  isAdvance = false,
+  occurredAt = null,
+  createdBy = '',
+  affectService = true,
+} = {}) {
+  const safeType = normalizeFinanceType(type);
+  if (!FINANCE_TRANSACTION_TYPES.has(safeType)) {
+    throw new Error('Tipo de movimiento inválido. Usa income o expense.');
+  }
+
+  const safeAmount = parseMoneyInput(amount, 'amount', {
+    required: true,
+    allowZero: false,
+    min: 0.01,
+  });
+  const safeServiceId = String(serviceId || '').trim();
+  const safeOccurredAt = occurredAt || Timestamp.now();
+  const safeCategory = String(category || (safeType === 'income' ? 'ingreso' : 'egreso')).trim().slice(0, 80);
+  const safePaymentMethod = String(paymentMethod || '').trim().slice(0, 80);
+  const safeNotes = String(notes || '').trim().slice(0, 1000);
+  const safeReference = String(reference || '').trim().slice(0, 120);
+  const safeLeadId = String(leadId || '').trim();
+  const safeLeadPhone = normalizePhoneDigits(leadPhone);
+  const safeNegocioId = String(negocioId || '').trim();
+  const safeCreatedBy = String(createdBy || '').trim().slice(0, 120);
+
+  const txRef = db.collection(FINANCE_TRANSACTIONS_COLLECTION).doc();
+  let updatedService = null;
+
+  await db.runTransaction(async (trx) => {
+    let serviceRef = null;
+    let serviceSerialized = null;
+
+    if (safeServiceId) {
+      serviceRef = db.collection(FINANCE_SERVICES_COLLECTION).doc(safeServiceId);
+      const serviceSnap = await trx.get(serviceRef);
+      if (!serviceSnap.exists) {
+        throw new Error('Servicio no encontrado para registrar movimiento.');
+      }
+      serviceSerialized = serializeFinanceService(serviceSnap.id, serviceSnap.data() || {});
+      if (!serviceSerialized) {
+        throw new Error('Servicio inválido para registrar movimiento.');
+      }
+    }
+
+    const payload = {
+      type: safeType,
+      amount: safeAmount,
+      category: safeCategory,
+      paymentMethod: safePaymentMethod,
+      notes: safeNotes,
+      reference: safeReference,
+      serviceId: safeServiceId,
+      serviceName: String(serviceSerialized?.serviceName || ''),
+      clientName: String(serviceSerialized?.clientName || ''),
+      leadId: safeLeadId || String(serviceSerialized?.leadId || ''),
+      leadPhone: safeLeadPhone || normalizePhoneDigits(serviceSerialized?.leadPhone || ''),
+      negocioId: safeNegocioId || String(serviceSerialized?.negocioId || ''),
+      isAdvance: isAdvance === true,
+      occurredAt: safeOccurredAt,
+      createdBy: safeCreatedBy,
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now(),
+    };
+    trx.set(txRef, payload);
+
+    if (serviceRef && affectService) {
+      const patch = { updatedAt: Timestamp.now() };
+
+      if (safeType === 'income') {
+        const nextPaid = roundMoney(serviceSerialized.paidAmount + safeAmount);
+        const nextPending = Math.max(0, roundMoney(serviceSerialized.totalAmount - nextPaid));
+        let nextStatus = serviceSerialized.status;
+        if (nextStatus !== 'cancelado') {
+          if (nextPending <= 0) nextStatus = 'pagado';
+          else if (nextPaid > 0 && nextStatus === 'pendiente') nextStatus = 'en_proceso';
+        }
+
+        patch.paidAmount = nextPaid;
+        patch.pendingAmount = nextPending;
+        patch.status = nextStatus;
+        patch.lastPaymentAt = safeOccurredAt;
+      }
+
+      if (safeType === 'expense') {
+        const nextCost = roundMoney(serviceSerialized.actualCostAmount + safeAmount);
+        patch.actualCostAmount = nextCost;
+        patch.lastExpenseAt = safeOccurredAt;
+      }
+
+      trx.set(serviceRef, patch, { merge: true });
+      updatedService = { id: safeServiceId };
+    }
+  });
+
+  const txSnap = await txRef.get();
+  const serializedTx = serializeFinanceTransaction(txSnap.id, txSnap.data() || {});
+
+  let serializedService = null;
+  if (updatedService?.id) {
+    const serviceSnap = await db.collection(FINANCE_SERVICES_COLLECTION).doc(updatedService.id).get();
+    if (serviceSnap.exists) {
+      serializedService = serializeFinanceService(serviceSnap.id, serviceSnap.data() || {});
+    }
+  }
+
+  return {
+    transaction: serializedTx,
+    service: serializedService,
+  };
+}
+
 function getVercelHeaders() {
   const token = String(process.env.VERCEL_TOKEN || '').trim();
   if (!token) throw new Error('Falta VERCEL_TOKEN');
@@ -2049,6 +2446,634 @@ app.post('/api/crm/lead-business/delete', async (req, res) => {
     });
   } catch (error) {
     console.error('[crm/lead-business/delete] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get('/api/crm/finance/overview', async (req, res) => {
+  try {
+    const fromMs = parseDateRangeBound(req.query?.from);
+    const toMs = parseDateRangeBound(req.query?.to, { endOfDay: true });
+    const maxServices = Math.max(100, Math.min(2500, Number(req.query?.maxServices || 1200)));
+    const maxTransactions = Math.max(100, Math.min(6000, Number(req.query?.maxTransactions || 2000)));
+
+    const [servicesSnap, transactionsSnap] = await Promise.all([
+      db.collection(FINANCE_SERVICES_COLLECTION).orderBy('updatedAt', 'desc').limit(maxServices).get(),
+      db.collection(FINANCE_TRANSACTIONS_COLLECTION).orderBy('occurredAt', 'desc').limit(maxTransactions).get(),
+    ]);
+
+    const services = servicesSnap.docs
+      .map((docSnap) => serializeFinanceService(docSnap.id, docSnap.data() || {}))
+      .filter(Boolean);
+
+    const transactionsRaw = transactionsSnap.docs
+      .map((docSnap) => serializeFinanceTransaction(docSnap.id, docSnap.data() || {}))
+      .filter(Boolean);
+
+    const transactions = transactionsRaw.filter((item) => {
+      const ms = item.occurredAt ? new Date(item.occurredAt).getTime() : 0;
+      if (!Number.isFinite(ms) || ms <= 0) return false;
+      if (Number.isFinite(fromMs) && ms < fromMs) return false;
+      if (Number.isFinite(toMs) && ms > toMs) return false;
+      return true;
+    });
+
+    const summary = buildFinanceSummary({ services, transactions });
+
+    return res.json({
+      success: true,
+      range: {
+        from: Number.isFinite(fromMs) ? new Date(fromMs).toISOString() : null,
+        to: Number.isFinite(toMs) ? new Date(toMs).toISOString() : null,
+      },
+      summary,
+      sampled: {
+        services: services.length,
+        transactions: transactions.length,
+      },
+    });
+  } catch (error) {
+    console.error('[crm/finance/overview] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get('/api/crm/finance/services', async (req, res) => {
+  try {
+    const page = Math.max(1, Number(req.query?.page || 1));
+    const pageSize = Math.max(5, Math.min(200, Number(req.query?.pageSize || 30)));
+    const maxDocs = Math.max(100, Math.min(4000, Number(req.query?.maxDocs || 1800)));
+    const safeStatusRaw = String(req.query?.status || '').trim().toLowerCase();
+    const safeSearch = String(req.query?.search || '').trim().toLowerCase();
+    const onlyPending = parseBooleanInput(req.query?.onlyPending, false);
+
+    const snap = await db
+      .collection(FINANCE_SERVICES_COLLECTION)
+      .orderBy('updatedAt', 'desc')
+      .limit(maxDocs)
+      .get();
+
+    let items = snap.docs
+      .map((docSnap) => serializeFinanceService(docSnap.id, docSnap.data() || {}))
+      .filter(Boolean);
+
+    if (safeStatusRaw && safeStatusRaw !== 'all') {
+      const normalizedStatus = normalizeFinanceStatus(safeStatusRaw);
+      items = items.filter((item) => item.status === normalizedStatus);
+    }
+
+    if (onlyPending) {
+      items = items.filter((item) => item.pendingAmount > 0 && item.status !== 'cancelado');
+    }
+
+    if (safeSearch) {
+      items = items.filter((item) => {
+        const haystack = [
+          item.clientName,
+          item.serviceName,
+          item.description,
+          item.category,
+          item.leadPhone,
+          item.leadId,
+          item.negocioId,
+        ]
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(safeSearch);
+      });
+    }
+
+    items.sort((a, b) => {
+      const aMs = new Date(a.updatedAt || a.createdAt || 0).getTime();
+      const bMs = new Date(b.updatedAt || b.createdAt || 0).getTime();
+      return bMs - aMs;
+    });
+
+    const totalItems = items.length;
+    const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+    const safePage = Math.min(page, totalPages);
+    const start = (safePage - 1) * pageSize;
+    const pagedItems = items.slice(start, start + pageSize);
+
+    const totals = {
+      billed: roundMoney(items.reduce((acc, item) => acc + item.totalAmount, 0)),
+      collected: roundMoney(items.reduce((acc, item) => acc + item.paidAmount, 0)),
+      pending: roundMoney(items.reduce((acc, item) => acc + item.pendingAmount, 0)),
+      advancePending: roundMoney(items.reduce((acc, item) => acc + item.advancePendingAmount, 0)),
+      estimatedProfit: roundMoney(items.reduce((acc, item) => acc + item.estimatedProfitAmount, 0)),
+    };
+
+    return res.json({
+      success: true,
+      items: pagedItems,
+      totals,
+      pagination: {
+        page: safePage,
+        pageSize,
+        totalItems,
+        totalPages,
+      },
+    });
+  } catch (error) {
+    console.error('[crm/finance/services] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/finance/services', async (req, res) => {
+  const {
+    clientName = '',
+    serviceName = '',
+    category = '',
+    description = '',
+    leadId = '',
+    leadPhone = '',
+    negocioId = '',
+    currency = 'MXN',
+    totalAmount = '',
+    advancePercent = 50,
+    estimatedCostAmount = 0,
+    status = 'pendiente',
+    dueDate = '',
+    initialPaymentAmount = 0,
+    initialPaymentMethod = '',
+    initialPaymentNotes = '',
+    initialPaymentDate = '',
+    createdBy = '',
+  } = req.body || {};
+
+  try {
+    const safeClientName = String(clientName || '').trim();
+    const safeServiceName = String(serviceName || '').trim();
+    if (!safeServiceName) {
+      return res.status(400).json({ error: 'Falta serviceName.' });
+    }
+    if (!safeClientName && !String(leadId || '').trim() && !normalizePhoneDigits(leadPhone)) {
+      return res.status(400).json({ error: 'Falta clientName o referencia del lead.' });
+    }
+
+    const safeTotalAmount = parseMoneyInput(totalAmount, 'totalAmount', {
+      required: true,
+      allowZero: false,
+      min: 0.01,
+    });
+    const safeAdvancePercent = Math.max(0, Math.min(100, roundMoney(toMoneyNumber(advancePercent, 50))));
+    const safeAdvanceAmount = roundMoney(safeTotalAmount * (safeAdvancePercent / 100));
+    const safeEstimatedCostAmount = Math.max(
+      0,
+      parseMoneyInput(estimatedCostAmount, 'estimatedCostAmount', {
+        required: false,
+        allowZero: true,
+        min: 0,
+      }) || 0
+    );
+    const safeStatus = normalizeFinanceStatus(status);
+    const safeDueDate = parseDateInputToTimestampOrNull(dueDate, 'dueDate');
+    const safeLeadId = String(leadId || '').trim();
+    const safeLeadPhone = normalizePhoneDigits(leadPhone);
+    const safeNegocioId = String(negocioId || '').trim();
+    const safeCurrency = String(currency || 'MXN').trim().toUpperCase().slice(0, 8) || 'MXN';
+    const safeCategory = String(category || '').trim().slice(0, 120);
+    const safeDescription = String(description || '').trim().slice(0, 2000);
+    const safeCreatedBy = String(createdBy || '').trim().slice(0, 120);
+
+    const safeInitialPayment = Math.max(
+      0,
+      parseMoneyInput(initialPaymentAmount, 'initialPaymentAmount', {
+        required: false,
+        allowZero: true,
+        min: 0,
+      }) || 0
+    );
+    if (safeInitialPayment > safeTotalAmount) {
+      return res.status(400).json({ error: 'El anticipo inicial no puede ser mayor al total del servicio.' });
+    }
+    const initialPaymentAt = parseDateInputToTimestampOrNull(initialPaymentDate, 'initialPaymentDate')
+      || Timestamp.now();
+
+    const serviceRef = db.collection(FINANCE_SERVICES_COLLECTION).doc();
+    const initialTxRef = safeInitialPayment > 0 ? db.collection(FINANCE_TRANSACTIONS_COLLECTION).doc() : null;
+
+    await db.runTransaction(async (trx) => {
+      const basePayload = {
+        clientName: safeClientName || safeLeadPhone || safeLeadId || 'Cliente',
+        serviceName: safeServiceName,
+        category: safeCategory,
+        description: safeDescription,
+        leadId: safeLeadId,
+        leadPhone: safeLeadPhone,
+        negocioId: safeNegocioId,
+        currency: safeCurrency,
+        totalAmount: safeTotalAmount,
+        advancePercent: safeAdvancePercent,
+        advanceAmount: safeAdvanceAmount,
+        paidAmount: 0,
+        pendingAmount: safeTotalAmount,
+        estimatedCostAmount: safeEstimatedCostAmount,
+        actualCostAmount: 0,
+        status: safeStatus,
+        dueDate: safeDueDate,
+        createdBy: safeCreatedBy,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+      };
+      trx.set(serviceRef, basePayload);
+
+      if (initialTxRef) {
+        const pendingAfterPayment = Math.max(0, roundMoney(safeTotalAmount - safeInitialPayment));
+        const nextStatus = pendingAfterPayment <= 0
+          ? 'pagado'
+          : safeStatus === 'pendiente'
+            ? 'en_proceso'
+            : safeStatus;
+
+        trx.set(initialTxRef, {
+          type: 'income',
+          amount: safeInitialPayment,
+          category: 'anticipo',
+          paymentMethod: String(initialPaymentMethod || '').trim().slice(0, 80),
+          notes: String(initialPaymentNotes || '').trim().slice(0, 1000),
+          reference: '',
+          serviceId: serviceRef.id,
+          serviceName: safeServiceName,
+          clientName: safeClientName || safeLeadPhone || safeLeadId || 'Cliente',
+          leadId: safeLeadId,
+          leadPhone: safeLeadPhone,
+          negocioId: safeNegocioId,
+          isAdvance: true,
+          occurredAt: initialPaymentAt,
+          createdBy: safeCreatedBy,
+          createdAt: Timestamp.now(),
+          updatedAt: Timestamp.now(),
+        });
+
+        trx.set(
+          serviceRef,
+          {
+            paidAmount: safeInitialPayment,
+            pendingAmount: pendingAfterPayment,
+            status: nextStatus,
+            lastPaymentAt: initialPaymentAt,
+            updatedAt: Timestamp.now(),
+          },
+          { merge: true }
+        );
+      }
+    });
+
+    const createdServiceSnap = await serviceRef.get();
+    const createdService = serializeFinanceService(serviceRef.id, createdServiceSnap.data() || {});
+
+    let initialPayment = null;
+    if (initialTxRef) {
+      const initialTxSnap = await initialTxRef.get();
+      initialPayment = serializeFinanceTransaction(initialTxRef.id, initialTxSnap.data() || {});
+    }
+
+    return res.status(201).json({
+      success: true,
+      service: createdService,
+      ...(initialPayment ? { initialPayment } : {}),
+    });
+  } catch (error) {
+    console.error('[crm/finance/services:create] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/finance/services/:serviceId', async (req, res) => {
+  const serviceId = String(req.params?.serviceId || '').trim();
+  if (!serviceId) {
+    return res.status(400).json({ error: 'Falta serviceId.' });
+  }
+
+  try {
+    const serviceRef = db.collection(FINANCE_SERVICES_COLLECTION).doc(serviceId);
+    const serviceSnap = await serviceRef.get();
+    if (!serviceSnap.exists) {
+      return res.status(404).json({ error: 'Servicio no encontrado.' });
+    }
+
+    const current = serializeFinanceService(serviceSnap.id, serviceSnap.data() || {});
+    const body = req.body || {};
+    const patch = { updatedAt: Timestamp.now() };
+
+    if (Object.prototype.hasOwnProperty.call(body, 'clientName')) {
+      patch.clientName = String(body.clientName || '').trim().slice(0, 120);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'serviceName')) {
+      patch.serviceName = String(body.serviceName || '').trim().slice(0, 160);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'category')) {
+      patch.category = String(body.category || '').trim().slice(0, 120);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'description')) {
+      patch.description = String(body.description || '').trim().slice(0, 2000);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'leadId')) {
+      patch.leadId = String(body.leadId || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'leadPhone')) {
+      patch.leadPhone = normalizePhoneDigits(body.leadPhone);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'negocioId')) {
+      patch.negocioId = String(body.negocioId || '').trim();
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'currency')) {
+      patch.currency = String(body.currency || 'MXN').trim().toUpperCase().slice(0, 8) || 'MXN';
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'status')) {
+      patch.status = normalizeFinanceStatus(body.status);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'dueDate')) {
+      patch.dueDate = parseDateInputToTimestampOrNull(body.dueDate, 'dueDate');
+    }
+
+    const totalAmountInput = Object.prototype.hasOwnProperty.call(body, 'totalAmount')
+      ? parseMoneyInput(body.totalAmount, 'totalAmount', {
+          required: true,
+          allowZero: false,
+          min: 0.01,
+        })
+      : current.totalAmount;
+    const advancePercentInput = Object.prototype.hasOwnProperty.call(body, 'advancePercent')
+      ? Math.max(0, Math.min(100, roundMoney(toMoneyNumber(body.advancePercent, current.advancePercent))))
+      : current.advancePercent;
+    const estimatedCostInput = Object.prototype.hasOwnProperty.call(body, 'estimatedCostAmount')
+      ? Math.max(
+          0,
+          parseMoneyInput(body.estimatedCostAmount, 'estimatedCostAmount', {
+            required: true,
+            allowZero: true,
+            min: 0,
+          }) || 0
+        )
+      : current.estimatedCostAmount;
+
+    if (current.paidAmount > totalAmountInput) {
+      return res.status(400).json({
+        error: 'El total del servicio no puede ser menor al monto ya cobrado.',
+      });
+    }
+
+    const nextPending = Math.max(0, roundMoney(totalAmountInput - current.paidAmount));
+    const nextAdvanceAmount = roundMoney(totalAmountInput * (advancePercentInput / 100));
+    const autoStatus = nextPending <= 0 ? 'pagado' : (patch.status || current.status || 'pendiente');
+
+    patch.totalAmount = totalAmountInput;
+    patch.pendingAmount = nextPending;
+    patch.advancePercent = advancePercentInput;
+    patch.advanceAmount = nextAdvanceAmount;
+    patch.estimatedCostAmount = estimatedCostInput;
+    patch.status = normalizeFinanceStatus(autoStatus);
+
+    await serviceRef.set(patch, { merge: true });
+    const updatedSnap = await serviceRef.get();
+
+    return res.json({
+      success: true,
+      service: serializeFinanceService(updatedSnap.id, updatedSnap.data() || {}),
+    });
+  } catch (error) {
+    console.error('[crm/finance/services:update] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.delete('/api/crm/finance/services/:serviceId', async (req, res) => {
+  const serviceId = String(req.params?.serviceId || '').trim();
+  if (!serviceId) {
+    return res.status(400).json({ error: 'Falta serviceId.' });
+  }
+
+  try {
+    const serviceRef = db.collection(FINANCE_SERVICES_COLLECTION).doc(serviceId);
+    const serviceSnap = await serviceRef.get();
+    if (!serviceSnap.exists) {
+      return res.status(404).json({ error: 'Servicio no encontrado.' });
+    }
+
+    const cascade = parseBooleanInput(req.query?.cascade, false);
+    const probe = await db
+      .collection(FINANCE_TRANSACTIONS_COLLECTION)
+      .where('serviceId', '==', serviceId)
+      .limit(1)
+      .get();
+
+    if (!probe.empty && !cascade) {
+      return res.status(409).json({
+        error: 'Este servicio tiene movimientos financieros. Usa cascade=true para eliminar todo.',
+      });
+    }
+
+    let deletedTransactions = 0;
+    if (cascade) {
+      while (true) {
+        const snap = await db
+          .collection(FINANCE_TRANSACTIONS_COLLECTION)
+          .where('serviceId', '==', serviceId)
+          .limit(400)
+          .get();
+        if (snap.empty) break;
+
+        const batch = db.batch();
+        snap.docs.forEach((docSnap) => {
+          batch.delete(docSnap.ref);
+        });
+        deletedTransactions += snap.docs.length;
+        await batch.commit();
+
+        if (snap.docs.length < 400) break;
+      }
+    }
+
+    await serviceRef.delete();
+
+    return res.json({
+      success: true,
+      serviceId,
+      deletedTransactions,
+    });
+  } catch (error) {
+    console.error('[crm/finance/services:delete] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/finance/services/:serviceId/payments', async (req, res) => {
+  const serviceId = String(req.params?.serviceId || '').trim();
+  if (!serviceId) {
+    return res.status(400).json({ error: 'Falta serviceId.' });
+  }
+
+  const {
+    amount = '',
+    paymentMethod = '',
+    notes = '',
+    reference = '',
+    occurredAt = '',
+    category = 'cobro_servicio',
+    isAdvance = false,
+    createdBy = '',
+  } = req.body || {};
+
+  try {
+    const paymentTimestamp = parseDateInputToTimestampOrNull(occurredAt, 'occurredAt') || Timestamp.now();
+    const result = await createFinanceTransaction({
+      type: 'income',
+      amount,
+      category,
+      paymentMethod,
+      notes,
+      reference,
+      serviceId,
+      occurredAt: paymentTimestamp,
+      isAdvance: parseBooleanInput(isAdvance, false),
+      createdBy,
+      affectService: true,
+    });
+
+    return res.status(201).json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error('[crm/finance/services:payment] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get('/api/crm/finance/transactions', async (req, res) => {
+  try {
+    const page = Math.max(1, Number(req.query?.page || 1));
+    const pageSize = Math.max(5, Math.min(200, Number(req.query?.pageSize || 40)));
+    const maxDocs = Math.max(100, Math.min(8000, Number(req.query?.maxDocs || 3000)));
+    const safeType = normalizeFinanceType(req.query?.type || '');
+    const safeServiceId = String(req.query?.serviceId || '').trim();
+    const safeSearch = String(req.query?.search || '').trim().toLowerCase();
+    const fromMs = parseDateRangeBound(req.query?.from);
+    const toMs = parseDateRangeBound(req.query?.to, { endOfDay: true });
+
+    const snap = await db
+      .collection(FINANCE_TRANSACTIONS_COLLECTION)
+      .orderBy('occurredAt', 'desc')
+      .limit(maxDocs)
+      .get();
+
+    let items = snap.docs
+      .map((docSnap) => serializeFinanceTransaction(docSnap.id, docSnap.data() || {}))
+      .filter(Boolean);
+
+    if (safeType) {
+      items = items.filter((item) => item.type === safeType);
+    }
+    if (safeServiceId) {
+      items = items.filter((item) => item.serviceId === safeServiceId);
+    }
+    if (safeSearch) {
+      items = items.filter((item) => {
+        const haystack = [
+          item.category,
+          item.paymentMethod,
+          item.notes,
+          item.reference,
+          item.clientName,
+          item.serviceName,
+          item.leadPhone,
+          item.negocioId,
+        ]
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(safeSearch);
+      });
+    }
+
+    items = items.filter((item) => {
+      const ms = item.occurredAt ? new Date(item.occurredAt).getTime() : 0;
+      if (!Number.isFinite(ms) || ms <= 0) return false;
+      if (Number.isFinite(fromMs) && ms < fromMs) return false;
+      if (Number.isFinite(toMs) && ms > toMs) return false;
+      return true;
+    });
+
+    items.sort((a, b) => {
+      const aMs = new Date(a.occurredAt || a.createdAt || 0).getTime();
+      const bMs = new Date(b.occurredAt || b.createdAt || 0).getTime();
+      return bMs - aMs;
+    });
+
+    const totalItems = items.length;
+    const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+    const safePage = Math.min(page, totalPages);
+    const start = (safePage - 1) * pageSize;
+    const pagedItems = items.slice(start, start + pageSize);
+
+    const totals = {
+      income: roundMoney(items.filter((item) => item.type === 'income').reduce((acc, item) => acc + item.amount, 0)),
+      expense: roundMoney(items.filter((item) => item.type === 'expense').reduce((acc, item) => acc + item.amount, 0)),
+    };
+    totals.net = roundMoney(totals.income - totals.expense);
+
+    return res.json({
+      success: true,
+      items: pagedItems,
+      totals,
+      pagination: {
+        page: safePage,
+        pageSize,
+        totalItems,
+        totalPages,
+      },
+    });
+  } catch (error) {
+    console.error('[crm/finance/transactions] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/finance/transactions', async (req, res) => {
+  const {
+    type = '',
+    amount = '',
+    category = '',
+    paymentMethod = '',
+    notes = '',
+    reference = '',
+    serviceId = '',
+    leadId = '',
+    leadPhone = '',
+    negocioId = '',
+    isAdvance = false,
+    occurredAt = '',
+    createdBy = '',
+    affectService = true,
+  } = req.body || {};
+
+  try {
+    const occurredTimestamp = parseDateInputToTimestampOrNull(occurredAt, 'occurredAt') || Timestamp.now();
+    const result = await createFinanceTransaction({
+      type,
+      amount,
+      category,
+      paymentMethod,
+      notes,
+      reference,
+      serviceId,
+      leadId,
+      leadPhone,
+      negocioId,
+      isAdvance: parseBooleanInput(isAdvance, false),
+      occurredAt: occurredTimestamp,
+      createdBy,
+      affectService: parseBooleanInput(affectService, true),
+    });
+
+    return res.status(201).json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error('[crm/finance/transactions:create] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
