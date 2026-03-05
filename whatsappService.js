@@ -1495,6 +1495,7 @@ async function resolveLeadAndTarget(phoneOrJid) {
   if (leadData) {
     const candidateJid = normalizeJid(leadData.resolvedJid || leadData.jid || leadId);
     const lidCandidate = normalizeJid(leadData.lidJid || '');
+    const allowUnsafeTarget = leadData?.allowUnsafeTarget === true;
     const hasLidContext = isLidJid(lidCandidate) || isLidJid(normalizedInputJid);
     const candidateIsSuspicious = isSuspiciousPseudoPhoneJid(candidateJid);
     const canUseNumericFallback = Boolean(
@@ -1511,7 +1512,7 @@ async function resolveLeadAndTarget(phoneOrJid) {
 
     if (candidateLooksWrongForLid && isLidJid(lidCandidate)) {
       targetJid = lidCandidate;
-    } else if (isUserJid(candidateJid) && !candidateIsSuspicious) {
+    } else if (isUserJid(candidateJid) && (!candidateIsSuspicious || allowUnsafeTarget)) {
       targetJid = candidateJid;
     } else if (isLidJid(candidateJid)) {
       targetJid = candidateJid;
@@ -1519,7 +1520,7 @@ async function resolveLeadAndTarget(phoneOrJid) {
       targetJid = lidCandidate;
     } else if (canUseNumericFallback) {
       targetJid = `${num}@s.whatsapp.net`;
-    } else if (candidateJid && !candidateIsSuspicious) {
+    } else if (candidateJid && (!candidateIsSuspicious || allowUnsafeTarget)) {
       targetJid = candidateJid;
     } else {
       targetJid = null;
