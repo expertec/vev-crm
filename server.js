@@ -112,6 +112,8 @@ function isSafeMxPhone(value = '') {
 }
 
 function getUnsafeLeadTargetError(leadId, leadData = {}) {
+  if (leadData?.allowUnsafeTarget === true) return '';
+
   const resolvedJid = String(leadData.resolvedJid || '').trim();
   const jid = String(leadData.jid || '').trim();
   const lidJid = String(leadData.lidJid || '').trim();

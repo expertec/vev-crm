@@ -898,6 +898,10 @@ export async function connectToWhatsApp() {
             || phoneFromFinalJid
             || (typeof derivedPhoneFromUser === 'string' && derivedPhoneFromUser.length >= 10)
           );
+          const shouldTrustUnsafeTarget = sender === 'lead' && (
+            isSuspiciousPseudoPhoneJid(jidResolved)
+            || isSuspiciousPseudoPhoneJid(finalJid)
+          );
           const stableLeadId = buildStableLeadId({
             normalizedPhone: normNum,
             resolvedJid: jidResolved,
@@ -986,6 +990,7 @@ export async function connectToWhatsApp() {
                 lidJid,
                 addressingMode,
                 needsJidResolution: !hasReachableTarget,
+                ...(shouldTrustUnsafeTarget ? { allowUnsafeTarget: true } : {}),
                 source: shouldTreatAsMetaAdInbound ? 'meta_ads' : 'WhatsApp Business API',
                 ...(shouldTreatAsMetaAdInbound
                   ? {
@@ -1280,6 +1285,7 @@ export async function connectToWhatsApp() {
             lidJid,
             addressingMode,
             needsJidResolution: !hasReachableTarget,
+            ...(shouldTrustUnsafeTarget ? { allowUnsafeTarget: true } : {}),
             source: shouldTreatAsMetaAdInbound ? 'meta_ads' : 'WhatsApp',
             ...(shouldTreatAsMetaAdInbound
               ? {
@@ -1333,7 +1339,8 @@ export async function connectToWhatsApp() {
               lidJid,
               telefono: normNum,
               addressingMode,
-              needsJidResolution: !hasReachableTarget
+              needsJidResolution: !hasReachableTarget,
+              ...(shouldTrustUnsafeTarget ? { allowUnsafeTarget: true } : {})
             };
             if (shouldTreatAsMetaAdInbound) {
               updatePayload.source = 'meta_ads';
