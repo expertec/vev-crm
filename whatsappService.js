@@ -1049,6 +1049,9 @@ export async function connectToWhatsApp() {
             || (typeof derivedPhoneFromUser === 'string' && derivedPhoneFromUser.length >= 10)
           );
           const sender = msg.key.fromMe ? 'business' : 'lead';
+          console.log(
+            `[WA] ↪ msg id=${msg?.key?.id || 'N/A'} sender=${sender} fromMe=${Boolean(msg?.key?.fromMe)} isLidRemote=${isLidRemote} jid=${finalJid}`
+          );
           const shouldTrustUnsafeTarget = sender === 'lead' && (
             isSuspiciousPseudoPhoneJid(jidResolved)
             || isSuspiciousPseudoPhoneJid(finalJid)
@@ -1326,12 +1329,13 @@ export async function connectToWhatsApp() {
 
           // Mensajes propios (fromMe)
           if (sender === 'business') {
+            const tsNow = now();
             const msgData = {
               content,
               mediaType,
               mediaUrl,
               sender,
-              timestamp: now(),
+              timestamp: tsNow,
               ...replyContext,
             };
 
@@ -1342,6 +1346,13 @@ export async function connectToWhatsApp() {
               lidJid,
               addressingMode,
               source: 'WhatsApp',
+              ...(leadSnap.exists
+                ? {}
+                : {
+                    fecha_creacion: tsNow,
+                    estado: 'nuevo',
+                    unreadCount: 0,
+                  }),
               ...buildLeadLastMessagePatch(msgData),
             }, { merge: true });
 
@@ -1423,6 +1434,62 @@ export async function connectToWhatsApp() {
               }
             } catch (webPromoErr) {
               console.error('[WA] Error procesando #WebPromo:', webPromoErr?.message || webPromoErr);
+            }
+
+            // Fallback: algunos inbounds de Meta Ads pueden llegar como fromMe con @lid.
+            // En ese caso aseguramos alta del lead y programación automática del trigger de Meta.
+            if (isLidRemote) {
+              try {
+                const adSignalAny = detectMetaAdSignal(msg);
+                const metaDecision = resolveMetaAdInbound({
+                  baseDetected: adSignalAny.isFromMetaAd,
+                  leadData: existingLeadData,
+                  isLidRemote,
+                  upsertType: type,
+                });
+
+                if (metaDecision.isMetaAd) {
+                  const cfgSnap = await db.collection('config').doc('appConfig').get();
+                  const cfg = cfgSnap.exists ? cfgSnap.data() : {};
+                  const trigger = cfg.defaultTriggerMetaAds || WEBPROMO_TRIGGER;
+                  const inboundAt = now();
+
+                  const currentSnap = await leadRef.get();
+                  const current = currentSnap.exists ? (currentSnap.data() || {}) : {};
+                  const blocked = shouldBlockSequences(current, trigger);
+                  const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
+                  const cooldown = hasRecentMetaAutoSchedule(current, inboundAt);
+
+                  if (!blocked && !alreadyHas && !cooldown && hasReachableTarget) {
+                    const programmed = await scheduleSequenceForLead(leadId, trigger, inboundAt);
+                    if (programmed > 0) {
+                      await leadRef.set(
+                        {
+                          source: 'meta_ads',
+                          campaign: META_ADS_CAMPAIGN,
+                          lastInboundFromAd: true,
+                          lastInboundAt: inboundAt,
+                          hasActiveSequences: true,
+                          estado: 'nuevo',
+                          etiquetas: FieldValue.arrayUnion(trigger, 'MetaAds'),
+                          lastMetaAutoScheduledAt: inboundAt,
+                          lastMetaSequenceAt: inboundAt,
+                        },
+                        { merge: true }
+                      );
+                      console.log(`[WA] 🛟 fromMe@lid fallback → secuencia '${trigger}' programada para ${leadId}`);
+                    } else {
+                      console.log(`[WA] ⏭️ fromMe@lid fallback sin programación para ${leadId}: schedule-omit`);
+                    }
+                  } else {
+                    console.log(
+                      `[WA] ⏭️ fromMe@lid fallback sin reprogramar para ${leadId}: blocked=${blocked}, alreadyHas=${alreadyHas}, cooldown=${cooldown}, reachable=${hasReachableTarget}`
+                    );
+                  }
+                }
+              } catch (fallbackErr) {
+                console.warn('[WA] fromMe@lid fallback error:', fallbackErr?.message || fallbackErr);
+              }
             }
 
             console.log('[WA] (fromMe) Mensaje propio guardado →', leadId);
