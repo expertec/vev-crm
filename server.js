@@ -3843,6 +3843,8 @@ app.post('/api/whatsapp/force-sequence', async (req, res) => {
 
     await scheduleSequenceForLead(finalLeadId, trigger, now, {
       allowReschedule: Boolean(forceRestart),
+      debug: true,
+      source: 'force-sequence',
     });
 
     await leadRef.set(
@@ -4067,7 +4069,7 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
         finalLeadId,
         sequenceTrigger,
         now,
-        { allowReschedule: true }
+        { allowReschedule: true, debug: true, source: 'apply-stage' }
       );
       if (scheduledSteps > 0) {
         await leadRef.set(
@@ -4079,6 +4081,10 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
           { merge: true }
         );
         scheduled = true;
+      } else {
+        console.warn(
+          `[apply-stage] no se programo secuencia lead=${finalLeadId} stage=${stageDocId || stageKey || stageName} trigger=${sequenceTrigger}`
+        );
       }
     }
 

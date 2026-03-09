@@ -354,10 +354,20 @@ async function _getLead(leadId) {
 export async function scheduleSequenceForLead(leadId, trigger, startAt = new Date(), options = {}) {
   const leadRef = db.collection('leads').doc(leadId);
   const def = await getSequenceDefinition(trigger);
-  if (!def || def.active === false || !def.messages || def.messages.length === 0) return 0;
-
   const normalizedTrigger = String(trigger || '');
   const allowReschedule = options?.allowReschedule === true;
+  const debug = options?.debug === true;
+  const source = String(options?.source || 'unknown');
+
+  if (!def || def.active === false || !def.messages || def.messages.length === 0) {
+    if (debug) {
+      console.warn(
+        `[scheduleSequenceForLead] skip(no-definition) source=${source} lead=${leadId} trigger=${normalizedTrigger} hasDef=${Boolean(def)} active=${def?.active !== false} steps=${Array.isArray(def?.messages) ? def.messages.length : 0}`
+      );
+    }
+    return 0;
+  }
+
   const startIso = toDateSafe(startAt)?.toISOString?.() || new Date().toISOString();
 
   const scheduleResult = await db.runTransaction(async (tx) => {
@@ -423,6 +433,12 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
     }
     console.log(`[scheduleSequenceForLead] trigger '${normalizedTrigger}' ya presente en ${leadId}, no se duplica.`);
     return 0;
+  }
+
+  if (debug) {
+    console.log(
+      `[scheduleSequenceForLead] scheduled source=${source} lead=${leadId} trigger=${normalizedTrigger} steps=${def.messages.length} allowReschedule=${allowReschedule}`
+    );
   }
 
   return def.messages.length;
@@ -847,6 +863,9 @@ export async function processLeadSequences(leadId) {
 
     const destination = resolveLeadJidAndPhone(data);
     if (!destination?.jid) {
+      console.warn(
+        `[processLeadSequences] skip(missing-destination) lead=${leadId} telefono=${String(data?.telefono || '')} jid=${String(data?.jid || '')} resolvedJid=${String(data?.resolvedJid || '')}`
+      );
       await disableLeadSequencesMissingTarget(
         leadRef,
         data,
@@ -866,6 +885,9 @@ export async function processLeadSequences(leadId) {
       }
       const def = await getSequenceDefinition(seq.trigger);
       if (!def || def.active === false || !def.messages || def.messages.length === 0) {
+        console.warn(
+          `[processLeadSequences] skip(invalid-definition) lead=${leadId} trigger=${String(seq.trigger || '')} hasDef=${Boolean(def)} active=${def?.active !== false} steps=${Array.isArray(def?.messages) ? def.messages.length : 0}`
+        );
         seq.completed = true;
         continue;
       }
