@@ -3841,7 +3841,9 @@ app.post('/api/whatsapp/force-sequence', async (req, res) => {
       });
     }
 
-    await scheduleSequenceForLead(finalLeadId, trigger, now);
+    await scheduleSequenceForLead(finalLeadId, trigger, now, {
+      allowReschedule: Boolean(forceRestart),
+    });
 
     await leadRef.set(
       {
@@ -4061,16 +4063,23 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
 
     let scheduled = false;
     if (!clearStage && sequenceTrigger && !shouldStopSequences && !isClosed) {
-      await scheduleSequenceForLead(finalLeadId, sequenceTrigger, now);
-      await leadRef.set(
-        {
-          hasActiveSequences: true,
-          stopSequences: false,
-          etiquetas: admin.firestore.FieldValue.arrayUnion(sequenceTrigger),
-        },
-        { merge: true }
+      const scheduledSteps = await scheduleSequenceForLead(
+        finalLeadId,
+        sequenceTrigger,
+        now,
+        { allowReschedule: true }
       );
-      scheduled = true;
+      if (scheduledSteps > 0) {
+        await leadRef.set(
+          {
+            hasActiveSequences: true,
+            stopSequences: false,
+            etiquetas: admin.firestore.FieldValue.arrayUnion(sequenceTrigger),
+          },
+          { merge: true }
+        );
+        scheduled = true;
+      }
     }
 
     return res.json({

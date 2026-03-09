@@ -351,12 +351,13 @@ async function _getLead(leadId) {
 }
 
 /* -------------------- programar / cancelar secuencias ------------------- */
-export async function scheduleSequenceForLead(leadId, trigger, startAt = new Date()) {
+export async function scheduleSequenceForLead(leadId, trigger, startAt = new Date(), options = {}) {
   const leadRef = db.collection('leads').doc(leadId);
   const def = await getSequenceDefinition(trigger);
   if (!def || def.active === false || !def.messages || def.messages.length === 0) return 0;
 
   const normalizedTrigger = String(trigger || '');
+  const allowReschedule = options?.allowReschedule === true;
   const startIso = toDateSafe(startAt)?.toISOString?.() || new Date().toISOString();
 
   const scheduleResult = await db.runTransaction(async (tx) => {
@@ -377,8 +378,11 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
     const hadSentStepsForTrigger = Object.keys(sent).some((k) => k.startsWith(`${normalizedTrigger}:`));
 
     if (
-      hasTriggerInHistory(history, normalizedTrigger)
-      || hadSentStepsForTrigger
+      !allowReschedule
+      && (
+        hasTriggerInHistory(history, normalizedTrigger)
+        || hadSentStepsForTrigger
+      )
     ) {
       return 'already-scheduled';
     }
