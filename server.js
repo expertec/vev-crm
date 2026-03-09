@@ -3755,30 +3755,24 @@ app.post('/api/whatsapp/force-sequence', async (req, res) => {
   }
 
   try {
-    const e164 = phoneInput ? toE164(phoneInput) : '';
-    const phoneDigits = e164 ? e164.replace(/\D/g, '') : '';
-    const leadIdFromPhone = e164 ? e164ToLeadId(e164) : '';
+    const leadCtx = await resolveLeadByIdentity({
+      leadId: inputLeadId,
+      phone: phoneInput,
+    });
 
-    let finalLeadId = String(inputLeadId || leadIdFromPhone || '').trim();
+    let phoneDigits = normalizePhoneDigits(leadCtx.phoneDigits || phoneInput);
+    let finalLeadId = String(leadCtx.leadId || '').trim();
     if (!finalLeadId) {
       return res.status(400).json({ error: 'No se pudo resolver leadId' });
     }
 
-    let leadRef = db.collection('leads').doc(finalLeadId);
-    let leadSnap = await leadRef.get();
-
-    if (!leadSnap.exists && phoneDigits) {
-      const byPhone = await db
-        .collection('leads')
-        .where('telefono', '==', phoneDigits)
-        .limit(1)
-        .get();
-      if (!byPhone.empty) {
-        leadRef = byPhone.docs[0].ref;
-        leadSnap = byPhone.docs[0];
-        finalLeadId = byPhone.docs[0].id;
-      }
+    if (String(inputLeadId || '').trim() && String(inputLeadId || '').trim() !== finalLeadId) {
+      console.log(`[force-sequence] lead canonicalizado ${String(inputLeadId || '').trim()} -> ${finalLeadId}`);
     }
+
+    let leadRef = leadCtx.leadRef || db.collection('leads').doc(finalLeadId);
+    let leadSnap = leadCtx.leadSnap || await leadRef.get();
+    if (!phoneDigits) phoneDigits = normalizePhoneDigits(leadSnap.data()?.telefono || '');
 
     const existingData = leadSnap.exists ? (leadSnap.data() || {}) : {};
     const existingResolvedJid = String(existingData.resolvedJid || '');
@@ -3926,30 +3920,24 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
   };
 
   try {
-    const e164 = phoneInput ? toE164(phoneInput) : '';
-    const phoneDigits = e164 ? e164.replace(/\D/g, '') : '';
-    const leadIdFromPhone = e164 ? e164ToLeadId(e164) : '';
+    const leadCtx = await resolveLeadByIdentity({
+      leadId: inputLeadId,
+      phone: phoneInput,
+    });
 
-    let finalLeadId = String(inputLeadId || leadIdFromPhone || '').trim();
+    let phoneDigits = normalizePhoneDigits(leadCtx.phoneDigits || phoneInput);
+    let finalLeadId = String(leadCtx.leadId || '').trim();
     if (!finalLeadId) {
       return res.status(400).json({ error: 'No se pudo resolver leadId' });
     }
 
-    let leadRef = db.collection('leads').doc(finalLeadId);
-    let leadSnap = await leadRef.get();
-
-    if (!leadSnap.exists && phoneDigits) {
-      const byPhone = await db
-        .collection('leads')
-        .where('telefono', '==', phoneDigits)
-        .limit(1)
-        .get();
-      if (!byPhone.empty) {
-        leadRef = byPhone.docs[0].ref;
-        leadSnap = byPhone.docs[0];
-        finalLeadId = byPhone.docs[0].id;
-      }
+    if (String(inputLeadId || '').trim() && String(inputLeadId || '').trim() !== finalLeadId) {
+      console.log(`[apply-stage] lead canonicalizado ${String(inputLeadId || '').trim()} -> ${finalLeadId}`);
     }
+
+    let leadRef = leadCtx.leadRef || db.collection('leads').doc(finalLeadId);
+    let leadSnap = leadCtx.leadSnap || await leadRef.get();
+    if (!phoneDigits) phoneDigits = normalizePhoneDigits(leadSnap.data()?.telefono || '');
 
     let stageDocId = '';
     let stageData = null;
@@ -4018,6 +4006,7 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
           .map((item) => String(item?.trigger || '').trim())
           .filter(Boolean)
       : [];
+    const hasReachableDestination = Boolean(candidateJid || phoneDigits);
 
     if (typeof cancelAllSequences === 'function') {
       await cancelAllSequences(finalLeadId).catch((err) => {
@@ -4064,7 +4053,7 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
     await leadRef.set(leadPatch, { merge: true });
 
     let scheduled = false;
-    if (!clearStage && sequenceTrigger && !shouldStopSequences && !isClosed) {
+    if (!clearStage && sequenceTrigger && !shouldStopSequences && !isClosed && hasReachableDestination) {
       const scheduledSteps = await scheduleSequenceForLead(
         finalLeadId,
         sequenceTrigger,
@@ -4086,6 +4075,10 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
           `[apply-stage] no se programo secuencia lead=${finalLeadId} stage=${stageDocId || stageKey || stageName} trigger=${sequenceTrigger}`
         );
       }
+    } else if (!clearStage && sequenceTrigger && !hasReachableDestination) {
+      console.warn(
+        `[apply-stage] sin destino enrutable lead=${finalLeadId} stage=${stageDocId || stageKey || stageName} trigger=${sequenceTrigger}`
+      );
     }
 
     return res.json({
