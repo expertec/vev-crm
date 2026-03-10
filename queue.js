@@ -686,6 +686,8 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
 
   for (const job of jobs) {
     try {
+      const isReminderJob = String(job?.jobType || '').toLowerCase() === 'reminder';
+
       // obtener estado del lead (cacheado)
       let lead = leadCache.get(job.leadId);
       if (!lead) {
@@ -719,28 +721,30 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
         stopCache.set(job.leadId, stopState);
       }
 
-      if (stopState === 'paused') {
-        await job.ref.update({
-          status: 'paused',
-          processedAt: FieldValue.serverTimestamp()
-        });
-        continue;
-      }
-
-      if (stopState === 'stopped') {
-        // marca este job como cancelado y borra el resto pendientes del lead
-        await job.ref.update({
-          status: 'canceled',
-          processedAt: FieldValue.serverTimestamp(),
-          error: 'Lead con stop flag/etiqueta'
-        });
-        // cancelar todo lo demás una sola vez por lead
-        if (!lead._allCanceledOnce) {
-          await cancelAllSequences(job.leadId).catch(() => {});
-          lead._allCanceledOnce = true;
-          leadCache.set(job.leadId, lead);
+      if (!isReminderJob) {
+        if (stopState === 'paused') {
+          await job.ref.update({
+            status: 'paused',
+            processedAt: FieldValue.serverTimestamp()
+          });
+          continue;
         }
-        continue;
+
+        if (stopState === 'stopped') {
+          // marca este job como cancelado y borra el resto pendientes del lead
+          await job.ref.update({
+            status: 'canceled',
+            processedAt: FieldValue.serverTimestamp(),
+            error: 'Lead con stop flag/etiqueta'
+          });
+          // cancelar todo lo demás una sola vez por lead
+          if (!lead._allCanceledOnce) {
+            await cancelAllSequences(job.leadId).catch(() => {});
+            lead._allCanceledOnce = true;
+            leadCache.set(job.leadId, lead);
+          }
+          continue;
+        }
       }
 
       // entrega normal

@@ -708,6 +708,17 @@ function parseDateInputToTimestamp(value, fieldLabel = 'fecha') {
   return Timestamp.fromDate(parsed);
 }
 
+function parseReminderDateTimeInput(value, fieldLabel = 'sendAt') {
+  if (value === undefined || value === null || value === '') {
+    throw new Error(`Falta ${fieldLabel}`);
+  }
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) {
+    throw new Error(`Fecha inválida en ${fieldLabel}`);
+  }
+  return parsed;
+}
+
 function normalizeDomainInput(value = '') {
   const raw = String(value || '').trim().toLowerCase();
   if (!raw) return '';
@@ -3890,6 +3901,198 @@ app.post(
     }
   }
 );
+
+// Recordatorios manuales por lead (mensaje diferido)
+app.post('/api/whatsapp/reminders', async (req, res) => {
+  const {
+    leadId: inputLeadId = '',
+    phone = '',
+    leadPhone = '',
+    message = '',
+    sendAt = '',
+  } = req.body || {};
+
+  const phoneInput = String(phone || leadPhone || '').trim();
+  const reminderMessage = String(message || '').trim();
+
+  if (!String(inputLeadId || '').trim() && !phoneInput) {
+    return res.status(400).json({ error: 'Falta leadId o phone' });
+  }
+  if (!reminderMessage) {
+    return res.status(400).json({ error: 'Falta message' });
+  }
+  if (reminderMessage.length > 4096) {
+    return res.status(400).json({ error: 'El mensaje es demasiado largo (máximo 4096 caracteres).' });
+  }
+
+  try {
+    const sendAtDate = parseReminderDateTimeInput(sendAt, 'sendAt');
+    const nowMs = Date.now();
+    if ((sendAtDate.getTime() - nowMs) < 15_000) {
+      return res.status(400).json({ error: 'La fecha/hora del recordatorio debe ser al menos 15 segundos en el futuro.' });
+    }
+
+    const leadCtx = await resolveLeadByIdentity({
+      leadId: inputLeadId,
+      phone: phoneInput,
+    });
+
+    const finalLeadId = String(leadCtx.leadId || '').trim();
+    if (!finalLeadId) {
+      return res.status(400).json({ error: 'No se pudo resolver leadId.' });
+    }
+
+    const leadRef = leadCtx.leadRef || db.collection('leads').doc(finalLeadId);
+    const leadSnap = leadCtx.leadSnap || await leadRef.get();
+    if (!leadSnap.exists) {
+      return res.status(404).json({ error: `Lead no encontrado: ${finalLeadId}` });
+    }
+
+    const leadData = leadSnap.data() || {};
+    const unsafeTargetError = getUnsafeLeadTargetError(finalLeadId, leadData);
+    if (unsafeTargetError) {
+      return res.status(409).json({ error: unsafeTargetError });
+    }
+
+    const createdAt = new Date();
+    const reminderRef = db.collection('sequenceQueue').doc();
+    await reminderRef.set({
+      leadId: finalLeadId,
+      status: 'pending',
+      dueAt: sendAtDate,
+      payload: {
+        type: 'texto',
+        contenido: reminderMessage,
+      },
+      jobType: 'reminder',
+      source: 'manual-reminder',
+      idx: 0,
+      retry: 0,
+      createdAt: Timestamp.fromDate(createdAt),
+      reminder: {
+        message: reminderMessage,
+        requestedLeadId: String(inputLeadId || '').trim(),
+        requestedPhone: phoneInput,
+        createdBy: String(req.headers['x-user-email'] || req.headers['x-user-id'] || 'crm'),
+      },
+    });
+
+    return res.status(201).json({
+      success: true,
+      reminder: {
+        id: reminderRef.id,
+        leadId: finalLeadId,
+        status: 'pending',
+        message: reminderMessage,
+        sendAt: sendAtDate.toISOString(),
+        createdAt: createdAt.toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error('[whatsapp/reminders:create] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get('/api/whatsapp/reminders', async (req, res) => {
+  const { leadId = '', phone = '', status = 'pending' } = req.query || {};
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const finalLeadId = String(leadCtx.leadId || '').trim();
+    if (!finalLeadId) {
+      return res.status(400).json({ error: 'Falta leadId o phone válido.' });
+    }
+
+    const snap = await db.collection('sequenceQueue')
+      .where('leadId', '==', finalLeadId)
+      .limit(160)
+      .get();
+
+    const statusFilter = String(status || 'pending').trim().toLowerCase();
+    const rows = snap.docs
+      .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
+      .filter((item) => String(item.jobType || '').toLowerCase() === 'reminder')
+      .filter((item) => {
+        if (statusFilter === 'all') return true;
+        return String(item.status || '').toLowerCase() === statusFilter;
+      })
+      .sort((a, b) => {
+        const aDue = a?.dueAt?.toMillis?.() || new Date(a?.dueAt || 0).getTime() || 0;
+        const bDue = b?.dueAt?.toMillis?.() || new Date(b?.dueAt || 0).getTime() || 0;
+        return aDue - bDue;
+      })
+      .slice(0, 60)
+      .map((item) => ({
+        id: item.id,
+        leadId: finalLeadId,
+        status: String(item.status || ''),
+        message: String(item?.reminder?.message || item?.payload?.contenido || ''),
+        sendAt: toIsoOrNull(item.dueAt),
+        createdAt: toIsoOrNull(item.createdAt),
+        processedAt: toIsoOrNull(item.processedAt),
+        error: String(item.error || ''),
+      }));
+
+    return res.json({
+      success: true,
+      leadId: finalLeadId,
+      reminders: rows,
+    });
+  } catch (error) {
+    console.error('[whatsapp/reminders:list] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.delete('/api/whatsapp/reminders/:reminderId', async (req, res) => {
+  const reminderId = String(req.params?.reminderId || '').trim();
+  const { leadId = '', phone = '' } = req.query || {};
+
+  if (!reminderId) {
+    return res.status(400).json({ error: 'Falta reminderId' });
+  }
+
+  try {
+    const ref = db.collection('sequenceQueue').doc(reminderId);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: 'Recordatorio no encontrado.' });
+    }
+
+    const data = snap.data() || {};
+    if (String(data.jobType || '').toLowerCase() !== 'reminder') {
+      return res.status(400).json({ error: 'El job indicado no es un recordatorio.' });
+    }
+
+    const resolved = await resolveLeadByIdentity({ leadId, phone });
+    const expectedLeadId = String(resolved.leadId || '').trim();
+    const jobLeadId = String(data.leadId || '').trim();
+
+    if (expectedLeadId && expectedLeadId !== jobLeadId) {
+      return res.status(403).json({ error: 'El recordatorio no pertenece al lead indicado.' });
+    }
+
+    const currentStatus = String(data.status || '').toLowerCase();
+    if (currentStatus !== 'pending') {
+      return res.status(409).json({ error: `No se puede cancelar recordatorio en estado ${currentStatus || 'desconocido'}.` });
+    }
+
+    await ref.set(
+      {
+        status: 'canceled',
+        processedAt: Timestamp.now(),
+        error: 'Cancelado manualmente',
+      },
+      { merge: true }
+    );
+
+    return res.json({ success: true, canceled: true, reminderId, leadId: jobLeadId });
+  } catch (error) {
+    console.error('[whatsapp/reminders:cancel] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
 
 // Forzar secuencia para rescate manual (crea/actualiza lead si falta)
 app.post('/api/whatsapp/force-sequence', async (req, res) => {

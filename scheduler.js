@@ -1024,15 +1024,27 @@ export async function archivarNegociosAntiguos() {
 // =============== SECUENCIAS ===============
 
 export async function processSequences() {
+  let totalProcessed = 0;
+
   if (typeof Q.processSequenceLeadsBatch === 'function') {
-    return await Q.processSequenceLeadsBatch({ limit: 25 });
+    totalProcessed += await Q.processSequenceLeadsBatch({ limit: 25 });
+  } else if (typeof Q.processDueSequenceJobs === 'function') {
+    totalProcessed += await Q.processDueSequenceJobs({ limit: 25 });
   }
-  if (typeof Q.processDueSequenceJobs === 'function') {
-    return await Q.processDueSequenceJobs({ limit: 25 });
-  }
+
   if (typeof Q.processQueue === 'function') {
-    return await Q.processQueue({ batchSize: 200 });
+    totalProcessed += await Q.processQueue({ batchSize: 200 });
   }
-  console.warn('⚠️ No hay función de proceso de cola exportada.');
-  return 0;
+
+  if (totalProcessed === 0) {
+    if (
+      typeof Q.processSequenceLeadsBatch !== 'function'
+      && typeof Q.processDueSequenceJobs !== 'function'
+      && typeof Q.processQueue !== 'function'
+    ) {
+      console.warn('⚠️ No hay función de proceso de cola exportada.');
+    }
+  }
+
+  return totalProcessed;
 }
