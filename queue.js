@@ -54,6 +54,15 @@ function getSampleSiteBaseUrl() {
   ).replace(/\/+$/, '');
 }
 
+function getSampleFormBaseUrl() {
+  return String(
+    process.env.SAMPLE_FORM_BASE_URL
+      || process.env.PUBLIC_SAMPLE_FORM_URL
+      || process.env.NEXT_PUBLIC_SITE_URL
+      || 'https://negociosweb.mx'
+  ).replace(/\/+$/, '');
+}
+
 function resolveSampleSlug(lead = {}) {
   const candidate = [
     lead?.slug,
@@ -71,6 +80,12 @@ function buildLinkPagina(lead = {}) {
   return `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
 }
 
+function buildLinkMuestra(phone = '') {
+  const safePhone = normalizePhoneForWA(phone);
+  if (!safePhone) return '';
+  return `${getSampleFormBaseUrl()}/muestra/${encodeURIComponent(safePhone)}`;
+}
+
 function replacePlaceholders(template, lead) {
   if (!template) return '';
   const telFromLead = cleanLeadPhone(lead?.telefono);
@@ -79,11 +94,14 @@ function replacePlaceholders(template, lead) {
   const tel = telFromLead || telFromJid || '';
   const nameFirst = firstName(lead.nombre || '');
   const linkPagina = buildLinkPagina(lead);
+  const linkMuestra = buildLinkMuestra(tel);
 
   const resolveKey = (key) => {
     if (key === 'telefono') return tel;
+    if (key === 'phone') return tel;
     if (key === 'nombre') return nameFirst;
     if (key === 'linkPagina' || key === 'link_pagina') return linkPagina;
+    if (key === 'linkMuestra' || key === 'link_muestra') return linkMuestra;
     return lead[key] ?? '';
   };
 

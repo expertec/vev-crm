@@ -647,13 +647,14 @@ function serializeNegocio(negocioId, negocioData = {}, context = {}) {
   const panelUrl = getPanelAccessUrl();
   const planStartAt = negocioData.planStartAt || negocioData.planStartDate || null;
   const expiresAt = negocioData.expiresAt || negocioData.planRenewalDate || null;
+  const leadPhone = normalizePhoneDigits(negocioData.leadPhone || context.phoneDigits || '');
 
   return {
     id: negocioId,
     companyInfo: String(negocioData.companyInfo || ''),
     status: String(negocioData.status || ''),
     leadId: String(negocioData.leadId || context.leadId || ''),
-    leadPhone: normalizePhoneDigits(negocioData.leadPhone || context.phoneDigits || ''),
+    leadPhone,
     contactWhatsapp: normalizePhoneDigits(negocioData.contactWhatsapp || ''),
     contactEmail: String(negocioData.contactEmail || ''),
     plan: String(negocioData.plan || ''),
@@ -668,6 +669,7 @@ function serializeNegocio(negocioId, negocioData = {}, context = {}) {
     dominio: String(negocioData.dominio || ''),
     siteUrl,
     panelUrl,
+    sampleUrl: String(negocioData.sampleLinkSentUrl || '') || buildSampleFormUrl(leadPhone),
     trialActive: negocioData.trialActive === true,
     templateId: String(negocioData.templateId || ''),
     schema: (negocioData?.schema && typeof negocioData.schema === 'object') ? negocioData.schema : null,
@@ -754,6 +756,22 @@ function buildInformationFormUrl(phoneDigits = '') {
   return `${base}/informacion/${safePhone}`;
 }
 
+function getSampleFormBaseUrl() {
+  return (
+    process.env.SAMPLE_FORM_BASE_URL
+    || process.env.PUBLIC_SAMPLE_FORM_URL
+    || process.env.NEXT_PUBLIC_SITE_URL
+    || 'https://negociosweb.mx'
+  );
+}
+
+function buildSampleFormUrl(phoneDigits = '') {
+  const safePhone = normalizePhoneDigits(phoneDigits);
+  if (!safePhone) return '';
+  const base = String(getSampleFormBaseUrl()).replace(/\/+$/, '');
+  return `${base}/muestra/${safePhone}`;
+}
+
 function buildBriefInviteMessage({ companyName = '', briefUrl = '' } = {}) {
   const safeName = String(companyName || '').trim() || 'tu negocio';
   const safeUrl = String(briefUrl || '').trim();
@@ -761,6 +779,16 @@ function buildBriefInviteMessage({ companyName = '', briefUrl = '' } = {}) {
     `Hola ${safeName}.\n\n`
     + `Te comparto tu formulario de información para preparar tu sitio:\n${safeUrl}\n\n`
     + 'Cuando lo completes, te confirmo por este medio.'
+  );
+}
+
+function buildSampleInviteMessage({ companyName = '', sampleUrl = '' } = {}) {
+  const safeName = String(companyName || '').trim() || 'tu negocio';
+  const safeUrl = String(sampleUrl || '').trim();
+  return (
+    `Hola ${safeName}.\n\n`
+    + `Aquí tienes tu formulario de muestra express:\n${safeUrl}\n\n`
+    + 'Cuando lo completes, te envío tu página por WhatsApp.'
   );
 }
 
@@ -1876,6 +1904,15 @@ app.get('/api/crm/lead-business', async (req, res) => {
       leadId: leadCtx.leadId,
       phone: leadCtx.phoneDigits,
     });
+    const sampleUrl = buildSampleFormUrl(
+      normalizePhoneDigits(
+        negocioCtx.negocioData?.contactWhatsapp
+        || negocioCtx.negocioData?.leadPhone
+        || leadCtx.phoneDigits
+        || leadCtx.leadData?.telefono
+        || ''
+      )
+    );
 
     return res.json({
       success: true,
@@ -1889,6 +1926,19 @@ app.get('/api/crm/lead-business', async (req, res) => {
       negocio,
       panelUrl: getPanelAccessUrl(),
       formUrl,
+      sampleUrl,
+      sampleReadyTrigger: String(
+        leadCtx.leadData?.sampleFlow?.onReadyTrigger
+        || negocioCtx.negocioData?.sampleOnReadyTrigger
+        || ''
+      ),
+      sampleReadyStageKey: String(
+        leadCtx.leadData?.sampleFlow?.onReadyStageKey
+        || negocioCtx.negocioData?.sampleOnReadyStageKey
+        || ''
+      ),
+      sampleEnabled: leadCtx.leadData?.sampleFlow?.enabled === true,
+      sampleExpiresAt: toIsoOrNull(leadCtx.leadData?.sampleFlow?.expiresAt),
     });
   } catch (error) {
     console.error('[crm/lead-business] Error:', error);
@@ -2173,6 +2223,114 @@ app.post('/api/crm/lead-business/send-form-link', async (req, res) => {
     });
   } catch (error) {
     console.error('[crm/send-form-link] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/send-sample-link', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    negocioId = '',
+    sampleUrl = '',
+    message = '',
+    onReadyTrigger = '',
+    onReadyStageKey = '',
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId, phone o negocioId.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    const negocio = negocioCtx.negocioData || {};
+    const targetPhone = normalizePhoneDigits(
+      negocio.contactWhatsapp || negocio.leadPhone || leadCtx.phoneDigits || leadCtx.leadData?.telefono || ''
+    );
+    if (!targetPhone) {
+      return res.status(400).json({ error: 'No se encontró teléfono para enviar la muestra.' });
+    }
+
+    const normalizedStageKey = String(onReadyStageKey || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    const normalizedTrigger = String(onReadyTrigger || '').trim();
+    const resolvedSampleUrl = String(sampleUrl || '').trim() || buildSampleFormUrl(targetPhone);
+    if (!resolvedSampleUrl) {
+      return res.status(500).json({ error: 'No se pudo construir la URL de muestra.' });
+    }
+
+    const finalMessage = String(message || '').trim() || buildSampleInviteMessage({
+      companyName: String(negocio.companyInfo || leadCtx.leadData?.nombre || ''),
+      sampleUrl: resolvedSampleUrl,
+    });
+
+    const sent = await sendWhatsappFallbackMessage({
+      leadId: String(leadCtx.leadId || negocio.leadId || ''),
+      phoneDigits: targetPhone,
+      message: finalMessage,
+    });
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    if (leadCtx.leadRef) {
+      await leadCtx.leadRef.set(
+        {
+          sampleFlow: {
+            enabled: true,
+            enabledAt: now,
+            source: 'crm_send_sample_link',
+            phone: targetPhone,
+            sampleUrl: resolvedSampleUrl,
+            mode: 'funnel',
+            onReadyTrigger: normalizedTrigger,
+            onReadyStageKey: normalizedStageKey,
+            expiresAt,
+          },
+          sampleLinkSentAt: now,
+          sampleLinkSentUrl: resolvedSampleUrl,
+          etiquetas: admin.firestore.FieldValue.arrayUnion('SampleLinkSent', 'MuestraActiva'),
+        },
+        { merge: true }
+      );
+    }
+
+    if (negocioCtx.negocioRef) {
+      await negocioCtx.negocioRef.set(
+        {
+          sampleFlowType: 'funnel',
+          suppressDefaultFollowups: true,
+          sampleEnabledAt: now,
+          sampleExpiresAt: expiresAt,
+          sampleLinkSentAt: now,
+          sampleLinkSentUrl: resolvedSampleUrl,
+          sampleOnReadyTrigger: normalizedTrigger || admin.firestore.FieldValue.delete(),
+          sampleOnReadyStageKey: normalizedStageKey || admin.firestore.FieldValue.delete(),
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    }
+
+    return res.json({
+      success: true,
+      sampleUrl: resolvedSampleUrl,
+      sentVia: sent.method,
+      target: sent.target,
+      leadId: String(leadCtx.leadId || ''),
+      negocioId: negocioCtx.negocioId || '',
+    });
+  } catch (error) {
+    console.error('[crm/send-sample-link] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
@@ -4102,6 +4260,273 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
   } catch (err) {
     console.error('[apply-stage] Error:', err);
     return res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+app.get('/api/web/sample-access/:phone', async (req, res) => {
+  try {
+    const phoneDigits = normalizePhoneDigits(req.params?.phone || '');
+    if (!phoneDigits) {
+      return res.status(400).json({ error: 'Teléfono inválido.' });
+    }
+
+    const leadCtx = await resolveLeadByIdentity({ phone: phoneDigits });
+    if (!leadCtx?.leadRef || !leadCtx?.leadId) {
+      return res.status(404).json({ error: 'Lead no encontrado para este teléfono.' });
+    }
+
+    const leadSnap = leadCtx.leadSnap || await leadCtx.leadRef.get();
+    if (!leadSnap.exists) {
+      return res.status(404).json({ error: 'Lead no encontrado para este teléfono.' });
+    }
+
+    const leadData = leadSnap.data() || {};
+    const sampleFlow = (leadData.sampleFlow && typeof leadData.sampleFlow === 'object')
+      ? leadData.sampleFlow
+      : {};
+
+    if (sampleFlow.enabled !== true) {
+      return res.status(403).json({ error: 'Este número no tiene muestra habilitada.' });
+    }
+
+    const sampleExpiresAt = (() => {
+      const value = sampleFlow.expiresAt;
+      if (!value) return null;
+      if (value instanceof Date) return value;
+      if (typeof value?.toDate === 'function') return value.toDate();
+      const parsed = new Date(value);
+      return Number.isFinite(parsed.getTime()) ? parsed : null;
+    })();
+    if (sampleExpiresAt && sampleExpiresAt.getTime() <= Date.now()) {
+      return res.status(403).json({ error: 'La muestra expiró. Solicita un nuevo enlace.' });
+    }
+
+    const expectedPhone = normalizePhoneDigits(sampleFlow.phone || leadCtx.phoneDigits || leadData.telefono || '');
+    const candidates = new Set(expandPhoneCandidates(phoneDigits));
+    if (expectedPhone && !candidates.has(expectedPhone)) {
+      return res.status(403).json({ error: 'Este enlace no coincide con la muestra habilitada.' });
+    }
+
+    const negocioCtx = await resolveNegocioByIdentity({
+      leadId: leadCtx.leadId,
+      phoneDigits: expectedPhone || phoneDigits,
+    });
+    const negocio = negocioCtx.negocioData || {};
+
+    return res.json({
+      success: true,
+      allowed: true,
+      leadId: String(leadCtx.leadId || ''),
+      negocioId: String(negocioCtx.negocioId || ''),
+      phone: expectedPhone || phoneDigits,
+      sampleUrl: String(sampleFlow.sampleUrl || buildSampleFormUrl(expectedPhone || phoneDigits)),
+      sampleExpiresAt: sampleExpiresAt ? sampleExpiresAt.toISOString() : null,
+      prefill: {
+        companyName: String(negocio.companyInfo || leadData.nombre || ''),
+        objective: String(negocio.businessObjective || ''),
+        businessStory: String(negocio.businessStory || leadData?.briefWeb?.description || ''),
+        keyItems: Array.isArray(negocio.keyItems) ? negocio.keyItems : [],
+        primaryColor: String(negocio.primaryColor || '#2563eb'),
+        contactEmail: String(negocio.contactEmail || ''),
+        contactWhatsapp: normalizePhoneDigits(negocio.contactWhatsapp || negocio.leadPhone || expectedPhone || phoneDigits),
+        logoURL: String(negocio.logoURL || ''),
+        photoURLs: Array.isArray(negocio.photoURLs) ? negocio.photoURLs : [],
+      },
+    });
+  } catch (error) {
+    console.error('[web/sample-access] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/web/sample-submit', async (req, res) => {
+  try {
+    const {
+      phone = '',
+      leadId = '',
+      negocioId = '',
+      summary = {},
+    } = req.body || {};
+
+    const safeSummary = (summary && typeof summary === 'object') ? summary : null;
+    if (!safeSummary) {
+      return res.status(400).json({ error: 'Falta summary.' });
+    }
+
+    const phoneDigits = normalizePhoneDigits(phone || safeSummary.contactWhatsapp || '');
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone: phoneDigits });
+    if (!leadCtx?.leadRef || !leadCtx?.leadId) {
+      return res.status(404).json({ error: 'No se pudo resolver el lead de la muestra.' });
+    }
+
+    const leadSnap = leadCtx.leadSnap || await leadCtx.leadRef.get();
+    if (!leadSnap.exists) {
+      return res.status(404).json({ error: 'Lead no encontrado para esta muestra.' });
+    }
+
+    const leadData = leadSnap.data() || {};
+    const sampleFlow = (leadData.sampleFlow && typeof leadData.sampleFlow === 'object')
+      ? leadData.sampleFlow
+      : {};
+    if (sampleFlow.enabled !== true) {
+      return res.status(403).json({ error: 'Este número no tiene muestra activa.' });
+    }
+
+    const sampleExpiresAt = (() => {
+      const value = sampleFlow.expiresAt;
+      if (!value) return null;
+      if (value instanceof Date) return value;
+      if (typeof value?.toDate === 'function') return value.toDate();
+      const parsed = new Date(value);
+      return Number.isFinite(parsed.getTime()) ? parsed : null;
+    })();
+    if (sampleExpiresAt && sampleExpiresAt.getTime() <= Date.now()) {
+      return res.status(403).json({ error: 'La muestra expiró. Solicita un nuevo enlace.' });
+    }
+
+    const expectedPhone = normalizePhoneDigits(
+      sampleFlow.phone || leadCtx.phoneDigits || leadData.telefono || phoneDigits
+    );
+    if (!expectedPhone) {
+      return res.status(400).json({ error: 'No se pudo resolver teléfono para la muestra.' });
+    }
+
+    const allowedCandidates = new Set(expandPhoneCandidates(expectedPhone));
+    if (phoneDigits && !allowedCandidates.has(phoneDigits)) {
+      return res.status(403).json({ error: 'Este enlace no corresponde a la muestra activa.' });
+    }
+
+    let uploadedLogoURL = '';
+    let uploadedPhotos = [];
+    try {
+      const assets = safeSummary?.assets || {};
+      const { logo, images = [] } = assets;
+
+      if (logo) {
+        uploadedLogoURL = await uploadBase64Image({
+          base64: logo,
+          folder: `web-assets/${(safeSummary.slug || 'sample').toLowerCase()}`,
+          filenamePrefix: 'logo',
+        });
+      }
+
+      if (Array.isArray(images)) {
+        for (let i = 0; i < Math.min(images.length, 3); i += 1) {
+          const base64 = images[i];
+          if (!base64) continue;
+          const imageUrl = await uploadBase64Image({
+            base64,
+            folder: `web-assets/${(safeSummary.slug || 'sample').toLowerCase()}`,
+            filenamePrefix: `photo_${i + 1}`,
+          });
+          if (imageUrl) uploadedPhotos.push(imageUrl);
+        }
+      }
+    } catch (error) {
+      console.warn('[web/sample-submit] error subiendo assets:', error?.message || error);
+    }
+
+    const fallbackPhotos = Array.isArray(safeSummary.photoURLs)
+      ? safeSummary.photoURLs.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 3)
+      : [];
+    if (uploadedPhotos.length === 0) {
+      uploadedPhotos = fallbackPhotos;
+    }
+    if (uploadedPhotos.length === 0) {
+      try {
+        uploadedPhotos = await getStockPhotoUrls(safeSummary);
+      } catch {
+        uploadedPhotos = buildUnsplashFeaturedQueries(safeSummary);
+      }
+    }
+
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: expectedPhone,
+    });
+
+    const now = new Date();
+    const currentNegocio = negocioCtx.negocioData || {};
+    const currentSlug = String(currentNegocio.slug || '').trim();
+    const requestedSlug = String(safeSummary.slug || '').trim();
+    let finalSlug = currentSlug;
+    if (requestedSlug && requestedSlug !== currentSlug) {
+      finalSlug = await ensureUniqueSlug(requestedSlug);
+    }
+    if (!finalSlug) {
+      const fallbackSlug = String(
+        safeSummary.companyName || currentNegocio.companyInfo || `muestra-${expectedPhone}`
+      ).trim();
+      finalSlug = await ensureUniqueSlug(fallbackSlug);
+    }
+    const normalizedReadyStageKey = String(sampleFlow.onReadyStageKey || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    const readyTrigger = String(sampleFlow.onReadyTrigger || '').trim();
+
+    const negocioPatch = {
+      leadId: String(leadCtx.leadId || ''),
+      leadPhone: expectedPhone,
+      contactWhatsapp: normalizePhoneDigits(safeSummary.contactWhatsapp || currentNegocio.contactWhatsapp || expectedPhone),
+      contactEmail: String(safeSummary.contactEmail || currentNegocio.contactEmail || ''),
+      companyInfo: String(safeSummary.companyName || currentNegocio.companyInfo || ''),
+      businessStory: String(safeSummary.businessStory || safeSummary.description || currentNegocio.businessStory || ''),
+      businessObjective: String(safeSummary.objective || currentNegocio.businessObjective || ''),
+      keyItems: Array.isArray(safeSummary.keyItems) ? safeSummary.keyItems : (currentNegocio.keyItems || []),
+      primaryColor: String(safeSummary.primaryColor || currentNegocio.primaryColor || '#2563eb'),
+      templateId: String(safeSummary.templateId || currentNegocio.templateId || 'info').toLowerCase(),
+      logoURL: String(uploadedLogoURL || safeSummary.logoURL || currentNegocio.logoURL || ''),
+      photoURLs: uploadedPhotos,
+      slug: finalSlug,
+      status: 'Sin procesar',
+      sampleFlowType: 'funnel',
+      suppressDefaultFollowups: true,
+      sampleSubmittedAt: now,
+      sampleOnReadyTrigger: readyTrigger || admin.firestore.FieldValue.delete(),
+      sampleOnReadyStageKey: normalizedReadyStageKey || admin.firestore.FieldValue.delete(),
+      updatedAt: now,
+      createdAt: currentNegocio.createdAt || now,
+    };
+
+    let finalNegocioId = '';
+    if (negocioCtx.negocioRef) {
+      await negocioCtx.negocioRef.set(negocioPatch, { merge: true });
+      finalNegocioId = negocioCtx.negocioId;
+    } else {
+      const created = await db.collection('Negocios').add(negocioPatch);
+      finalNegocioId = created.id;
+    }
+
+    await leadCtx.leadRef.set(
+      {
+        briefWeb: safeSummary,
+        sampleFlow: {
+          ...sampleFlow,
+          enabled: true,
+          phone: expectedPhone,
+          submittedAt: now,
+          lastNegocioId: finalNegocioId,
+        },
+        sampleSubmittedAt: now,
+        sampleLastNegocioId: finalNegocioId,
+        etiquetas: admin.firestore.FieldValue.arrayUnion('MuestraFormularioEnviado'),
+        lastMessageAt: now,
+      },
+      { merge: true }
+    );
+
+    return res.json({
+      ok: true,
+      leadId: String(leadCtx.leadId || ''),
+      negocioId: finalNegocioId,
+      slug: finalSlug,
+    });
+  } catch (error) {
+    console.error('[web/sample-submit] Error:', error);
+    return res.status(500).json({ error: String(error?.message || error) });
   }
 });
 

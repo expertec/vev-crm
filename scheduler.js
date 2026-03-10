@@ -789,10 +789,19 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
   const jid = e164ToJid(e164);
   const sitioUrl = `https://negociosweb.mx/site/${slug}`;
   const linkPagina = sitioUrl;
-  const textoSitioListo =
-    `¡Tu página está lista! 🎉\n\n` +
-    `Chécala aquí: ${linkPagina}\n\n` +
-    `Baja para que veas todas las secciones: inicio, servicios, testimonios, contacto y el botón de WhatsApp.`;
+  const isFunnelSample = negocio?.sampleFlowType === 'funnel' || negocio?.suppressDefaultFollowups === true;
+  const readyTrigger = String(negocio?.sampleOnReadyTrigger || '').trim();
+  const readyStageKey = String(negocio?.sampleOnReadyStageKey || '').trim();
+  const textoSitioListo = isFunnelSample
+    ? (
+      `Tu muestra está disponible aquí:\n${linkPagina}\n\n`
+      + 'Revísala y me dices qué ajustes quieres.'
+    )
+    : (
+      `¡Tu página está lista! 🎉\n\n`
+      + `Chécala aquí: ${linkPagina}\n\n`
+      + 'Baja para que veas todas las secciones: inicio, servicios, testimonios, contacto y el botón de WhatsApp.'
+    );
 
   try {
     console.log(`📤 [ENVIANDO WHATSAPP] A: ${e164} | URL: ${sitioUrl}`);
@@ -836,7 +845,7 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
     
     console.log(`✅ WhatsApp enviado a ${e164}: ${sitioUrl}`);
 
-    if (!negocio?.opportunitiesSentAt) {
+    if (!isFunnelSample && !negocio?.opportunitiesSentAt) {
       const oportunidades = buildAreasOportunidadMessage(negocio);
       if (oportunidades.text) {
         const sentOportunidades = await enviarMensaje(
@@ -863,24 +872,42 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
       }
     }
 
-    // Activar secuencia WebEnviada
+    // Activar secuencias de seguimiento
     try {
       const leadId = jid;
-      if (typeof Q.cancelSequences === 'function') {
-        await Q.cancelSequences(
-          leadId,
-          ['LeadWhatsapp', 'NuevoLeadWeb', 'LeadWeb']
-        ).catch(() => {});
-      }
-      if (typeof Q.scheduleSequenceForLead === 'function') {
-        await Q.scheduleSequenceForLead(leadId, 'WebEnviada', new Date()).catch(() => {});
-      }
-      
       const leadRef = db.collection('leads').doc(leadId);
-      await leadRef.set(
-        { etiquetas: FieldValue.arrayUnion('WebEnviada') },
-        { merge: true }
-      ).catch(() => {});
+      if (!isFunnelSample) {
+        if (typeof Q.cancelSequences === 'function') {
+          await Q.cancelSequences(
+            leadId,
+            ['LeadWhatsapp', 'NuevoLeadWeb', 'LeadWeb']
+          ).catch(() => {});
+        }
+        if (typeof Q.scheduleSequenceForLead === 'function') {
+          await Q.scheduleSequenceForLead(leadId, 'WebEnviada', new Date()).catch(() => {});
+        }
+        await leadRef.set(
+          { etiquetas: FieldValue.arrayUnion('WebEnviada') },
+          { merge: true }
+        ).catch(() => {});
+      } else {
+        const leadPatch = { etiquetas: FieldValue.arrayUnion('MuestraLista') };
+        if (readyStageKey) {
+          leadPatch.etapa = readyStageKey;
+          leadPatch.etapaNombre = readyStageKey;
+          leadPatch.funnelUpdatedAt = FieldValue.serverTimestamp();
+        }
+        await leadRef.set(leadPatch, { merge: true }).catch(() => {});
+
+        if (readyTrigger && typeof Q.scheduleSequenceForLead === 'function') {
+          await Q.scheduleSequenceForLead(
+            leadId,
+            readyTrigger,
+            new Date(),
+            { allowReschedule: true, source: 'sample-ready' }
+          ).catch(() => {});
+        }
+      }
     } catch (seqErr) {
       console.warn('[enviarSitioWebPorWhatsApp] No se pudo activar secuencias:', seqErr?.message);
     }
