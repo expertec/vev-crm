@@ -2159,6 +2159,164 @@ export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
   return { success: true };
 }
 
+export async function sendMediaUrlToLead(phoneOrJid, {
+  mediaType = '',
+  mediaUrl = '',
+  caption = '',
+  fileName = '',
+  mimeType = '',
+} = {}) {
+  const safeTypeRaw = String(mediaType || '').trim().toLowerCase();
+  const safeUrl = String(mediaUrl || '').trim();
+  const safeCaption = String(caption || '');
+  const safeFileName = String(fileName || '').trim();
+  const safeMimeType = String(mimeType || '').trim();
+
+  if (!safeUrl) throw new Error('Falta mediaUrl');
+  if (safeTypeRaw === 'image') {
+    return sendImageToLead(phoneOrJid, safeUrl, safeCaption);
+  }
+
+  const safeType = (
+    safeTypeRaw === 'video'
+      ? 'video'
+      : (safeTypeRaw === 'document' || safeTypeRaw === 'pdf')
+        ? 'document'
+        : ''
+  );
+  if (!safeType) {
+    throw new Error('mediaType inválido. Usa: image, video, document o pdf');
+  }
+
+  if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
+
+  const { leadId, targetJid, num, leadData, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
+  if (!targetJid) throw new Error('No se pudo resolver JID de destino');
+
+  const inferNameFromUrl = (rawUrl = '') => {
+    const clean = String(rawUrl || '').split('?')[0];
+    const piece = decodeURIComponent(clean.split('/').pop() || '').trim();
+    return piece || '';
+  };
+
+  const documentMime = safeMimeType
+    || (/\.pdf(\?|#|$)/i.test(safeUrl) ? 'application/pdf' : 'application/octet-stream');
+  const documentName = safeFileName || inferNameFromUrl(safeUrl) || 'archivo';
+
+  const payload = safeType === 'video'
+    ? {
+      video: { url: safeUrl },
+      caption: safeCaption,
+      ...(safeMimeType ? { mimetype: safeMimeType } : {}),
+    }
+    : {
+      document: { url: safeUrl },
+      mimetype: documentMime,
+      fileName: documentName,
+      ...(safeCaption ? { caption: safeCaption } : {}),
+    };
+
+  const sent = await whatsappSock.sendMessage(
+    targetJid,
+    payload,
+    { timeoutMs: 120_000 }
+  );
+
+  if (leadId) {
+    const sentRemoteJid = normalizeJid(sent?.key?.remoteJid || sent?.key?.remoteJidAlt || '');
+    const resolvedOutboundJid = (
+      isUserJid(sentRemoteJid) && !isSuspiciousPseudoPhoneJid(sentRemoteJid)
+    )
+      ? sentRemoteJid
+      : '';
+    const jidToPersist = normalizeJid(resolvedOutboundJid || targetJid || '');
+    const allowUnsafeTarget = leadData?.allowUnsafeTarget === true;
+
+    const outMsg = {
+      content: safeCaption,
+      mediaType: safeType === 'video' ? 'video' : 'document',
+      mediaUrl: safeUrl,
+      ...(safeType === 'document' ? { fileName: documentName, mimeType: documentMime } : {}),
+      ...(safeType === 'video' && safeMimeType ? { mimeType: safeMimeType } : {}),
+      sender: 'business',
+      timestamp: now(),
+    };
+    const canonicalRef = await ensureLeadDocForOutbound({
+      leadRef,
+      leadId,
+      targetJid,
+      num,
+    });
+    await persistLeadMessage(canonicalRef, outMsg, sent?.key?.id || null);
+    await canonicalRef.set(
+      {
+        ...buildLeadLastMessagePatch(outMsg),
+        ...(num ? { telefono: num } : {}),
+        ...(jidToPersist ? { jid: jidToPersist } : {}),
+        ...(isUserJid(jidToPersist) && (!isSuspiciousPseudoPhoneJid(jidToPersist) || allowUnsafeTarget)
+          ? { resolvedJid: jidToPersist, needsJidResolution: false }
+          : {}),
+        ...(isLidJid(jidToPersist)
+          ? { lidJid: jidToPersist, needsJidResolution: true }
+          : (isLidJid(leadData?.lidJid || '') ? { lidJid: normalizeJid(leadData.lidJid), needsJidResolution: true } : {})),
+        ...(allowUnsafeTarget ? { allowUnsafeTarget: true } : {}),
+      },
+      { merge: true }
+    );
+
+    if (resolvedOutboundJid) {
+      try {
+        const reconcile = await resolveExistingLeadReference({
+          provisionalLeadId: leadId,
+          normalizedPhone: num,
+          resolvedJid: resolvedOutboundJid,
+          jid: resolvedOutboundJid,
+          lidJid: leadData?.lidJid || (isLidJid(targetJid) ? targetJid : ''),
+        });
+        const aliasLeads = [
+          ...(Array.isArray(reconcile?.aliasLeads) ? reconcile.aliasLeads : []),
+          ...(
+            reconcile?.leadId && reconcile.leadId !== leadId
+              ? [{
+                id: reconcile.leadId,
+                data: reconcile.leadSnap?.data?.() || reconcile.leadSnap?.data() || {},
+              }]
+              : []
+          ),
+        ];
+
+        if (aliasLeads.length > 0) {
+          await consolidateLeadAliasesToCanonical({
+            canonicalLeadId: leadId,
+            canonicalLeadRef: canonicalRef,
+            aliasLeads,
+            normalizedPhone: num,
+            targetJid: jidToPersist,
+            resolvedJid: resolvedOutboundJid,
+            lidJid: leadData?.lidJid || '',
+            addressingMode: leadData?.addressingMode || '',
+            allowUnsafeTarget,
+          });
+        }
+      } catch (error) {
+        console.warn(
+          `[WA] No se pudo reconciliar lead por remoteJid multimedia (${leadId} -> ${resolvedOutboundJid}):`,
+          error?.message || error
+        );
+      }
+    }
+
+    await syncAliasLeadToCanonical({
+      provisionalLeadId,
+      canonicalLeadId: leadId,
+      targetJid,
+      num,
+    });
+  }
+
+  return { success: true };
+}
+
 export async function sendFullAudioAsDocument(phone, fileUrl) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');

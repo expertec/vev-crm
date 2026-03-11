@@ -41,6 +41,7 @@ import {
   getWhatsAppSock,
   sendMessageToLead,
   sendImageToLead,
+  sendMediaUrlToLead,
   getSessionPhone,
   sendAudioMessage,
   sendVideoNote,
@@ -3499,6 +3500,68 @@ app.post('/api/whatsapp/send-image', async (req, res) => {
   } catch (error) {
     console.error('Error enviando imagen por WhatsApp:', error);
     return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/whatsapp/send-media-url', async (req, res) => {
+  const {
+    leadId,
+    mediaType,
+    mediaUrl,
+    caption = '',
+    fileName = '',
+    mimeType = '',
+  } = req.body || {};
+
+  const safeLeadId = String(leadId || '').trim();
+  const safeMediaType = String(mediaType || '').trim().toLowerCase();
+  const safeMediaUrl = String(mediaUrl || '').trim();
+
+  if (!safeLeadId || !safeMediaType || !safeMediaUrl) {
+    return res.status(400).json({
+      error: 'Faltan leadId, mediaType o mediaUrl',
+    });
+  }
+
+  if (!['image', 'video', 'document', 'pdf'].includes(safeMediaType)) {
+    return res.status(400).json({
+      error: 'mediaType inválido. Usa: image, video, document o pdf',
+    });
+  }
+
+  try {
+    const leadDoc = await db.collection('leads').doc(safeLeadId).get();
+    if (leadDoc.exists) {
+      const unsafeTargetError = getUnsafeLeadTargetError(safeLeadId, leadDoc.data() || {});
+      if (unsafeTargetError) {
+        return res.status(409).json({ error: unsafeTargetError });
+      }
+    } else {
+      const unsafeIdentifierError = getUnsafeIdentifierTargetError(safeLeadId);
+      if (unsafeIdentifierError) {
+        return res.status(409).json({ error: unsafeIdentifierError });
+      }
+    }
+
+    const result = await sendMediaUrlToLead(safeLeadId, {
+      mediaType: safeMediaType,
+      mediaUrl: safeMediaUrl,
+      caption: String(caption || ''),
+      fileName: String(fileName || ''),
+      mimeType: String(mimeType || ''),
+    });
+    return res.json(result);
+  } catch (error) {
+    console.error('Error enviando multimedia por WhatsApp:', {
+      leadId: safeLeadId,
+      mediaType: safeMediaType,
+      mediaUrl: safeMediaUrl,
+      fileName: String(fileName || ''),
+      mimeType: String(mimeType || ''),
+      message: error?.message || String(error),
+      stack: error?.stack || null,
+    });
+    return res.status(500).json({ error: error?.message || String(error) });
   }
 });
 
