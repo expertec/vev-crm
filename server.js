@@ -4543,6 +4543,12 @@ app.get('/api/web/sample-access/:phone', async (req, res) => {
 });
 
 app.post('/api/web/sample-submit', async (req, res) => {
+  const requestDebug = {
+    leadId: '',
+    phone: '',
+    negocioId: '',
+  };
+
   try {
     const {
       phone = '',
@@ -4551,9 +4557,53 @@ app.post('/api/web/sample-submit', async (req, res) => {
       summary = {},
     } = req.body || {};
 
-    const safeSummary = (summary && typeof summary === 'object') ? summary : null;
-    if (!safeSummary) {
+    requestDebug.leadId = String(leadId || '').trim();
+    requestDebug.phone = String(phone || '').trim();
+    requestDebug.negocioId = String(negocioId || '').trim();
+
+    const rawSummary = (summary && typeof summary === 'object') ? summary : null;
+    if (!rawSummary) {
       return res.status(400).json({ error: 'Falta summary.' });
+    }
+
+    const hasSummarySampleOnReadyTrigger = Object.prototype.hasOwnProperty.call(
+      rawSummary,
+      'sampleOnReadyTrigger'
+    );
+
+    const isFieldValueSentinel = (value) => {
+      if (!value || typeof value !== 'object') return false;
+      const ctorName = String(value.constructor?.name || '').toLowerCase();
+      if (ctorName.includes('fieldvalue') || ctorName.includes('deletetransform')) return true;
+      const methodName = String(value?._methodName || '').toLowerCase();
+      return methodName.includes('fieldvalue') && methodName.includes('delete');
+    };
+
+    const sanitizeSummary = (value, visited = new WeakSet()) => {
+      if (value === undefined) return undefined;
+      if (value === null) return null;
+      if (isFieldValueSentinel(value)) return undefined;
+      if (Array.isArray(value)) {
+        return value
+          .map((item) => sanitizeSummary(item, visited))
+          .filter((item) => item !== undefined);
+      }
+      if (typeof value !== 'object') return value;
+      if (visited.has(value)) return undefined;
+      visited.add(value);
+
+      const out = {};
+      for (const [key, nestedValue] of Object.entries(value)) {
+        if (key === 'sampleOnReadyTrigger') continue;
+        const cleaned = sanitizeSummary(nestedValue, visited);
+        if (cleaned !== undefined) out[key] = cleaned;
+      }
+      return out;
+    };
+
+    const safeSummary = sanitizeSummary(rawSummary);
+    if (!safeSummary || typeof safeSummary !== 'object') {
+      return res.status(400).json({ error: 'Summary inválido.' });
     }
 
     const phoneDigits = normalizePhoneDigits(phone || safeSummary.contactWhatsapp || '');
@@ -4688,19 +4738,32 @@ app.post('/api/web/sample-submit', async (req, res) => {
       sampleFlowType: 'funnel',
       suppressDefaultFollowups: true,
       sampleSubmittedAt: now,
-      sampleOnReadyTrigger: readyTrigger || admin.firestore.FieldValue.delete(),
-      sampleOnReadyStageKey: normalizedReadyStageKey || admin.firestore.FieldValue.delete(),
       updatedAt: now,
       createdAt: currentNegocio.createdAt || now,
     };
+    if (readyTrigger) {
+      negocioPatch.sampleOnReadyTrigger = readyTrigger;
+    }
+    if (normalizedReadyStageKey) {
+      negocioPatch.sampleOnReadyStageKey = normalizedReadyStageKey;
+    }
 
-    let finalNegocioId = '';
-    if (negocioCtx.negocioRef) {
-      await negocioCtx.negocioRef.set(negocioPatch, { merge: true });
-      finalNegocioId = negocioCtx.negocioId;
-    } else {
-      const created = await db.collection('Negocios').add(negocioPatch);
-      finalNegocioId = created.id;
+    const finalNegocioRef = negocioCtx.negocioRef || db.collection('Negocios').doc();
+    await finalNegocioRef.set(negocioPatch, { merge: true });
+    const finalNegocioId = finalNegocioRef.id;
+
+    const negocioCleanupPatch = {};
+    if (!readyTrigger) {
+      negocioCleanupPatch.sampleOnReadyTrigger = admin.firestore.FieldValue.delete();
+    }
+    if (!normalizedReadyStageKey) {
+      negocioCleanupPatch.sampleOnReadyStageKey = admin.firestore.FieldValue.delete();
+    }
+    if (hasSummarySampleOnReadyTrigger) {
+      negocioCleanupPatch['summary.sampleOnReadyTrigger'] = admin.firestore.FieldValue.delete();
+    }
+    if (Object.keys(negocioCleanupPatch).length > 0) {
+      await finalNegocioRef.update(negocioCleanupPatch);
     }
 
     await leadCtx.leadRef.set(
@@ -4721,15 +4784,40 @@ app.post('/api/web/sample-submit', async (req, res) => {
       { merge: true }
     );
 
+    if (hasSummarySampleOnReadyTrigger) {
+      await leadCtx.leadRef.update({
+        'summary.sampleOnReadyTrigger': admin.firestore.FieldValue.delete(),
+      }).catch((cleanupError) => {
+        console.warn(
+          '[web/sample-submit] No se pudo limpiar summary.sampleOnReadyTrigger en lead:',
+          cleanupError?.message || cleanupError
+        );
+      });
+    }
+
     return res.json({
+      success: true,
       ok: true,
       leadId: String(leadCtx.leadId || ''),
       negocioId: finalNegocioId,
       slug: finalSlug,
     });
   } catch (error) {
-    console.error('[web/sample-submit] Error:', error);
-    return res.status(500).json({ error: String(error?.message || error) });
+    const errorMessage = String(error?.message || error);
+    console.error('[web/sample-submit] Error detail:', {
+      message: errorMessage,
+      code: String(error?.code || ''),
+      stack: error?.stack || '',
+      leadId: requestDebug.leadId,
+      phone: requestDebug.phone,
+      negocioId: requestDebug.negocioId,
+      summaryType: typeof req?.body?.summary,
+      summaryKeys:
+        req?.body?.summary && typeof req.body.summary === 'object'
+          ? Object.keys(req.body.summary).slice(0, 80)
+          : [],
+    });
+    return res.status(500).json({ error: errorMessage });
   }
 });
 
