@@ -70,6 +70,7 @@ import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
 // ================ 🆕 AUTENTICACIÓN DE CLIENTE ================
 import { loginCliente, verificarSesion, logoutCliente } from './clienteAuthRoutes.js';
 import { createProcessInformationRouter } from './routes/processInformationRoutes.js';
+import { createCorporateEmailRouter } from './routes/corporateEmailRoutes.js';
 import { generarPIN, generarMensajeCredenciales } from './pinUtils.js';
 
 // (opcional) queue helpers
@@ -1817,6 +1818,7 @@ app.post('/api/cliente/logout', logoutCliente);
 
 // ============== 🆕 FLUJO INFORMACION (SIN SECUENCIAS) ==============
 app.use('/api/web', createProcessInformationRouter());
+app.use('/api/web', createCorporateEmailRouter());
 
 // ============== RUTAS EXISTENTES ==============
 
