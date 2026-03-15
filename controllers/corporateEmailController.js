@@ -11,9 +11,19 @@ function resolveErrorStatus(error) {
 
 function resolveSafeMessage(error) {
   const status = resolveErrorStatus(error);
+  const code = cleanString(error?.code || '', 120).toUpperCase();
+  const safeMessage = cleanString(error?.message || 'Solicitud invalida', 300);
+
+  const shouldExposeMessage =
+    code === 'DESTINATION_EMAIL_NOT_VERIFIED'
+    || code === 'CLOUDFLARE_NOT_CONFIGURED'
+    || code === 'CLOUDFLARE_ZONE_NOT_FOUND'
+    || code === 'CLOUDFLARE_ACCOUNT_NOT_FOUND'
+    || code.startsWith('CLOUDFLARE_');
+
+  if (shouldExposeMessage && safeMessage) return safeMessage;
   if (status >= 500) return 'Error interno al procesar la solicitud';
-  const message = cleanString(error?.message || 'Solicitud invalida', 300);
-  return message || 'Solicitud invalida';
+  return safeMessage || 'Solicitud invalida';
 }
 
 function parseBoolean(value, defaultValue = false) {
