@@ -94,6 +94,8 @@ export class CorporateEmailService {
       cloudflareRuleId: cleanString(record.cloudflareRuleId || '', 180),
       cloudflareRuleTag: cleanString(record.cloudflareRuleTag || '', 180),
       cloudflareRuleEnabled: record.cloudflareRuleEnabled !== false,
+      cloudflareEmailRoutingDnsEnabled: record.cloudflareEmailRoutingDnsEnabled === true,
+      cloudflareEmailRoutingDnsUpdated: record.cloudflareEmailRoutingDnsUpdated === true,
       createdAt: toIso(record.createdAt),
       updatedAt: toIso(record.updatedAt),
       deletedAt: toIso(record.deletedAt),
@@ -288,6 +290,10 @@ export class CorporateEmailService {
         domain: safeDomain,
       });
 
+      const routingDns = await this.cloudflareClient.ensureEmailRoutingDnsEnabled({
+        zoneId,
+      });
+
       const rule = await this.cloudflareClient.createRoutingRule({
         zoneId,
         sourceEmail: email,
@@ -314,6 +320,8 @@ export class CorporateEmailService {
             cloudflareRuleId: cleanString(rule?.id || '', 180),
             cloudflareRuleTag: cleanString(rule?.tag || '', 180),
             cloudflareRuleEnabled: rule?.enabled !== false,
+            cloudflareEmailRoutingDnsEnabled: routingDns?.enabled === true,
+            cloudflareEmailRoutingDnsUpdated: routingDns?.changed === true,
             cloudflareLastSyncAt: Timestamp.now(),
           },
         });

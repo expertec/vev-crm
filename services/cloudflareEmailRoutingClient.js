@@ -36,6 +36,13 @@ function mapStatusCode(status) {
   return 502;
 }
 
+function isAlreadyEnabledDnsError(error) {
+  if (!(error instanceof CloudflareEmailRoutingError)) return false;
+  if (![400, 409].includes(Number(error.statusCode || 0))) return false;
+  const message = cleanString(error.message || '', 500).toLowerCase();
+  return /already|enabled|exist|configured|mx.*lock|record/i.test(message);
+}
+
 function buildDomainCandidates(domain = '') {
   const cleanDomain = normalizeDomain(domain);
   if (!cleanDomain) return [];
@@ -167,6 +174,39 @@ export class CloudflareEmailRoutingClient {
     return '';
   }
 
+  async ensureEmailRoutingDnsEnabled({ zoneId } = {}) {
+    const safeZoneId = cleanString(zoneId, 120);
+    if (!safeZoneId) {
+      throw new CloudflareEmailRoutingError('Falta zoneId para habilitar DNS de Email Routing', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_ZONE_REQUIRED',
+      });
+    }
+
+    try {
+      const result = await this.request({
+        method: 'POST',
+        path: `/zones/${safeZoneId}/email/routing/dns`,
+      });
+      return {
+        enabled: true,
+        changed: true,
+        zoneId: safeZoneId,
+        result: result || null,
+      };
+    } catch (error) {
+      if (isAlreadyEnabledDnsError(error)) {
+        return {
+          enabled: true,
+          changed: false,
+          zoneId: safeZoneId,
+          alreadyEnabled: true,
+        };
+      }
+      throw error;
+    }
+  }
+
   async createRoutingRule({
     zoneId,
     sourceEmail,
@@ -248,4 +288,3 @@ export class CloudflareEmailRoutingClient {
     }
   }
 }
-

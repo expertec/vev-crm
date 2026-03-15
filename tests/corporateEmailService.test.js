@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CorporateEmailService } from '../services/corporateEmailService.js';
+import { CloudflareEmailRoutingError } from '../services/cloudflareEmailRoutingClient.js';
 import { buildCorporateEmailRecordId } from '../utils/corporateEmailUtils.js';
 
 class InMemoryCorporateEmailRepository {
@@ -109,10 +110,22 @@ class FakeCloudflareEmailRoutingClient {
   constructor() {
     this.created = [];
     this.deleted = [];
+    this.dnsEnsures = [];
+    this.events = [];
   }
 
   async resolveZoneIdByDomain() {
     return 'zone-auto-123';
+  }
+
+  async ensureEmailRoutingDnsEnabled({ zoneId }) {
+    this.dnsEnsures.push(zoneId);
+    this.events.push(`dns:${zoneId}`);
+    return {
+      enabled: true,
+      changed: true,
+      zoneId,
+    };
   }
 
   async createRoutingRule({
@@ -126,6 +139,7 @@ class FakeCloudflareEmailRoutingClient {
       destinationEmail,
     };
     this.created.push(item);
+    this.events.push(`rule:${zoneId}`);
     return {
       id: `rule-${this.created.length}`,
       tag: `tag-${this.created.length}`,
@@ -179,7 +193,11 @@ test('crea alias corporativo y guarda datos', async () => {
   assert.equal(created.destinationEmail, 'cliente@gmail.com');
   assert.equal(created.status, 'active');
   assert.equal(created.cloudflareZoneId, 'zone-static-999');
+  assert.equal(created.cloudflareEmailRoutingDnsEnabled, true);
   assert.equal(cloudflareClient.created.length, 1);
+  assert.equal(cloudflareClient.dnsEnsures.length, 1);
+  assert.equal(cloudflareClient.events[0], 'dns:zone-static-999');
+  assert.equal(cloudflareClient.events[1], 'rule:zone-static-999');
   assert.equal(cloudflareClient.created[0].sourceEmail, 'ventas@cliente.com');
 });
 
@@ -279,3 +297,31 @@ test('elimina alias corporativo y marca registro como deleted', async () => {
   assert.equal(cloudflareClient.deleted[0].ruleId, 'rule-del-001');
 });
 
+test('si falla habilitar DNS de Email Routing no crea regla', async () => {
+  const { service, cloudflareClient } = createService({
+    companies: {
+      n5: {
+        dominio: 'cliente.com',
+        cloudflareZoneId: 'zone-static-err',
+      },
+    },
+  });
+
+  cloudflareClient.ensureEmailRoutingDnsEnabled = async () => {
+    throw new CloudflareEmailRoutingError('Permiso insuficiente para activar DNS de Email Routing', {
+      statusCode: 503,
+      code: 'CLOUDFLARE_PERMISSION_DENIED',
+    });
+  };
+
+  await assert.rejects(
+    () => service.createCorporateEmail({
+      empresaId: 'n5',
+      alias: 'facturacion',
+      destinationEmail: 'cliente@gmail.com',
+    }),
+    (error) => error?.code === 'CLOUDFLARE_PERMISSION_DENIED'
+  );
+
+  assert.equal(cloudflareClient.created.length, 0);
+});
