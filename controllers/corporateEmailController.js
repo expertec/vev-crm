@@ -25,6 +25,19 @@ function parseBoolean(value, defaultValue = false) {
   return defaultValue;
 }
 
+function buildErrorResponse(error) {
+  const body = {
+    success: false,
+    code: cleanString(error?.code || 'INTERNAL_ERROR', 120),
+    error: resolveSafeMessage(error),
+  };
+
+  if (error?.details && typeof error.details === 'object') {
+    body.details = error.details;
+  }
+  return body;
+}
+
 export function createCorporateEmailController({
   service,
   logger = console,
@@ -57,11 +70,7 @@ export function createCorporateEmailController({
         });
       } catch (error) {
         logger.error('[corporate-emails] create error:', error?.message || error);
-        return res.status(resolveErrorStatus(error)).json({
-          success: false,
-          code: cleanString(error?.code || 'INTERNAL_ERROR', 120),
-          error: resolveSafeMessage(error),
-        });
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
       }
     },
 
@@ -80,11 +89,7 @@ export function createCorporateEmailController({
         });
       } catch (error) {
         logger.error('[corporate-emails] list error:', error?.message || error);
-        return res.status(resolveErrorStatus(error)).json({
-          success: false,
-          code: cleanString(error?.code || 'INTERNAL_ERROR', 120),
-          error: resolveSafeMessage(error),
-        });
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
       }
     },
 
@@ -103,11 +108,7 @@ export function createCorporateEmailController({
         });
       } catch (error) {
         logger.error('[corporate-emails] delete error:', error?.message || error);
-        return res.status(resolveErrorStatus(error)).json({
-          success: false,
-          code: cleanString(error?.code || 'INTERNAL_ERROR', 120),
-          error: resolveSafeMessage(error),
-        });
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
       }
     },
 
@@ -128,13 +129,33 @@ export function createCorporateEmailController({
         });
       } catch (error) {
         logger.error('[corporate-emails] availability error:', error?.message || error);
-        return res.status(resolveErrorStatus(error)).json({
-          success: false,
-          code: cleanString(error?.code || 'INTERNAL_ERROR', 120),
-          error: resolveSafeMessage(error),
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    getDestinationVerificationStatus: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const destinationEmail = cleanString(
+          req.query?.destinationEmail || req.query?.correoDestino || req.query?.email || '',
+          280
+        );
+        const domain = cleanString(req.query?.domain || req.query?.dominio || '', 200);
+
+        const verification = await service.getDestinationVerificationStatus({
+          empresaId,
+          destinationEmail,
+          domain,
         });
+
+        return res.status(200).json({
+          success: true,
+          verification,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] destination verification error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
       }
     },
   };
 }
-

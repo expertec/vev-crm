@@ -91,11 +91,14 @@ export class CorporateEmailService {
       destinationEmail: cleanString(record.destinationEmail || '', 280),
       status: cleanString(record.status || 'active', 60),
       cloudflareZoneId: cleanString(record.cloudflareZoneId || '', 120),
+      cloudflareAccountId: cleanString(record.cloudflareAccountId || '', 120),
       cloudflareRuleId: cleanString(record.cloudflareRuleId || '', 180),
       cloudflareRuleTag: cleanString(record.cloudflareRuleTag || '', 180),
       cloudflareRuleEnabled: record.cloudflareRuleEnabled !== false,
       cloudflareEmailRoutingDnsEnabled: record.cloudflareEmailRoutingDnsEnabled === true,
       cloudflareEmailRoutingDnsUpdated: record.cloudflareEmailRoutingDnsUpdated === true,
+      cloudflareDestinationAddressId: cleanString(record.cloudflareDestinationAddressId || '', 120),
+      destinationVerifiedAt: toIso(record.destinationVerifiedAt) || cleanString(record.destinationVerifiedAt || '', 80) || null,
       createdAt: toIso(record.createdAt),
       updatedAt: toIso(record.updatedAt),
       deletedAt: toIso(record.deletedAt),
@@ -215,6 +218,29 @@ export class CorporateEmailService {
     return zoneId;
   }
 
+  async resolveAccountId({ company = {}, zoneId = '' } = {}) {
+    const fromCompany = cleanString(
+      company?.cloudflareAccountId
+      || company?.accountId
+      || company?.cloudflare?.accountId
+      || '',
+      120
+    );
+    if (fromCompany) return fromCompany;
+
+    const fromEnv = cleanString(process.env.CLOUDFLARE_ACCOUNT_ID || '', 120);
+    if (fromEnv) return fromEnv;
+
+    const accountId = await this.cloudflareClient.resolveAccountIdByZone(zoneId);
+    if (!accountId) {
+      throw new CorporateEmailServiceError('No se pudo resolver accountId de Cloudflare', {
+        code: 'CLOUDFLARE_ACCOUNT_NOT_FOUND',
+        statusCode: 400,
+      });
+    }
+    return accountId;
+  }
+
   mapError(error) {
     if (error instanceof CorporateEmailServiceError) return error;
 
@@ -294,6 +320,32 @@ export class CorporateEmailService {
         zoneId,
       });
 
+      const accountId = await this.resolveAccountId({
+        company,
+        zoneId,
+      });
+      const destinationStatus = await this.cloudflareClient.ensureDestinationAddress({
+        accountId,
+        email: safeDestinationEmail,
+      });
+      if (destinationStatus?.verified !== true) {
+        throw new CorporateEmailServiceError(
+          'Correo destino pendiente de verificacion. Revisa tu bandeja y confirma el correo en Cloudflare.',
+          {
+            code: 'DESTINATION_EMAIL_NOT_VERIFIED',
+            statusCode: 409,
+            details: {
+              destinationEmail: safeDestinationEmail,
+              cloudflareAccountId: accountId,
+              destinationAddressId: cleanString(destinationStatus?.id || '', 120),
+              verificationSent: destinationStatus?.verificationSent === true,
+              destinationCreated: destinationStatus?.created === true,
+              verified: false,
+            },
+          }
+        );
+      }
+
       const rule = await this.cloudflareClient.createRoutingRule({
         zoneId,
         sourceEmail: email,
@@ -317,11 +369,14 @@ export class CorporateEmailService {
             destinationEmail: safeDestinationEmail,
             status,
             cloudflareZoneId: zoneId,
+            cloudflareAccountId: accountId,
             cloudflareRuleId: cleanString(rule?.id || '', 180),
             cloudflareRuleTag: cleanString(rule?.tag || '', 180),
             cloudflareRuleEnabled: rule?.enabled !== false,
             cloudflareEmailRoutingDnsEnabled: routingDns?.enabled === true,
             cloudflareEmailRoutingDnsUpdated: routingDns?.changed === true,
+            cloudflareDestinationAddressId: cleanString(destinationStatus?.id || '', 120),
+            destinationVerifiedAt: cleanString(destinationStatus?.verifiedAt || '', 80) || null,
             cloudflareLastSyncAt: Timestamp.now(),
           },
         });
@@ -481,6 +536,50 @@ export class CorporateEmailService {
           alias: normalizedAlias,
           domain: safeDomain,
         }),
+      };
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async getDestinationVerificationStatus({
+    empresaId,
+    destinationEmail,
+    domain,
+  }) {
+    try {
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const safeDestinationEmail = this.validateDestinationEmail(destinationEmail);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({
+        requestedDomain: domain,
+        company,
+      });
+      const zoneId = await this.resolveZoneId({
+        company,
+        domain: safeDomain,
+      });
+      const accountId = await this.resolveAccountId({
+        company,
+        zoneId,
+      });
+
+      const destination = await this.cloudflareClient.findDestinationAddressByEmail({
+        accountId,
+        email: safeDestinationEmail,
+      });
+
+      return {
+        destinationEmail: safeDestinationEmail,
+        domain: safeDomain,
+        cloudflareZoneId: zoneId,
+        cloudflareAccountId: accountId,
+        exists: Boolean(destination),
+        verified: destination?.verified === true,
+        destinationAddressId: cleanString(destination?.id || '', 120),
+        verifiedAt: cleanString(destination?.verifiedAt || '', 80) || null,
+        createdAt: cleanString(destination?.createdAt || '', 80) || null,
+        modifiedAt: cleanString(destination?.modifiedAt || '', 80) || null,
       };
     } catch (error) {
       throw this.mapError(error);

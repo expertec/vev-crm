@@ -43,6 +43,27 @@ function isAlreadyEnabledDnsError(error) {
   return /already|enabled|exist|configured|mx.*lock|record/i.test(message);
 }
 
+function isDestinationAddressAlreadyExistsError(error) {
+  if (!(error instanceof CloudflareEmailRoutingError)) return false;
+  if (![400, 409].includes(Number(error.statusCode || 0))) return false;
+  const message = cleanString(error.message || '', 500).toLowerCase();
+  return /already|exists|duplicate|destination/i.test(message);
+}
+
+function mapDestinationAddress(raw = {}) {
+  const id = cleanString(raw?.id || raw?.tag || '', 120);
+  const email = cleanString(raw?.email || '', 254).toLowerCase();
+  const verifiedAt = cleanString(raw?.verified || '', 80);
+  return {
+    id,
+    email,
+    verified: Boolean(verifiedAt),
+    verifiedAt: verifiedAt || null,
+    createdAt: cleanString(raw?.created || '', 80) || null,
+    modifiedAt: cleanString(raw?.modified || '', 80) || null,
+  };
+}
+
 function buildDomainCandidates(domain = '') {
   const cleanDomain = normalizeDomain(domain);
   if (!cleanDomain) return [];
@@ -172,6 +193,152 @@ export class CloudflareEmailRoutingClient {
       }
     }
     return '';
+  }
+
+  async resolveAccountIdByZone(zoneId = '') {
+    const safeZoneId = cleanString(zoneId, 120);
+    if (!safeZoneId) {
+      throw new CloudflareEmailRoutingError('Falta zoneId para resolver accountId', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_ZONE_REQUIRED',
+      });
+    }
+
+    const result = await this.request({
+      method: 'GET',
+      path: `/zones/${safeZoneId}`,
+    });
+
+    return cleanString(result?.account?.id || '', 120);
+  }
+
+  async listDestinationAddresses({
+    accountId,
+    page = 1,
+    perPage = 200,
+  } = {}) {
+    const safeAccountId = cleanString(accountId, 120);
+    if (!safeAccountId) {
+      throw new CloudflareEmailRoutingError('Falta accountId para listar destinos de Email Routing', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_ACCOUNT_REQUIRED',
+      });
+    }
+
+    const result = await this.request({
+      method: 'GET',
+      path: `/accounts/${safeAccountId}/email/routing/addresses`,
+      params: {
+        page: Number(page || 1),
+        per_page: Number(perPage || 200),
+      },
+    });
+
+    const list = Array.isArray(result) ? result : [];
+    return list.map((item) => mapDestinationAddress(item));
+  }
+
+  async findDestinationAddressByEmail({
+    accountId,
+    email,
+  } = {}) {
+    const safeEmail = cleanString(email, 254).toLowerCase();
+    if (!safeEmail) return null;
+
+    const maxPages = 20;
+    const perPage = 200;
+    for (let page = 1; page <= maxPages; page += 1) {
+      const addresses = await this.listDestinationAddresses({
+        accountId,
+        page,
+        perPage,
+      });
+      const found = addresses.find(
+        (item) => cleanString(item?.email || '', 254).toLowerCase() === safeEmail
+      );
+      if (found) return found;
+      if (addresses.length < perPage) break;
+    }
+    return null;
+  }
+
+  async createDestinationAddress({
+    accountId,
+    email,
+  } = {}) {
+    const safeAccountId = cleanString(accountId, 120);
+    const safeEmail = cleanString(email, 254).toLowerCase();
+    if (!safeAccountId) {
+      throw new CloudflareEmailRoutingError('Falta accountId para crear destino de Email Routing', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_ACCOUNT_REQUIRED',
+      });
+    }
+    if (!safeEmail) {
+      throw new CloudflareEmailRoutingError('Falta email destino para crear destination address', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_DESTINATION_REQUIRED',
+      });
+    }
+
+    const result = await this.request({
+      method: 'POST',
+      path: `/accounts/${safeAccountId}/email/routing/addresses`,
+      data: {
+        email: safeEmail,
+      },
+    });
+    return mapDestinationAddress(result || {});
+  }
+
+  async ensureDestinationAddress({
+    accountId,
+    email,
+  } = {}) {
+    const safeAccountId = cleanString(accountId, 120);
+    const safeEmail = cleanString(email, 254).toLowerCase();
+
+    const existing = await this.findDestinationAddressByEmail({
+      accountId: safeAccountId,
+      email: safeEmail,
+    });
+    if (existing) {
+      return {
+        ...existing,
+        exists: true,
+        created: false,
+        verificationSent: false,
+      };
+    }
+
+    try {
+      const created = await this.createDestinationAddress({
+        accountId: safeAccountId,
+        email: safeEmail,
+      });
+      return {
+        ...created,
+        exists: true,
+        created: true,
+        verificationSent: true,
+      };
+    } catch (error) {
+      if (isDestinationAddressAlreadyExistsError(error)) {
+        const found = await this.findDestinationAddressByEmail({
+          accountId: safeAccountId,
+          email: safeEmail,
+        });
+        if (found) {
+          return {
+            ...found,
+            exists: true,
+            created: false,
+            verificationSent: false,
+          };
+        }
+      }
+      throw error;
+    }
   }
 
   async ensureEmailRoutingDnsEnabled({ zoneId } = {}) {

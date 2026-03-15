@@ -112,10 +112,40 @@ class FakeCloudflareEmailRoutingClient {
     this.deleted = [];
     this.dnsEnsures = [];
     this.events = [];
+    this.destinations = new Map();
   }
 
   async resolveZoneIdByDomain() {
     return 'zone-auto-123';
+  }
+
+  async resolveAccountIdByZone(zoneId) {
+    return `acc-${zoneId || 'default'}`;
+  }
+
+  async findDestinationAddressByEmail({ email }) {
+    const key = String(email || '').trim().toLowerCase();
+    return this.destinations.get(key) || null;
+  }
+
+  async ensureDestinationAddress({ accountId, email }) {
+    const key = String(email || '').trim().toLowerCase();
+    let current = this.destinations.get(key);
+    if (!current) {
+      current = {
+        id: `dest-${this.destinations.size + 1}`,
+        email: key,
+        verified: true,
+        verifiedAt: new Date().toISOString(),
+        exists: true,
+        created: true,
+        verificationSent: true,
+        accountId,
+      };
+      this.destinations.set(key, current);
+    }
+    this.events.push(`destination:${key}`);
+    return structuredClone(current);
   }
 
   async ensureEmailRoutingDnsEnabled({ zoneId }) {
@@ -197,7 +227,8 @@ test('crea alias corporativo y guarda datos', async () => {
   assert.equal(cloudflareClient.created.length, 1);
   assert.equal(cloudflareClient.dnsEnsures.length, 1);
   assert.equal(cloudflareClient.events[0], 'dns:zone-static-999');
-  assert.equal(cloudflareClient.events[1], 'rule:zone-static-999');
+  assert.equal(cloudflareClient.events[1], 'destination:cliente@gmail.com');
+  assert.equal(cloudflareClient.events[2], 'rule:zone-static-999');
   assert.equal(cloudflareClient.created[0].sourceEmail, 'ventas@cliente.com');
 });
 
@@ -324,4 +355,65 @@ test('si falla habilitar DNS de Email Routing no crea regla', async () => {
   );
 
   assert.equal(cloudflareClient.created.length, 0);
+});
+
+test('si destino no esta verificado devuelve error y envia verificacion', async () => {
+  const { service, cloudflareClient } = createService({
+    companies: {
+      n6: {
+        dominio: 'cliente.com',
+        cloudflareZoneId: 'zone-pending-001',
+        cloudflareAccountId: 'acc-zone-pending-001',
+      },
+    },
+  });
+
+  cloudflareClient.ensureDestinationAddress = async ({ email }) => ({
+    id: 'dest-pending-001',
+    email,
+    verified: false,
+    verifiedAt: null,
+    exists: true,
+    created: true,
+    verificationSent: true,
+  });
+
+  await assert.rejects(
+    () => service.createCorporateEmail({
+      empresaId: 'n6',
+      alias: 'gerencia',
+      destinationEmail: 'pendiente@gmail.com',
+    }),
+    (error) => error?.code === 'DESTINATION_EMAIL_NOT_VERIFIED'
+  );
+
+  assert.equal(cloudflareClient.created.length, 0);
+});
+
+test('consulta estado de verificacion del destino', async () => {
+  const { service, cloudflareClient } = createService({
+    companies: {
+      n7: {
+        dominio: 'cliente.com',
+        cloudflareZoneId: 'zone-status-001',
+      },
+    },
+  });
+  cloudflareClient.destinations.set('estado@gmail.com', {
+    id: 'dest-status-001',
+    email: 'estado@gmail.com',
+    verified: false,
+    verifiedAt: null,
+    createdAt: '2026-03-15T00:00:00.000Z',
+    modifiedAt: '2026-03-15T00:01:00.000Z',
+  });
+
+  const status = await service.getDestinationVerificationStatus({
+    empresaId: 'n7',
+    destinationEmail: 'estado@gmail.com',
+  });
+
+  assert.equal(status.exists, true);
+  assert.equal(status.verified, false);
+  assert.equal(status.destinationAddressId, 'dest-status-001');
 });

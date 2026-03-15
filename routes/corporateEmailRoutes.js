@@ -26,6 +26,11 @@ export function createCorporateEmailRouter({
     controller.validateAliasAvailability
   );
 
+  router.get(
+    '/empresas/:empresaId/correos-corporativos/destinos/verificacion',
+    controller.getDestinationVerificationStatus
+  );
+
   router.post(
     '/empresas/:empresaId/correos-corporativos',
     controller.createCorporateEmail
@@ -43,4 +48,3 @@ export function createCorporateEmailRouter({
 
   return router;
 }
-
