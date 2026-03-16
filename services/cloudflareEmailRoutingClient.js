@@ -238,6 +238,30 @@ export class CloudflareEmailRoutingClient {
     return list.map((item) => mapDestinationAddress(item));
   }
 
+  async listAllDestinationAddresses({ accountId } = {}) {
+    const safeAccountId = cleanString(accountId, 120);
+    if (!safeAccountId) {
+      throw new CloudflareEmailRoutingError('Falta accountId para listar destinos de Email Routing', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_ACCOUNT_REQUIRED',
+      });
+    }
+
+    const all = [];
+    const perPage = 200;
+    const maxPages = 20;
+    for (let page = 1; page <= maxPages; page += 1) {
+      const rows = await this.listDestinationAddresses({
+        accountId: safeAccountId,
+        page,
+        perPage,
+      });
+      all.push(...rows);
+      if (rows.length < perPage) break;
+    }
+    return all;
+  }
+
   async findDestinationAddressByEmail({
     accountId,
     email,

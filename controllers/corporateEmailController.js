@@ -143,6 +143,53 @@ export function createCorporateEmailController({
       }
     },
 
+    registerDestinationEmail: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const destinationEmail = cleanString(
+          req.body?.destinationEmail || req.body?.correoDestino || req.body?.email || '',
+          280
+        );
+        const domain = cleanString(req.body?.domain || req.body?.dominio || '', 200);
+
+        const destination = await service.registerDestinationEmail({
+          empresaId,
+          destinationEmail,
+          domain,
+        });
+
+        return res.status(201).json({
+          success: true,
+          destination,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] register destination error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    listDestinationEmails: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const domain = cleanString(req.query?.domain || req.query?.dominio || '', 200);
+        const syncWithCloudflare = parseBoolean(req.query?.syncWithCloudflare, true);
+
+        const destinations = await service.listDestinationEmails({
+          empresaId,
+          domain,
+          syncWithCloudflare,
+        });
+
+        return res.status(200).json({
+          success: true,
+          destinations,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] list destinations error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
     getDestinationVerificationStatus: async (req, res) => {
       try {
         const empresaId = cleanString(req.params?.empresaId || '', 140);

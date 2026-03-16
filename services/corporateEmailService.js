@@ -105,6 +105,32 @@ export class CorporateEmailService {
     };
   }
 
+  serializeDestination(record = {}) {
+    return {
+      id: cleanString(record.id || '', 260),
+      empresaId: cleanString(record.empresaId || '', 140),
+      destinationEmail: cleanString(
+        record.destinationEmail || record.email || '',
+        280
+      ).toLowerCase(),
+      email: cleanString(
+        record.destinationEmail || record.email || '',
+        280
+      ).toLowerCase(),
+      domain: cleanString(record.domain || '', 200),
+      status: cleanString(record.status || 'pending_verification', 80),
+      cloudflareZoneId: cleanString(record.cloudflareZoneId || '', 120),
+      cloudflareAccountId: cleanString(record.cloudflareAccountId || '', 120),
+      cloudflareDestinationAddressId: cleanString(record.cloudflareDestinationAddressId || '', 120),
+      verified: record.verified === true,
+      verificationSent: record.verificationSent === true,
+      destinationCreated: record.destinationCreated === true,
+      createdAt: toIso(record.createdAt),
+      updatedAt: toIso(record.updatedAt),
+      verifiedAt: toIso(record.verifiedAt || record.destinationVerifiedAt),
+    };
+  }
+
   ensureEmpresaId(value = '') {
     const empresaId = cleanString(value, 140);
     if (!empresaId) {
@@ -327,6 +353,23 @@ export class CorporateEmailService {
       const destinationStatus = await this.cloudflareClient.ensureDestinationAddress({
         accountId,
         email: safeDestinationEmail,
+      });
+      await this.repository.upsertCorporateEmailDestination({
+        empresaId: safeEmpresaId,
+        destinationEmail: safeDestinationEmail,
+        payload: {
+          domain: safeDomain,
+          status: destinationStatus?.verified === true ? 'verified' : 'pending_verification',
+          verified: destinationStatus?.verified === true,
+          verificationSent: destinationStatus?.verificationSent === true,
+          destinationCreated: destinationStatus?.created === true,
+          cloudflareZoneId: zoneId,
+          cloudflareAccountId: accountId,
+          cloudflareDestinationAddressId: cleanString(destinationStatus?.id || '', 120),
+          destinationVerifiedAt: cleanString(destinationStatus?.verifiedAt || '', 80) || null,
+          verifiedAt: cleanString(destinationStatus?.verifiedAt || '', 80) || null,
+          cloudflareLastSyncAt: Timestamp.now(),
+        },
       });
       if (destinationStatus?.verified !== true) {
         throw new CorporateEmailServiceError(
@@ -569,6 +612,24 @@ export class CorporateEmailService {
         email: safeDestinationEmail,
       });
 
+      await this.repository.upsertCorporateEmailDestination({
+        empresaId: safeEmpresaId,
+        destinationEmail: safeDestinationEmail,
+        payload: {
+          domain: safeDomain,
+          status: destination?.verified === true ? 'verified' : 'pending_verification',
+          verified: destination?.verified === true,
+          verificationSent: false,
+          destinationCreated: false,
+          cloudflareZoneId: zoneId,
+          cloudflareAccountId: accountId,
+          cloudflareDestinationAddressId: cleanString(destination?.id || '', 120),
+          destinationVerifiedAt: cleanString(destination?.verifiedAt || '', 80) || null,
+          verifiedAt: cleanString(destination?.verifiedAt || '', 80) || null,
+          cloudflareLastSyncAt: Timestamp.now(),
+        },
+      });
+
       return {
         destinationEmail: safeDestinationEmail,
         domain: safeDomain,
@@ -581,6 +642,112 @@ export class CorporateEmailService {
         createdAt: cleanString(destination?.createdAt || '', 80) || null,
         modifiedAt: cleanString(destination?.modifiedAt || '', 80) || null,
       };
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async registerDestinationEmail({
+    empresaId,
+    destinationEmail,
+    domain,
+  }) {
+    try {
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const safeDestinationEmail = this.validateDestinationEmail(destinationEmail);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({
+        requestedDomain: domain,
+        company,
+      });
+      const zoneId = await this.resolveZoneId({
+        company,
+        domain: safeDomain,
+      });
+      const accountId = await this.resolveAccountId({
+        company,
+        zoneId,
+      });
+
+      const destinationStatus = await this.cloudflareClient.ensureDestinationAddress({
+        accountId,
+        email: safeDestinationEmail,
+      });
+
+      const saved = await this.repository.upsertCorporateEmailDestination({
+        empresaId: safeEmpresaId,
+        destinationEmail: safeDestinationEmail,
+        payload: {
+          domain: safeDomain,
+          status: destinationStatus?.verified === true ? 'verified' : 'pending_verification',
+          verified: destinationStatus?.verified === true,
+          verificationSent: destinationStatus?.verificationSent === true,
+          destinationCreated: destinationStatus?.created === true,
+          cloudflareZoneId: zoneId,
+          cloudflareAccountId: accountId,
+          cloudflareDestinationAddressId: cleanString(destinationStatus?.id || '', 120),
+          destinationVerifiedAt: cleanString(destinationStatus?.verifiedAt || '', 80) || null,
+          verifiedAt: cleanString(destinationStatus?.verifiedAt || '', 80) || null,
+          cloudflareLastSyncAt: Timestamp.now(),
+        },
+      });
+
+      return this.serializeDestination(saved || {});
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async listDestinationEmails({
+    empresaId,
+    domain,
+    syncWithCloudflare = true,
+  }) {
+    try {
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({
+        requestedDomain: domain,
+        company,
+      });
+      const zoneId = await this.resolveZoneId({
+        company,
+        domain: safeDomain,
+      });
+      const accountId = await this.resolveAccountId({
+        company,
+        zoneId,
+      });
+
+      if (parseBoolean(syncWithCloudflare, true)) {
+        const destinations = await this.cloudflareClient.listAllDestinationAddresses({
+          accountId,
+        });
+        for (const destination of destinations) {
+          const destinationEmail = cleanString(destination?.email || '', 280).toLowerCase();
+          if (!destinationEmail) continue;
+          await this.repository.upsertCorporateEmailDestination({
+            empresaId: safeEmpresaId,
+            destinationEmail,
+            payload: {
+              domain: safeDomain,
+              status: destination?.verified === true ? 'verified' : 'pending_verification',
+              verified: destination?.verified === true,
+              cloudflareZoneId: zoneId,
+              cloudflareAccountId: accountId,
+              cloudflareDestinationAddressId: cleanString(destination?.id || '', 120),
+              destinationVerifiedAt: cleanString(destination?.verifiedAt || '', 80) || null,
+              verifiedAt: cleanString(destination?.verifiedAt || '', 80) || null,
+              cloudflareLastSyncAt: Timestamp.now(),
+            },
+          });
+        }
+      }
+
+      const records = await this.repository.listCorporateEmailDestinationsByCompany(safeEmpresaId);
+      return records
+        .map((item) => this.serializeDestination(item))
+        .filter((item) => item.destinationEmail);
     } catch (error) {
       throw this.mapError(error);
     }

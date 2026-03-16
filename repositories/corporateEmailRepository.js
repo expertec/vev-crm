@@ -1,7 +1,9 @@
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
+import crypto from 'node:crypto';
 import { db } from '../firebaseAdmin.js';
 import {
   buildCorporateEmailRecordId,
+  normalizeEmailAddress,
   normalizeAlias,
   normalizeDomain,
 } from '../utils/corporateEmailUtils.js';
@@ -16,15 +18,24 @@ function repositoryError(message, code = 'REPOSITORY_ERROR') {
   return error;
 }
 
+function buildDestinationRecordId(email = '') {
+  const safeEmail = normalizeEmailAddress(email);
+  if (!safeEmail) return '';
+  const hash = crypto.createHash('sha1').update(safeEmail).digest('hex');
+  return `dest_${hash}`;
+}
+
 export class FirestoreCorporateEmailRepository {
   constructor({
     dbClient = db,
     companiesCollection = 'Negocios',
     subcollectionName = 'corporateEmails',
+    destinationSubcollectionName = 'corporateEmailDestinations',
   } = {}) {
     this.db = dbClient;
     this.companiesCollection = companiesCollection;
     this.subcollectionName = subcollectionName;
+    this.destinationSubcollectionName = destinationSubcollectionName;
   }
 
   getCompanyRef(empresaId) {
@@ -38,6 +49,20 @@ export class FirestoreCorporateEmailRepository {
     return this.getCompanyRef(safeEmpresaId)
       .collection(this.subcollectionName)
       .doc(safeCorreoId);
+  }
+
+  getDestinationRefByDocId(empresaId, destinationId) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeDestinationId = cleanId(destinationId, 260);
+    return this.getCompanyRef(safeEmpresaId)
+      .collection(this.destinationSubcollectionName)
+      .doc(safeDestinationId);
+  }
+
+  getDestinationRefByEmail(empresaId, email) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const destinationId = buildDestinationRecordId(email);
+    return this.getDestinationRefByDocId(safeEmpresaId, destinationId);
   }
 
   async getCompanyById(empresaId) {
@@ -163,5 +188,75 @@ export class FirestoreCorporateEmailRepository {
     const updated = await this.getCorporateEmailById(safeEmpresaId, safeCorreoId);
     return updated;
   }
-}
 
+  async listCorporateEmailDestinationsByCompany(empresaId) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    if (!safeEmpresaId) return [];
+    const snap = await this.getCompanyRef(safeEmpresaId)
+      .collection(this.destinationSubcollectionName)
+      .orderBy('updatedAt', 'desc')
+      .get();
+
+    return snap.docs.map((doc) => ({
+      id: doc.id,
+      ...(doc.data() || {}),
+    }));
+  }
+
+  async getCorporateEmailDestinationByEmail(empresaId, destinationEmail) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeEmail = normalizeEmailAddress(destinationEmail);
+    if (!safeEmpresaId || !safeEmail) return null;
+    const snap = await this.getDestinationRefByEmail(safeEmpresaId, safeEmail).get();
+    if (!snap.exists) return null;
+    return {
+      id: snap.id,
+      ...(snap.data() || {}),
+    };
+  }
+
+  async upsertCorporateEmailDestination({
+    empresaId,
+    destinationEmail,
+    payload = {},
+  }) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeDestinationEmail = normalizeEmailAddress(destinationEmail);
+    const destinationId = buildDestinationRecordId(safeDestinationEmail);
+    if (!safeEmpresaId || !safeDestinationEmail || !destinationId) {
+      throw repositoryError('empresaId y destinationEmail son requeridos', 'INVALID_INPUT');
+    }
+
+    const companyRef = this.getCompanyRef(safeEmpresaId);
+    const destinationRef = this.getDestinationRefByDocId(safeEmpresaId, destinationId);
+
+    await this.db.runTransaction(async (tx) => {
+      const companySnap = await tx.get(companyRef);
+      if (!companySnap.exists) {
+        throw repositoryError('Empresa no encontrada', 'COMPANY_NOT_FOUND');
+      }
+
+      const destinationSnap = await tx.get(destinationRef);
+      const destinationData = destinationSnap.exists ? (destinationSnap.data() || {}) : {};
+      const now = Timestamp.now();
+      tx.set(
+        destinationRef,
+        {
+          ...payload,
+          empresaId: safeEmpresaId,
+          destinationEmail: safeDestinationEmail,
+          email: safeDestinationEmail,
+          createdAt: destinationData.createdAt || now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    });
+
+    const updated = await this.getCorporateEmailDestinationByEmail(
+      safeEmpresaId,
+      safeDestinationEmail
+    );
+    return updated;
+  }
+}

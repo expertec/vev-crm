@@ -26,6 +26,16 @@ export function createCorporateEmailRouter({
     controller.validateAliasAvailability
   );
 
+  router.post(
+    '/empresas/:empresaId/correos-corporativos/destinos',
+    controller.registerDestinationEmail
+  );
+
+  router.get(
+    '/empresas/:empresaId/correos-corporativos/destinos',
+    controller.listDestinationEmails
+  );
+
   router.get(
     '/empresas/:empresaId/correos-corporativos/destinos/verificacion',
     controller.getDestinationVerificationStatus

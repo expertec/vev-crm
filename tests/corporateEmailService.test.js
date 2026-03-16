@@ -8,9 +8,11 @@ class InMemoryCorporateEmailRepository {
   constructor({
     companies = {},
     corporateEmails = {},
+    destinations = {},
   } = {}) {
     this.companies = new Map(Object.entries(companies));
     this.emailsByCompany = new Map();
+    this.destinationsByCompany = new Map();
 
     for (const [empresaId, records] of Object.entries(corporateEmails)) {
       const byId = new Map();
@@ -19,6 +21,14 @@ class InMemoryCorporateEmailRepository {
       }
       this.emailsByCompany.set(empresaId, byId);
     }
+
+    for (const [empresaId, records] of Object.entries(destinations)) {
+      const byId = new Map();
+      for (const item of records) {
+        byId.set(item.id, structuredClone(item));
+      }
+      this.destinationsByCompany.set(empresaId, byId);
+    }
   }
 
   getBucket(empresaId) {
@@ -26,6 +36,13 @@ class InMemoryCorporateEmailRepository {
       this.emailsByCompany.set(empresaId, new Map());
     }
     return this.emailsByCompany.get(empresaId);
+  }
+
+  getDestinationBucket(empresaId) {
+    if (!this.destinationsByCompany.has(empresaId)) {
+      this.destinationsByCompany.set(empresaId, new Map());
+    }
+    return this.destinationsByCompany.get(empresaId);
   }
 
   async getCompanyById(empresaId) {
@@ -104,6 +121,54 @@ class InMemoryCorporateEmailRepository {
     bucket.set(correoId, next);
     return structuredClone(next);
   }
+
+  buildDestinationId(destinationEmail) {
+    const safe = String(destinationEmail || '').trim().toLowerCase();
+    if (!safe) return '';
+    return `dest_${safe.replace(/[^a-z0-9]/g, '_')}`;
+  }
+
+  async listCorporateEmailDestinationsByCompany(empresaId) {
+    const bucket = this.getDestinationBucket(empresaId);
+    return Array.from(bucket.values()).map((item) => structuredClone(item));
+  }
+
+  async getCorporateEmailDestinationByEmail(empresaId, destinationEmail) {
+    const destinationId = this.buildDestinationId(destinationEmail);
+    if (!destinationId) return null;
+    const bucket = this.getDestinationBucket(empresaId);
+    const current = bucket.get(destinationId);
+    return current ? structuredClone(current) : null;
+  }
+
+  async upsertCorporateEmailDestination({
+    empresaId,
+    destinationEmail,
+    payload = {},
+  }) {
+    if (!this.companies.has(empresaId)) {
+      const error = new Error('Empresa no encontrada');
+      error.code = 'COMPANY_NOT_FOUND';
+      throw error;
+    }
+
+    const safeEmail = String(destinationEmail || '').trim().toLowerCase();
+    const destinationId = this.buildDestinationId(safeEmail);
+    const bucket = this.getDestinationBucket(empresaId);
+    const current = bucket.get(destinationId) || null;
+    const now = new Date().toISOString();
+    const next = {
+      id: destinationId,
+      empresaId,
+      destinationEmail: safeEmail,
+      email: safeEmail,
+      createdAt: current?.createdAt || now,
+      updatedAt: now,
+      ...structuredClone(payload),
+    };
+    bucket.set(destinationId, next);
+    return structuredClone(next);
+  }
 }
 
 class FakeCloudflareEmailRoutingClient {
@@ -121,6 +186,22 @@ class FakeCloudflareEmailRoutingClient {
 
   async resolveAccountIdByZone(zoneId) {
     return `acc-${zoneId || 'default'}`;
+  }
+
+  async listDestinationAddresses({
+    accountId,
+    page = 1,
+    perPage = 200,
+  } = {}) {
+    void accountId;
+    void page;
+    void perPage;
+    return Array.from(this.destinations.values()).map((item) => structuredClone(item));
+  }
+
+  async listAllDestinationAddresses({ accountId } = {}) {
+    void accountId;
+    return Array.from(this.destinations.values()).map((item) => structuredClone(item));
   }
 
   async findDestinationAddressByEmail({ email }) {
@@ -187,10 +268,11 @@ class FakeCloudflareEmailRoutingClient {
   }
 }
 
-function createService({ companies = {}, corporateEmails = {} } = {}) {
+function createService({ companies = {}, corporateEmails = {}, destinations = {} } = {}) {
   const repository = new InMemoryCorporateEmailRepository({
     companies,
     corporateEmails,
+    destinations,
   });
   const cloudflareClient = new FakeCloudflareEmailRoutingClient();
   const service = new CorporateEmailService({
@@ -416,4 +498,64 @@ test('consulta estado de verificacion del destino', async () => {
   assert.equal(status.exists, true);
   assert.equal(status.verified, false);
   assert.equal(status.destinationAddressId, 'dest-status-001');
+});
+
+test('registra destino y lo guarda para reutilizarlo', async () => {
+  const { service, repository } = createService({
+    companies: {
+      n8: {
+        dominio: 'cliente.com',
+        cloudflareZoneId: 'zone-dest-001',
+      },
+    },
+  });
+
+  const destination = await service.registerDestinationEmail({
+    empresaId: 'n8',
+    destinationEmail: 'ventas.destino@gmail.com',
+  });
+
+  assert.equal(destination.destinationEmail, 'ventas.destino@gmail.com');
+  assert.equal(destination.verified, true);
+  assert.equal(destination.status, 'verified');
+
+  const saved = await repository.getCorporateEmailDestinationByEmail(
+    'n8',
+    'ventas.destino@gmail.com'
+  );
+  assert.equal(saved.destinationEmail, 'ventas.destino@gmail.com');
+  assert.equal(saved.verified, true);
+});
+
+test('lista destinos guardados y sincronizados con Cloudflare', async () => {
+  const { service, cloudflareClient } = createService({
+    companies: {
+      n9: {
+        dominio: 'cliente.com',
+        cloudflareZoneId: 'zone-dest-002',
+      },
+    },
+  });
+  cloudflareClient.destinations.set('uno@gmail.com', {
+    id: 'dest-uno',
+    email: 'uno@gmail.com',
+    verified: true,
+    verifiedAt: '2026-03-15T00:00:00.000Z',
+  });
+  cloudflareClient.destinations.set('dos@gmail.com', {
+    id: 'dest-dos',
+    email: 'dos@gmail.com',
+    verified: false,
+    verifiedAt: null,
+  });
+
+  const destinations = await service.listDestinationEmails({
+    empresaId: 'n9',
+  });
+
+  assert.equal(destinations.length, 2);
+  const uno = destinations.find((item) => item.destinationEmail === 'uno@gmail.com');
+  const dos = destinations.find((item) => item.destinationEmail === 'dos@gmail.com');
+  assert.equal(uno?.verified, true);
+  assert.equal(dos?.verified, false);
 });
