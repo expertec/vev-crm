@@ -525,6 +525,7 @@ test('registra destino y lo guarda para reutilizarlo', async () => {
   );
   assert.equal(saved.destinationEmail, 'ventas.destino@gmail.com');
   assert.equal(saved.verified, true);
+  assert.equal(saved.ownerEmpresaId, 'n8');
 });
 
 test('lista destinos guardados y sincronizados con Cloudflare', async () => {
@@ -534,6 +535,24 @@ test('lista destinos guardados y sincronizados con Cloudflare', async () => {
         dominio: 'cliente.com',
         cloudflareZoneId: 'zone-dest-002',
       },
+    },
+    destinations: {
+      n9: [
+        {
+          id: 'dest_uno_gmail_com',
+          empresaId: 'n9',
+          destinationEmail: 'uno@gmail.com',
+          status: 'pending_verification',
+          ownerEmpresaId: 'n9',
+        },
+        {
+          id: 'dest_dos_gmail_com',
+          empresaId: 'n9',
+          destinationEmail: 'dos@gmail.com',
+          status: 'pending_verification',
+          ownerEmpresaId: 'n9',
+        },
+      ],
     },
   });
   cloudflareClient.destinations.set('uno@gmail.com', {
@@ -558,4 +577,85 @@ test('lista destinos guardados y sincronizados con Cloudflare', async () => {
   const dos = destinations.find((item) => item.destinationEmail === 'dos@gmail.com');
   assert.equal(uno?.verified, true);
   assert.equal(dos?.verified, false);
+});
+
+test('no mezcla destinos de otra empresa al listar destinos', async () => {
+  const correoId = buildCorporateEmailRecordId({
+    alias: 'ventas',
+    domain: 'cliente.com',
+  });
+  const { service, cloudflareClient } = createService({
+    companies: {
+      n10: {
+        dominio: 'cliente.com',
+        cloudflareZoneId: 'zone-dest-003',
+      },
+    },
+    corporateEmails: {
+      n10: [
+        {
+          id: correoId,
+          empresaId: 'n10',
+          alias: 'ventas',
+          domain: 'cliente.com',
+          email: 'ventas@cliente.com',
+          destinationEmail: 'enuso@gmail.com',
+          status: 'active',
+        },
+      ],
+    },
+    destinations: {
+      n10: [
+        {
+          id: 'dest_propio_gmail_com',
+          empresaId: 'n10',
+          destinationEmail: 'propio@gmail.com',
+          ownerEmpresaId: 'n10',
+          status: 'verified',
+        },
+        {
+          id: 'dest_enuso_gmail_com',
+          empresaId: 'n10',
+          destinationEmail: 'enuso@gmail.com',
+          status: 'verified',
+        },
+        {
+          id: 'dest_ajeno_gmail_com',
+          empresaId: 'n10',
+          destinationEmail: 'ajeno@gmail.com',
+          status: 'verified',
+        },
+      ],
+    },
+  });
+
+  cloudflareClient.destinations.set('propio@gmail.com', {
+    id: 'dest-propio',
+    email: 'propio@gmail.com',
+    verified: true,
+    verifiedAt: '2026-03-15T00:00:00.000Z',
+  });
+  cloudflareClient.destinations.set('enuso@gmail.com', {
+    id: 'dest-enuso',
+    email: 'enuso@gmail.com',
+    verified: true,
+    verifiedAt: '2026-03-15T00:00:00.000Z',
+  });
+  cloudflareClient.destinations.set('ajeno@gmail.com', {
+    id: 'dest-ajeno',
+    email: 'ajeno@gmail.com',
+    verified: true,
+    verifiedAt: '2026-03-15T00:00:00.000Z',
+  });
+
+  const destinations = await service.listDestinationEmails({
+    empresaId: 'n10',
+    syncWithCloudflare: true,
+  });
+
+  const emails = destinations.map((item) => item.destinationEmail).sort();
+  assert.deepEqual(
+    emails,
+    ['enuso@gmail.com', 'propio@gmail.com']
+  );
 });

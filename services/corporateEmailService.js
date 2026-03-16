@@ -220,6 +220,33 @@ export class CorporateEmailService {
     return destinationEmail;
   }
 
+  resolveDestinationOwnership(record = {}, empresaId = '') {
+    const owner = cleanString(
+      record?.ownerEmpresaId
+      || record?.destinationOwnerEmpresaId
+      || '',
+      140
+    );
+    return owner === empresaId;
+  }
+
+  collectDestinationEmailsFromCorporateRecords(records = []) {
+    const emails = new Set();
+    for (const record of records) {
+      if (!record || typeof record !== 'object') continue;
+      const status = cleanString(record?.status || '', 60).toLowerCase();
+      if (status === 'deleted') continue;
+      const destinationEmail = normalizeEmailAddress(
+        record?.destinationEmail
+        || record?.emailDestino
+        || record?.destination
+        || ''
+      );
+      if (destinationEmail) emails.add(destinationEmail);
+    }
+    return emails;
+  }
+
   async resolveZoneId({ company = {}, domain = '' } = {}) {
     const fromCompany = cleanString(
       company?.cloudflareZoneId
@@ -358,6 +385,9 @@ export class CorporateEmailService {
         empresaId: safeEmpresaId,
         destinationEmail: safeDestinationEmail,
         payload: {
+          ownerEmpresaId: safeEmpresaId,
+          destinationOwnerEmpresaId: safeEmpresaId,
+          source: 'create_alias',
           domain: safeDomain,
           status: destinationStatus?.verified === true ? 'verified' : 'pending_verification',
           verified: destinationStatus?.verified === true,
@@ -616,6 +646,9 @@ export class CorporateEmailService {
         empresaId: safeEmpresaId,
         destinationEmail: safeDestinationEmail,
         payload: {
+          ownerEmpresaId: safeEmpresaId,
+          destinationOwnerEmpresaId: safeEmpresaId,
+          source: 'verification_check',
           domain: safeDomain,
           status: destination?.verified === true ? 'verified' : 'pending_verification',
           verified: destination?.verified === true,
@@ -678,6 +711,9 @@ export class CorporateEmailService {
         empresaId: safeEmpresaId,
         destinationEmail: safeDestinationEmail,
         payload: {
+          ownerEmpresaId: safeEmpresaId,
+          destinationOwnerEmpresaId: safeEmpresaId,
+          source: 'register_destination',
           domain: safeDomain,
           status: destinationStatus?.verified === true ? 'verified' : 'pending_verification',
           verified: destinationStatus?.verified === true,
@@ -718,20 +754,56 @@ export class CorporateEmailService {
         company,
         zoneId,
       });
+      const [rawDestinationRecords, corporateEmailRecords] = await Promise.all([
+        this.repository.listCorporateEmailDestinationsByCompany(safeEmpresaId),
+        this.repository.listCorporateEmailsByCompany(safeEmpresaId),
+      ]);
 
-      if (parseBoolean(syncWithCloudflare, true)) {
-        const destinations = await this.cloudflareClient.listAllDestinationAddresses({
-          accountId,
-        });
-        for (const destination of destinations) {
-          const destinationEmail = cleanString(destination?.email || '', 280).toLowerCase();
-          if (!destinationEmail) continue;
+      const destinationEmailsInUse = this.collectDestinationEmailsFromCorporateRecords(
+        corporateEmailRecords
+      );
+
+      const allowedEmails = new Set();
+      for (const record of rawDestinationRecords) {
+        const destinationEmail = normalizeEmailAddress(
+          record?.destinationEmail || record?.email || ''
+        );
+        if (!destinationEmail) continue;
+        if (this.resolveDestinationOwnership(record, safeEmpresaId)) {
+          allowedEmails.add(destinationEmail);
+          continue;
+        }
+        if (destinationEmailsInUse.has(destinationEmail)) {
+          // Compatibilidad legacy: permitimos destinos usados por aliases actuales.
+          allowedEmails.add(destinationEmail);
+        }
+      }
+
+      // Asegura que siempre podamos mostrar/sincronizar destinos ya usados por aliases.
+      for (const destinationEmail of destinationEmailsInUse) {
+        allowedEmails.add(destinationEmail);
+      }
+
+      if (parseBoolean(syncWithCloudflare, true) && allowedEmails.size > 0) {
+        for (const destinationEmail of allowedEmails) {
+          const destination = await this.cloudflareClient.findDestinationAddressByEmail({
+            accountId,
+            email: destinationEmail,
+          });
+
           await this.repository.upsertCorporateEmailDestination({
             empresaId: safeEmpresaId,
             destinationEmail,
             payload: {
+              ownerEmpresaId: safeEmpresaId,
+              destinationOwnerEmpresaId: safeEmpresaId,
+              source: 'list_sync',
               domain: safeDomain,
-              status: destination?.verified === true ? 'verified' : 'pending_verification',
+              status: destination?.verified === true
+                ? 'verified'
+                : destination
+                  ? 'pending_verification'
+                  : 'not_found',
               verified: destination?.verified === true,
               cloudflareZoneId: zoneId,
               cloudflareAccountId: accountId,
@@ -744,8 +816,18 @@ export class CorporateEmailService {
         }
       }
 
-      const records = await this.repository.listCorporateEmailDestinationsByCompany(safeEmpresaId);
-      return records
+      const refreshedRecords = await this.repository.listCorporateEmailDestinationsByCompany(
+        safeEmpresaId
+      );
+      return refreshedRecords
+        .filter((record) => {
+          const destinationEmail = normalizeEmailAddress(
+            record?.destinationEmail || record?.email || ''
+          );
+          if (!destinationEmail) return false;
+          if (this.resolveDestinationOwnership(record, safeEmpresaId)) return true;
+          return destinationEmailsInUse.has(destinationEmail);
+        })
         .map((item) => this.serializeDestination(item))
         .filter((item) => item.destinationEmail);
     } catch (error) {
