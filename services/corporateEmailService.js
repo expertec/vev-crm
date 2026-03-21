@@ -54,6 +54,71 @@ function parseCsvOrArray(value) {
     .filter(Boolean);
 }
 
+function stripWrappingQuotes(value = '') {
+  const raw = cleanString(value, 4000);
+  if (!raw) return '';
+  if (
+    (raw.startsWith('"') && raw.endsWith('"'))
+    || (raw.startsWith("'") && raw.endsWith("'"))
+  ) {
+    return raw.slice(1, -1).trim();
+  }
+  return raw;
+}
+
+function uniqueStrings(values = [], maxLength = 260) {
+  return Array.from(
+    new Set(
+      (Array.isArray(values) ? values : [])
+        .map((item) => cleanString(item, maxLength).toLowerCase())
+        .filter(Boolean)
+    )
+  );
+}
+
+function isSpfRecordContent(value = '') {
+  return /^v=spf1\b/i.test(stripWrappingQuotes(value));
+}
+
+function includesAmazonSesInSpf(value = '') {
+  const raw = stripWrappingQuotes(value).toLowerCase();
+  if (!raw) return false;
+  return raw.split(/\s+/).includes('include:amazonses.com');
+}
+
+function buildSpfWithAmazonSes(value = '') {
+  const raw = stripWrappingQuotes(value);
+  if (!raw) return 'v=spf1 include:amazonses.com ~all';
+
+  const parts = raw.split(/\s+/).filter(Boolean);
+  const hasVersion = parts.some((part) => /^v=spf1$/i.test(part));
+  if (!hasVersion) parts.unshift('v=spf1');
+
+  if (!includesAmazonSesInSpf(parts.join(' '))) {
+    const allIndex = parts.findIndex((part) => /^[-~+?]?all$/i.test(part));
+    if (allIndex >= 0) {
+      parts.splice(allIndex, 0, 'include:amazonses.com');
+    } else {
+      parts.push('include:amazonses.com');
+    }
+  }
+
+  const hasAll = parts.some((part) => /^[-~+?]?all$/i.test(part));
+  if (!hasAll) parts.push('~all');
+
+  return parts.join(' ');
+}
+
+function isDmarcRecordContent(value = '') {
+  return /^v=dmarc1\b/i.test(stripWrappingQuotes(value));
+}
+
+function normalizeDnsRecordContent(value = '') {
+  return cleanString(stripWrappingQuotes(value), 4000)
+    .toLowerCase()
+    .replace(/\.$/, '');
+}
+
 function extractDomainFromEmail(value = '') {
   const safeEmail = normalizeEmailAddress(value);
   if (!safeEmail || !safeEmail.includes('@')) return '';
@@ -180,6 +245,22 @@ export class CorporateEmailService {
       identityVerified: record.identityVerified === true,
       identityDkimStatus: cleanString(record.identityDkimStatus || '', 80).toLowerCase(),
       identityCheckedAt: toIso(record.identityCheckedAt),
+      cloudflareZoneId: cleanString(record.cloudflareZoneId || '', 120),
+      cloudflareAccountId: cleanString(record.cloudflareAccountId || '', 120),
+      cloudflareEmailRoutingDnsEnabled: record.cloudflareEmailRoutingDnsEnabled === true,
+      provisioningStatus: cleanString(record.provisioningStatus || '', 80).toLowerCase(),
+      provisioningLastRunAt: toIso(record.provisioningLastRunAt),
+      provisioningLastSuccessAt: toIso(record.provisioningLastSuccessAt),
+      provisioningLastError: cleanString(record.provisioningLastError || '', 500),
+      provisioningWarnings: Array.isArray(record.provisioningWarnings)
+        ? record.provisioningWarnings.map((item) => cleanString(item, 320)).filter(Boolean)
+        : [],
+      sesIdentityCreated: record.sesIdentityCreated === true,
+      sesDkimTokens: uniqueStrings(record.sesDkimTokens || [], 260),
+      spfRecordStatus: cleanString(record.spfRecordStatus || '', 80).toLowerCase(),
+      spfRecordValue: cleanString(record.spfRecordValue || '', 1200),
+      dmarcRecordStatus: cleanString(record.dmarcRecordStatus || '', 80).toLowerCase(),
+      dmarcRecordValue: cleanString(record.dmarcRecordValue || '', 1200),
       createdAt: toIso(record.createdAt),
       updatedAt: toIso(record.updatedAt),
     };
@@ -415,6 +496,257 @@ export class CorporateEmailService {
       });
     }
     return accountId;
+  }
+
+  resolveDefaultSpfValue() {
+    const fromEnv = stripWrappingQuotes(process.env.CORPORATE_EMAIL_DEFAULT_SPF || '');
+    if (fromEnv) return fromEnv;
+    return 'v=spf1 include:amazonses.com ~all';
+  }
+
+  resolveDefaultDmarcValue(domain = '') {
+    const safeDomain = normalizeDomain(domain);
+    const template = stripWrappingQuotes(process.env.CORPORATE_EMAIL_DEFAULT_DMARC || '');
+    if (template) {
+      return template.replace(/\{domain\}/gi, safeDomain);
+    }
+    return 'v=DMARC1; p=none; adkim=s; aspf=s; pct=100';
+  }
+
+  async ensureDkimDnsRecords({
+    zoneId,
+    domain,
+    dkimTokens = [],
+  }) {
+    const safeZoneId = cleanString(zoneId, 120);
+    const safeDomain = normalizeDomain(domain);
+    const tokens = uniqueStrings(dkimTokens, 260);
+    const records = [];
+
+    for (const token of tokens) {
+      const name = `${token}._domainkey.${safeDomain}`;
+      const content = `${token}.dkim.amazonses.com`;
+      const upserted = await this.cloudflareClient.upsertDnsRecord({
+        zoneId: safeZoneId,
+        zoneDomain: safeDomain,
+        type: 'CNAME',
+        name,
+        content,
+        proxied: false,
+        ttl: 1,
+      });
+      records.push({
+        token,
+        name,
+        content,
+        action: cleanString(upserted?.action || '', 80).toLowerCase(),
+        recordId: cleanString(upserted?.id || '', 120),
+      });
+    }
+
+    return records;
+  }
+
+  async ensureSpfDnsRecord({
+    zoneId,
+    domain,
+  }) {
+    const safeZoneId = cleanString(zoneId, 120);
+    const safeDomain = normalizeDomain(domain);
+
+    const records = await this.cloudflareClient.listDnsRecords({
+      zoneId: safeZoneId,
+      type: 'TXT',
+      name: safeDomain,
+      page: 1,
+      perPage: 100,
+    });
+    const current = records.find((record) => isSpfRecordContent(record?.content || '')) || null;
+
+    if (!current) {
+      const defaultValue = this.resolveDefaultSpfValue();
+      const created = await this.cloudflareClient.upsertDnsRecord({
+        zoneId: safeZoneId,
+        zoneDomain: safeDomain,
+        type: 'TXT',
+        name: safeDomain,
+        content: defaultValue,
+        ttl: 1,
+      });
+      return {
+        status: 'created',
+        value: defaultValue,
+        recordId: cleanString(created?.id || '', 120),
+      };
+    }
+
+    const currentValue = stripWrappingQuotes(current.content || '');
+    if (includesAmazonSesInSpf(currentValue)) {
+      return {
+        status: 'unchanged',
+        value: currentValue,
+        recordId: cleanString(current.id || '', 120),
+      };
+    }
+
+    const nextValue = buildSpfWithAmazonSes(currentValue);
+    const updated = await this.cloudflareClient.upsertDnsRecord({
+      zoneId: safeZoneId,
+      zoneDomain: safeDomain,
+      type: 'TXT',
+      name: safeDomain,
+      content: nextValue,
+      ttl: 1,
+      existingRecordId: cleanString(current.id || '', 120),
+    });
+    return {
+      status: 'updated',
+      value: nextValue,
+      recordId: cleanString(updated?.id || '', 120),
+    };
+  }
+
+  async ensureDmarcDnsRecord({
+    zoneId,
+    domain,
+  }) {
+    const safeZoneId = cleanString(zoneId, 120);
+    const safeDomain = normalizeDomain(domain);
+    const dmarcName = `_dmarc.${safeDomain}`;
+    const records = await this.cloudflareClient.listDnsRecords({
+      zoneId: safeZoneId,
+      type: 'TXT',
+      name: dmarcName,
+      page: 1,
+      perPage: 100,
+    });
+    const current = records.find((record) => isDmarcRecordContent(record?.content || '')) || null;
+    if (current) {
+      return {
+        status: 'unchanged',
+        value: stripWrappingQuotes(current.content || ''),
+        recordId: cleanString(current.id || '', 120),
+      };
+    }
+
+    const nextValue = this.resolveDefaultDmarcValue(safeDomain);
+    const firstRecordId = cleanString(records[0]?.id || '', 120);
+    const upserted = await this.cloudflareClient.upsertDnsRecord({
+      zoneId: safeZoneId,
+      zoneDomain: safeDomain,
+      type: 'TXT',
+      name: dmarcName,
+      content: nextValue,
+      ttl: 1,
+      existingRecordId: firstRecordId || undefined,
+    });
+    return {
+      status: firstRecordId ? 'updated' : 'created',
+      value: nextValue,
+      recordId: cleanString(upserted?.id || '', 120),
+    };
+  }
+
+  async getSpfDnsStatus({
+    zoneId,
+    domain,
+  }) {
+    const safeZoneId = cleanString(zoneId, 120);
+    const safeDomain = normalizeDomain(domain);
+    const records = await this.cloudflareClient.listDnsRecords({
+      zoneId: safeZoneId,
+      type: 'TXT',
+      name: safeDomain,
+      page: 1,
+      perPage: 100,
+    });
+    const current = records.find((record) => isSpfRecordContent(record?.content || '')) || null;
+    const value = stripWrappingQuotes(current?.content || '');
+    return {
+      present: Boolean(current),
+      includesAmazonSes: includesAmazonSesInSpf(value),
+      value,
+      recordId: cleanString(current?.id || '', 120),
+    };
+  }
+
+  async getDmarcDnsStatus({
+    zoneId,
+    domain,
+  }) {
+    const safeZoneId = cleanString(zoneId, 120);
+    const safeDomain = normalizeDomain(domain);
+    const name = `_dmarc.${safeDomain}`;
+    const records = await this.cloudflareClient.listDnsRecords({
+      zoneId: safeZoneId,
+      type: 'TXT',
+      name,
+      page: 1,
+      perPage: 100,
+    });
+    const current = records.find((record) => isDmarcRecordContent(record?.content || '')) || null;
+    return {
+      present: Boolean(current),
+      value: stripWrappingQuotes(current?.content || ''),
+      recordId: cleanString(current?.id || '', 120),
+    };
+  }
+
+  async getDkimDnsStatus({
+    zoneId,
+    domain,
+    dkimTokens = [],
+  }) {
+    const safeZoneId = cleanString(zoneId, 120);
+    const safeDomain = normalizeDomain(domain);
+    const tokens = uniqueStrings(dkimTokens, 260);
+    const records = [];
+
+    for (const token of tokens) {
+      const name = `${token}._domainkey.${safeDomain}`;
+      const expectedContent = `${token}.dkim.amazonses.com`;
+      const list = await this.cloudflareClient.listDnsRecords({
+        zoneId: safeZoneId,
+        type: 'CNAME',
+        name,
+        page: 1,
+        perPage: 100,
+      });
+      const expectedNormalized = normalizeDnsRecordContent(expectedContent);
+      const exact = list.find(
+        (item) => normalizeDnsRecordContent(item?.content || '') === expectedNormalized
+      );
+      const current = exact || list[0] || null;
+      records.push({
+        token,
+        name,
+        expectedContent,
+        present: Boolean(current),
+        matches: Boolean(exact),
+        currentContent: cleanString(current?.content || '', 4000),
+        recordId: cleanString(current?.id || '', 120),
+      });
+    }
+
+    return records;
+  }
+
+  resolveProvisioningStatus({
+    identity = {},
+    dkimDns = [],
+    spf = null,
+    dmarc = null,
+  } = {}) {
+    const hasTokens = Array.isArray(identity?.dkimTokens) && identity.dkimTokens.length > 0;
+    const dkimMatches = hasTokens
+      ? dkimDns.length > 0 && dkimDns.every((item) => item?.matches === true)
+      : identity?.verified === true;
+    const spfReady = spf?.present === true && spf?.includesAmazonSes === true;
+    const dmarcReady = dmarc?.present === true;
+    const identityReady = identity?.exists === true && identity?.verified === true;
+
+    if (identityReady && dkimMatches && spfReady && dmarcReady) return 'ready';
+    return 'pending_verification';
   }
 
   mapError(error) {
@@ -964,6 +1296,255 @@ export class CorporateEmailService {
         })
         .map((item) => this.serializeDestination(item))
         .filter((item) => item.destinationEmail);
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async provisionEmailInfrastructure({
+    empresaId,
+    domain,
+  }) {
+    try {
+      const sesClient = this.ensureSesClient();
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({
+        requestedDomain: domain,
+        company,
+      });
+      const zoneId = await this.resolveZoneId({
+        company,
+        domain: safeDomain,
+      });
+      const accountId = await this.resolveAccountId({
+        company,
+        zoneId,
+      });
+
+      const currentProfile = await this.repository.getCorporateEmailSenderProfile(safeEmpresaId);
+      const routingDns = await this.cloudflareClient.ensureEmailRoutingDnsEnabled({
+        zoneId,
+      });
+
+      const ensuredIdentity = await sesClient.ensureDomainIdentity(safeDomain);
+      const identity = ensuredIdentity?.identityStatus
+        || (await sesClient.getEmailIdentityStatus({ emailIdentity: safeDomain }));
+      const dkimTokens = uniqueStrings(identity?.dkimTokens || [], 260);
+
+      const dkimRecords = await this.ensureDkimDnsRecords({
+        zoneId,
+        domain: safeDomain,
+        dkimTokens,
+      });
+      const spf = await this.ensureSpfDnsRecord({
+        zoneId,
+        domain: safeDomain,
+      });
+      const dmarc = await this.ensureDmarcDnsRecord({
+        zoneId,
+        domain: safeDomain,
+      });
+
+      const refreshedIdentity = await sesClient.getEmailIdentityStatus({
+        emailIdentity: safeDomain,
+      });
+      const dkimStatus = await this.getDkimDnsStatus({
+        zoneId,
+        domain: safeDomain,
+        dkimTokens: refreshedIdentity?.dkimTokens || dkimTokens,
+      });
+      const spfStatus = await this.getSpfDnsStatus({
+        zoneId,
+        domain: safeDomain,
+      });
+      const dmarcStatus = await this.getDmarcDnsStatus({
+        zoneId,
+        domain: safeDomain,
+      });
+
+      const provisioningStatus = this.resolveProvisioningStatus({
+        identity: refreshedIdentity,
+        dkimDns: dkimStatus,
+        spf: spfStatus,
+        dmarc: dmarcStatus,
+      });
+      const now = Timestamp.now();
+
+      const warnings = [];
+      if (dkimTokens.length === 0) {
+        warnings.push('SES no devolvió tokens DKIM todavía');
+      }
+      if (refreshedIdentity?.verified !== true) {
+        warnings.push('La identidad de dominio SES sigue pendiente de verificación');
+      }
+      if (spfStatus?.includesAmazonSes !== true) {
+        warnings.push('SPF aún no incluye include:amazonses.com');
+      }
+      if (dmarcStatus?.present !== true) {
+        warnings.push('DMARC aún no está detectado');
+      }
+
+      const saved = await this.repository.upsertCorporateEmailSenderProfile({
+        empresaId: safeEmpresaId,
+        payload: {
+          enabled: currentProfile?.enabled !== false,
+          domain: safeDomain,
+          fromEmail: currentProfile?.fromEmail || '',
+          replyToEmail: currentProfile?.replyToEmail || '',
+          defaultToEmail: currentProfile?.defaultToEmail || '',
+          displayName: currentProfile?.displayName || '',
+          configurationSetName: currentProfile?.configurationSetName || '',
+          identityType: cleanString(refreshedIdentity?.identityType || '', 80).toLowerCase(),
+          identityExists: refreshedIdentity?.exists === true,
+          identityVerified: refreshedIdentity?.verified === true,
+          identityDkimStatus: cleanString(refreshedIdentity?.dkimStatus || '', 80).toLowerCase(),
+          identityCheckedAt: now,
+          cloudflareZoneId: zoneId,
+          cloudflareAccountId: accountId,
+          cloudflareEmailRoutingDnsEnabled: routingDns?.enabled === true,
+          sesIdentityCreated: ensuredIdentity?.created === true,
+          sesDkimTokens: uniqueStrings(refreshedIdentity?.dkimTokens || dkimTokens, 260),
+          spfRecordStatus: cleanString(spf?.status || '', 80).toLowerCase(),
+          spfRecordValue: cleanString(spfStatus?.value || spf?.value || '', 1200),
+          dmarcRecordStatus: cleanString(dmarc?.status || '', 80).toLowerCase(),
+          dmarcRecordValue: cleanString(dmarcStatus?.value || dmarc?.value || '', 1200),
+          provisioningStatus,
+          provisioningLastRunAt: now,
+          provisioningLastSuccessAt:
+            provisioningStatus === 'ready'
+              ? now
+              : currentProfile?.provisioningLastSuccessAt || null,
+          provisioningLastError: '',
+          provisioningWarnings: warnings,
+          provisioningDkimRecords: dkimRecords,
+        },
+      });
+
+      return {
+        empresaId: safeEmpresaId,
+        domain: safeDomain,
+        status: provisioningStatus,
+        warnings,
+        cloudflare: {
+          zoneId,
+          accountId,
+          emailRoutingDnsEnabled: routingDns?.enabled === true,
+          emailRoutingDnsChanged: routingDns?.changed === true,
+        },
+        ses: {
+          identity: safeDomain,
+          identityExists: refreshedIdentity?.exists === true,
+          identityVerified: refreshedIdentity?.verified === true,
+          identityType: cleanString(refreshedIdentity?.identityType || '', 80).toLowerCase(),
+          dkimStatus: cleanString(refreshedIdentity?.dkimStatus || '', 80).toLowerCase(),
+          dkimTokens: uniqueStrings(refreshedIdentity?.dkimTokens || dkimTokens, 260),
+          identityCreated: ensuredIdentity?.created === true,
+        },
+        dns: {
+          dkim: dkimStatus,
+          spf: {
+            ...spfStatus,
+            changeStatus: cleanString(spf?.status || '', 80).toLowerCase(),
+          },
+          dmarc: {
+            ...dmarcStatus,
+            changeStatus: cleanString(dmarc?.status || '', 80).toLowerCase(),
+          },
+        },
+        profile: this.serializeSesSenderProfile(saved || {}),
+      };
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async getEmailProvisionStatus({
+    empresaId,
+    domain,
+    refresh = false,
+  }) {
+    try {
+      if (parseBoolean(refresh, false)) {
+        return this.provisionEmailInfrastructure({
+          empresaId,
+          domain,
+        });
+      }
+
+      const sesClient = this.ensureSesClient();
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({
+        requestedDomain: domain,
+        company,
+      });
+      const zoneId = await this.resolveZoneId({
+        company,
+        domain: safeDomain,
+      });
+      const accountId = await this.resolveAccountId({
+        company,
+        zoneId,
+      });
+
+      const profile = await this.repository.getCorporateEmailSenderProfile(safeEmpresaId);
+      const identity = await sesClient.getEmailIdentityStatus({
+        emailIdentity: safeDomain,
+      });
+      const dkimTokens = uniqueStrings(
+        identity?.dkimTokens || profile?.sesDkimTokens || [],
+        260
+      );
+      const [dkim, spf, dmarc] = await Promise.all([
+        this.getDkimDnsStatus({
+          zoneId,
+          domain: safeDomain,
+          dkimTokens,
+        }),
+        this.getSpfDnsStatus({
+          zoneId,
+          domain: safeDomain,
+        }),
+        this.getDmarcDnsStatus({
+          zoneId,
+          domain: safeDomain,
+        }),
+      ]);
+
+      const status = this.resolveProvisioningStatus({
+        identity,
+        dkimDns: dkim,
+        spf,
+        dmarc,
+      });
+
+      return {
+        empresaId: safeEmpresaId,
+        domain: safeDomain,
+        status,
+        cloudflare: {
+          zoneId,
+          accountId,
+        },
+        ses: {
+          identity: safeDomain,
+          identityExists: identity?.exists === true,
+          identityVerified: identity?.verified === true,
+          identityType: cleanString(identity?.identityType || '', 80).toLowerCase(),
+          dkimStatus: cleanString(identity?.dkimStatus || '', 80).toLowerCase(),
+          dkimTokens,
+        },
+        dns: {
+          dkim,
+          spf,
+          dmarc,
+        },
+        profile: this.serializeSesSenderProfile({
+          ...(profile || {}),
+          domain: safeDomain,
+        }),
+      };
     } catch (error) {
       throw this.mapError(error);
     }

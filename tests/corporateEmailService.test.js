@@ -4,6 +4,14 @@ import { CorporateEmailService } from '../services/corporateEmailService.js';
 import { CloudflareEmailRoutingError } from '../services/cloudflareEmailRoutingClient.js';
 import { buildCorporateEmailRecordId } from '../utils/corporateEmailUtils.js';
 
+function cleanTestString(value = '') {
+  return String(value ?? '').trim();
+}
+
+function normalizeRecordName(value = '') {
+  return cleanTestString(value).toLowerCase().replace(/\.$/, '');
+}
+
 class InMemoryCorporateEmailRepository {
   constructor({
     companies = {},
@@ -212,8 +220,10 @@ class FakeCloudflareEmailRoutingClient {
     this.created = [];
     this.deleted = [];
     this.dnsEnsures = [];
+    this.dnsUpserts = [];
     this.events = [];
     this.destinations = new Map();
+    this.dnsRecords = [];
   }
 
   async resolveZoneIdByDomain() {
@@ -302,12 +312,94 @@ class FakeCloudflareEmailRoutingClient {
       notFound: false,
     };
   }
+
+  async listDnsRecords({
+    zoneId,
+    type,
+    name,
+  } = {}) {
+    const safeZoneId = cleanTestString(zoneId);
+    const safeType = cleanTestString(type).toUpperCase();
+    const safeName = normalizeRecordName(name);
+    return this.dnsRecords
+      .filter((record) => {
+        if (safeZoneId && cleanTestString(record.zoneId) !== safeZoneId) return false;
+        if (safeType && cleanTestString(record.type).toUpperCase() !== safeType) return false;
+        if (safeName && normalizeRecordName(record.name) !== safeName) return false;
+        return true;
+      })
+      .map((record) => structuredClone(record));
+  }
+
+  async upsertDnsRecord({
+    zoneId,
+    type,
+    name,
+    content,
+    existingRecordId = '',
+  } = {}) {
+    const safeZoneId = cleanTestString(zoneId);
+    const safeType = cleanTestString(type).toUpperCase();
+    const safeName = normalizeRecordName(name);
+    const safeContent = cleanTestString(content);
+    const safeExistingRecordId = cleanTestString(existingRecordId);
+
+    const existingById = safeExistingRecordId
+      ? this.dnsRecords.find((record) => record.id === safeExistingRecordId)
+      : null;
+    const existingByName = this.dnsRecords.find(
+      (record) =>
+        cleanTestString(record.zoneId) === safeZoneId
+        && cleanTestString(record.type).toUpperCase() === safeType
+        && normalizeRecordName(record.name) === safeName
+    );
+    const existing = existingById || existingByName || null;
+
+    const next = {
+      id: existing?.id || `dns-${this.dnsRecords.length + 1}`,
+      zoneId: safeZoneId,
+      type: safeType,
+      name: safeName,
+      content: safeContent,
+      ttl: 1,
+      proxied: false,
+    };
+
+    if (existing) {
+      const index = this.dnsRecords.findIndex((record) => record.id === existing.id);
+      this.dnsRecords[index] = next;
+    } else {
+      this.dnsRecords.push(next);
+    }
+
+    const action = existing
+      ? normalizeRecordName(existing.content) === normalizeRecordName(safeContent)
+        ? 'unchanged'
+        : 'updated'
+      : 'created';
+
+    this.dnsUpserts.push({
+      zoneId: safeZoneId,
+      type: safeType,
+      name: safeName,
+      content: safeContent,
+      action,
+    });
+
+    return {
+      ...structuredClone(next),
+      action,
+      created: action === 'created',
+      updated: action === 'updated',
+    };
+  }
 }
 
 class FakeAmazonSesClient {
   constructor() {
     this.identityStatus = new Map();
     this.sent = [];
+    this.createdIdentities = [];
   }
 
   setIdentity(emailIdentity, payload = {}) {
@@ -331,6 +423,61 @@ class FakeAmazonSesClient {
       verified: false,
       identityType: key.includes('@') ? 'email_address' : 'domain',
       dkimStatus: '',
+      dkimTokens: [],
+    };
+  }
+
+  async createEmailIdentity({ emailIdentity }) {
+    const key = String(emailIdentity || '').trim().toLowerCase();
+    if (!this.identityStatus.has(key)) {
+      const tokens = [
+        `${key.replace(/\W/g, '')}a`,
+        `${key.replace(/\W/g, '')}b`,
+        `${key.replace(/\W/g, '')}c`,
+      ].map((token) => token.slice(0, 24));
+      this.identityStatus.set(key, {
+        exists: true,
+        verified: false,
+        identityType: key.includes('@') ? 'email_address' : 'domain',
+        dkimStatus: 'pending',
+        dkimTokens: tokens,
+      });
+    }
+    this.createdIdentities.push(key);
+    const current = this.identityStatus.get(key);
+    return {
+      created: true,
+      emailIdentity: key,
+      verifiedForSendingStatus: current?.verified === true,
+      dkimStatus: cleanTestString(current?.dkimStatus || '').toLowerCase(),
+      dkimTokens: Array.isArray(current?.dkimTokens) ? current.dkimTokens : [],
+    };
+  }
+
+  async ensureDomainIdentity(domain = '') {
+    const key = String(domain || '').trim().toLowerCase();
+    const current = await this.getEmailIdentityStatus({
+      emailIdentity: key,
+    });
+    if (current?.exists) {
+      return {
+        created: false,
+        alreadyExists: true,
+        emailIdentity: key,
+        identityStatus: current,
+      };
+    }
+    await this.createEmailIdentity({
+      emailIdentity: key,
+    });
+    const identityStatus = await this.getEmailIdentityStatus({
+      emailIdentity: key,
+    });
+    return {
+      created: true,
+      alreadyExists: false,
+      emailIdentity: key,
+      identityStatus,
     };
   }
 
@@ -865,4 +1012,105 @@ test('bloquea envio SES cuando la identidad de dominio no esta verificada', asyn
     (error) => error?.code === 'SES_IDENTITY_NOT_VERIFIED'
   );
   assert.equal(sesClient.sent.length, 0);
+});
+
+test('provisiona SES y DNS (DKIM/SPF/DMARC) para un dominio', async () => {
+  const { service, cloudflareClient, sesClient } = createService({
+    companies: {
+      ses5: {
+        dominio: 'cliente.com',
+        cloudflareZoneId: 'zone-ses-005',
+        cloudflareAccountId: 'acc-zone-ses-005',
+      },
+    },
+  });
+
+  sesClient.setIdentity('cliente.com', {
+    exists: true,
+    verified: false,
+    identityType: 'domain',
+    dkimStatus: 'pending',
+    dkimTokens: ['dkimaaa', 'dkimbbb', 'dkimccc'],
+  });
+
+  const result = await service.provisionEmailInfrastructure({
+    empresaId: 'ses5',
+  });
+
+  assert.equal(result.domain, 'cliente.com');
+  assert.equal(result.cloudflare.emailRoutingDnsEnabled, true);
+  assert.equal(result.ses.identityExists, true);
+  assert.equal(result.ses.identityVerified, false);
+  assert.equal(result.dns.dkim.length, 3);
+  assert.equal(result.dns.spf.includesAmazonSes, true);
+  assert.equal(result.dns.dmarc.present, true);
+  assert.equal(result.status, 'pending_verification');
+  assert.equal(cloudflareClient.dnsUpserts.length, 5);
+});
+
+test('consulta estado de provision y reporta ready cuando DNS+SES estan completos', async () => {
+  const { service, cloudflareClient, sesClient } = createService({
+    companies: {
+      ses6: {
+        dominio: 'cliente.com',
+        cloudflareZoneId: 'zone-ses-006',
+        cloudflareAccountId: 'acc-zone-ses-006',
+      },
+    },
+  });
+
+  sesClient.setIdentity('cliente.com', {
+    exists: true,
+    verified: true,
+    identityType: 'domain',
+    dkimStatus: 'success',
+    dkimTokens: ['tok1', 'tok2', 'tok3'],
+  });
+
+  cloudflareClient.dnsRecords.push(
+    {
+      id: 'dns-1',
+      zoneId: 'zone-ses-006',
+      type: 'CNAME',
+      name: 'tok1._domainkey.cliente.com',
+      content: 'tok1.dkim.amazonses.com',
+    },
+    {
+      id: 'dns-2',
+      zoneId: 'zone-ses-006',
+      type: 'CNAME',
+      name: 'tok2._domainkey.cliente.com',
+      content: 'tok2.dkim.amazonses.com',
+    },
+    {
+      id: 'dns-3',
+      zoneId: 'zone-ses-006',
+      type: 'CNAME',
+      name: 'tok3._domainkey.cliente.com',
+      content: 'tok3.dkim.amazonses.com',
+    },
+    {
+      id: 'dns-4',
+      zoneId: 'zone-ses-006',
+      type: 'TXT',
+      name: 'cliente.com',
+      content: 'v=spf1 include:amazonses.com ~all',
+    },
+    {
+      id: 'dns-5',
+      zoneId: 'zone-ses-006',
+      type: 'TXT',
+      name: '_dmarc.cliente.com',
+      content: 'v=DMARC1; p=none; pct=100',
+    }
+  );
+
+  const status = await service.getEmailProvisionStatus({
+    empresaId: 'ses6',
+  });
+
+  assert.equal(status.status, 'ready');
+  assert.equal(status.ses.identityVerified, true);
+  assert.equal(status.dns.spf.includesAmazonSes, true);
+  assert.equal(status.dns.dkim.every((item) => item.matches), true);
 });

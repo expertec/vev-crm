@@ -45,6 +45,16 @@ export function createCorporateEmailRouter({
   );
 
   router.post(
+    '/empresas/:empresaId/correos-corporativos/provision',
+    controller.provisionEmailInfrastructure
+  );
+
+  router.get(
+    '/empresas/:empresaId/correos-corporativos/provision-status',
+    controller.getEmailProvisionStatus
+  );
+
+  router.post(
     '/empresas/:empresaId/correos-corporativos',
     controller.createCorporateEmail
   );

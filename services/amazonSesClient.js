@@ -15,6 +15,20 @@ function toStringArray(values) {
     .filter(Boolean);
 }
 
+function extractDkimTokens(value) {
+  const rawTokens = Array.isArray(value)
+    ? value
+    : Array.isArray(value?.Tokens)
+      ? value.Tokens
+      : Array.isArray(value?.tokens)
+        ? value.tokens
+        : [];
+
+  return rawTokens
+    .map((item) => cleanString(item, 260).toLowerCase())
+    .filter(Boolean);
+}
+
 let cachedSesModulePromise = null;
 
 async function loadSesModule() {
@@ -75,6 +89,14 @@ function mapSesError(error) {
     return new AmazonSesClientError(message || 'Solicitud inválida para Amazon SES', {
       code: 'SES_BAD_REQUEST',
       statusCode: 400,
+      details: { cause: name },
+    });
+  }
+
+  if (name === 'AlreadyExistsException') {
+    return new AmazonSesClientError(message || 'La identidad SES ya existe', {
+      code: 'SES_IDENTITY_ALREADY_EXISTS',
+      statusCode: 409,
       details: { cause: name },
     });
   }
@@ -188,6 +210,7 @@ export class AmazonSesClient {
         verified: response?.VerifiedForSendingStatus === true,
         verifiedForSendingStatus: response?.VerifiedForSendingStatus === true,
         dkimStatus: cleanString(response?.DkimAttributes?.Status || '', 80).toLowerCase(),
+        dkimTokens: extractDkimTokens(response?.DkimAttributes),
         dkimSigningEnabled: response?.DkimAttributes?.SigningEnabled === true,
         feedbackForwardingEnabled: response?.FeedbackForwardingStatus === true,
         mailFromDomain: cleanString(response?.MailFromAttributes?.MailFromDomain || '', 260),
@@ -202,6 +225,7 @@ export class AmazonSesClient {
           verifiedForSendingStatus: false,
           identityType: '',
           dkimStatus: '',
+          dkimTokens: [],
           dkimSigningEnabled: false,
           feedbackForwardingEnabled: false,
           mailFromDomain: '',
@@ -209,6 +233,80 @@ export class AmazonSesClient {
       }
       throw mapped;
     }
+  }
+
+  async createEmailIdentity({
+    emailIdentity,
+  }) {
+    const safeIdentity = cleanString(emailIdentity, 320).toLowerCase();
+    if (!safeIdentity) {
+      throw new AmazonSesClientError('`emailIdentity` es requerido', {
+        code: 'SES_IDENTITY_REQUIRED',
+        statusCode: 400,
+      });
+    }
+
+    try {
+      const sesModule = await loadSesModule();
+      const { CreateEmailIdentityCommand } = sesModule;
+      const client = await this.getSdkClient();
+      const response = await client.send(new CreateEmailIdentityCommand({
+        EmailIdentity: safeIdentity,
+      }));
+
+      return {
+        created: true,
+        emailIdentity: safeIdentity,
+        verifiedForSendingStatus: response?.VerifiedForSendingStatus === true,
+        dkimStatus: cleanString(response?.DkimAttributes?.Status || '', 80).toLowerCase(),
+        dkimTokens: extractDkimTokens(response?.DkimAttributes),
+      };
+    } catch (error) {
+      throw mapSesError(error);
+    }
+  }
+
+  async ensureDomainIdentity(domain = '') {
+    const safeDomain = cleanString(domain, 320).toLowerCase();
+    if (!safeDomain) {
+      throw new AmazonSesClientError('`domain` es requerido', {
+        code: 'SES_DOMAIN_REQUIRED',
+        statusCode: 400,
+      });
+    }
+
+    const current = await this.getEmailIdentityStatus({
+      emailIdentity: safeDomain,
+    });
+    if (current?.exists) {
+      return {
+        created: false,
+        alreadyExists: true,
+        emailIdentity: safeDomain,
+        identityStatus: current,
+      };
+    }
+
+    try {
+      await this.createEmailIdentity({
+        emailIdentity: safeDomain,
+      });
+    } catch (error) {
+      if (!(error instanceof AmazonSesClientError) || error.code !== 'SES_IDENTITY_ALREADY_EXISTS') {
+        throw error;
+      }
+    }
+
+    const status = await this.getEmailIdentityStatus({
+      emailIdentity: safeDomain,
+    });
+
+    return {
+      created: true,
+      alreadyExists: false,
+      emailIdentity: safeDomain,
+      identityStatus: status,
+    };
   }
 
   async sendEmail({

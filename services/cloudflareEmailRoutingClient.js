@@ -76,6 +76,31 @@ function buildDomainCandidates(domain = '') {
   return candidates;
 }
 
+function normalizeDnsRecordName(name = '', zoneDomain = '') {
+  const raw = cleanString(name, 255).replace(/\.$/, '').toLowerCase();
+  const safeZoneDomain = normalizeDomain(zoneDomain);
+  if (!raw) return safeZoneDomain;
+  if (raw === '@') return safeZoneDomain;
+  if (!safeZoneDomain) return raw;
+  if (raw.endsWith(`.${safeZoneDomain}`) || raw === safeZoneDomain) return raw;
+  return `${raw}.${safeZoneDomain}`;
+}
+
+function mapDnsRecord(raw = {}) {
+  return {
+    id: cleanString(raw?.id || '', 120),
+    zoneId: cleanString(raw?.zone_id || '', 120),
+    zoneName: cleanString(raw?.zone_name || '', 255),
+    name: cleanString(raw?.name || '', 255).toLowerCase(),
+    type: cleanString(raw?.type || '', 20).toUpperCase(),
+    content: cleanString(raw?.content || '', 2000),
+    proxied: raw?.proxied === true,
+    ttl: Number(raw?.ttl || 1),
+    createdOn: cleanString(raw?.created_on || '', 80) || null,
+    modifiedOn: cleanString(raw?.modified_on || '', 80) || null,
+  };
+}
+
 export class CloudflareEmailRoutingError extends Error {
   constructor(
     message,
@@ -477,5 +502,135 @@ export class CloudflareEmailRoutingClient {
       }
       throw error;
     }
+  }
+
+  async listDnsRecords({
+    zoneId,
+    type,
+    name,
+    page = 1,
+    perPage = 100,
+  } = {}) {
+    const safeZoneId = cleanString(zoneId, 120);
+    const safeType = cleanString(type, 20).toUpperCase();
+    const safeName = cleanString(name, 255).toLowerCase().replace(/\.$/, '');
+    if (!safeZoneId) {
+      throw new CloudflareEmailRoutingError('Falta zoneId para listar DNS', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_ZONE_REQUIRED',
+      });
+    }
+
+    const params = {
+      page: Number(page || 1),
+      per_page: Number(perPage || 100),
+    };
+    if (safeType) params.type = safeType;
+    if (safeName) params.name = safeName;
+
+    const result = await this.request({
+      method: 'GET',
+      path: `/zones/${safeZoneId}/dns_records`,
+      params,
+    });
+    const rows = Array.isArray(result) ? result : [];
+    return rows.map((item) => mapDnsRecord(item));
+  }
+
+  async upsertDnsRecord({
+    zoneId,
+    zoneDomain = '',
+    type,
+    name,
+    content,
+    ttl = 1,
+    proxied = false,
+    existingRecordId = '',
+  } = {}) {
+    const safeZoneId = cleanString(zoneId, 120);
+    const safeType = cleanString(type, 20).toUpperCase();
+    const safeContent = cleanString(content, 4000);
+    const safeName = normalizeDnsRecordName(name, zoneDomain);
+
+    if (!safeZoneId) {
+      throw new CloudflareEmailRoutingError('Falta zoneId para upsert DNS', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_ZONE_REQUIRED',
+      });
+    }
+    if (!safeType || !safeName || !safeContent) {
+      throw new CloudflareEmailRoutingError('Faltan datos obligatorios de DNS (type/name/content)', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_DNS_INVALID',
+      });
+    }
+
+    const supportsProxied = ['A', 'AAAA', 'CNAME'].includes(safeType);
+    const payload = {
+      type: safeType,
+      name: safeName,
+      content: safeContent,
+      ttl: Number(ttl || 1),
+    };
+    if (supportsProxied) payload.proxied = proxied === true;
+
+    const safeExistingRecordId = cleanString(existingRecordId, 120);
+    if (safeExistingRecordId) {
+      const updatedById = await this.request({
+        method: 'PUT',
+        path: `/zones/${safeZoneId}/dns_records/${safeExistingRecordId}`,
+        data: payload,
+      });
+      return {
+        ...mapDnsRecord(updatedById || {}),
+        action: 'updated',
+        created: false,
+        updated: true,
+      };
+    }
+
+    const existing = await this.listDnsRecords({
+      zoneId: safeZoneId,
+      type: safeType,
+      name: safeName,
+      page: 1,
+      perPage: 100,
+    });
+    const exact = existing.find((item) => item.content === safeContent);
+    if (exact) {
+      return {
+        ...exact,
+        action: 'unchanged',
+        created: false,
+        updated: false,
+      };
+    }
+
+    const first = existing[0] || null;
+    if (first?.id) {
+      const updatedResult = await this.request({
+        method: 'PUT',
+        path: `/zones/${safeZoneId}/dns_records/${first.id}`,
+        data: payload,
+      });
+      return {
+        ...mapDnsRecord(updatedResult || {}),
+        action: 'updated',
+        created: false,
+        updated: true,
+      };
+    }
+
+    const createdResult = await this.request({
+      method: 'POST',
+      path: `/zones/${safeZoneId}/dns_records`,
+      data: payload,
+    });
+    return {
+      ...mapDnsRecord(createdResult || {}),
+      action: 'created',
+      created: true,
+      updated: false,
+    };
   }
 }

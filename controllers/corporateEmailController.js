@@ -216,6 +216,58 @@ export function createCorporateEmailController({
       }
     },
 
+    provisionEmailInfrastructure: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const domain = cleanString(
+          req.body?.domain
+          || req.body?.dominio
+          || req.query?.domain
+          || req.query?.dominio
+          || '',
+          200
+        );
+        const result = await service.provisionEmailInfrastructure({
+          empresaId,
+          domain,
+        });
+        return res.status(200).json({
+          success: true,
+          result,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] provision infrastructure error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    getEmailProvisionStatus: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const domain = cleanString(
+          req.query?.domain
+          || req.query?.dominio
+          || req.body?.domain
+          || req.body?.dominio
+          || '',
+          200
+        );
+        const refresh = parseBoolean(req.query?.refresh || req.body?.refresh, false);
+        const result = await service.getEmailProvisionStatus({
+          empresaId,
+          domain,
+          refresh,
+        });
+        return res.status(200).json({
+          success: true,
+          result,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] get provision status error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
     getAmazonSesConfiguration: async (req, res) => {
       try {
         const empresaId = cleanString(req.params?.empresaId || '', 140);
