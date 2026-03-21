@@ -1,4 +1,5 @@
 import { Timestamp } from 'firebase-admin/firestore';
+import crypto from 'node:crypto';
 import { CloudflareEmailRoutingError } from './cloudflareEmailRoutingClient.js';
 import { AmazonSesClientError } from './amazonSesClient.js';
 import {
@@ -26,6 +27,12 @@ function parseBoolean(value, defaultValue = false) {
   if (['1', 'true', 'yes', 'si', 'on'].includes(normalized)) return true;
   if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
   return defaultValue;
+}
+
+function parseInteger(value, defaultValue = 0) {
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  return parsed;
 }
 
 function toIso(value) {
@@ -263,6 +270,66 @@ export class CorporateEmailService {
       dmarcRecordValue: cleanString(record.dmarcRecordValue || '', 1200),
       createdAt: toIso(record.createdAt),
       updatedAt: toIso(record.updatedAt),
+    };
+  }
+
+  serializeEmailPlan(record = {}) {
+    const baseAliasesIncluded = Math.max(
+      0,
+      parseInteger(record.baseAliasesIncluded, this.resolveDefaultEmailPlanLimit())
+    );
+    const extraAliasesPurchased = Math.max(
+      0,
+      parseInteger(record.extraAliasesPurchased, 0)
+    );
+    const maxAliases = Math.max(
+      0,
+      parseInteger(record.maxAliases, baseAliasesIncluded + extraAliasesPurchased)
+    );
+
+    return {
+      id: cleanString(record.id || 'current', 160) || 'current',
+      empresaId: cleanString(record.empresaId || '', 140),
+      status: cleanString(record.status || 'active', 80).toLowerCase(),
+      planCode: cleanString(record.planCode || 'basic', 80).toLowerCase(),
+      planName: cleanString(record.planName || 'Plan Basico', 120),
+      baseAliasesIncluded,
+      extraAliasesPurchased,
+      maxAliases,
+      pendingRequestId: cleanString(record.pendingRequestId || '', 180),
+      lastRequestStatus: cleanString(record.lastRequestStatus || '', 80).toLowerCase(),
+      lastRequestAt: toIso(record.lastRequestAt),
+      notes: cleanString(record.notes || '', 1000),
+      createdAt: toIso(record.createdAt),
+      updatedAt: toIso(record.updatedAt),
+    };
+  }
+
+  serializeEmailPlanRequest(record = {}) {
+    const requestedExtraAliases = Math.max(
+      0,
+      parseInteger(record.requestedExtraAliases, 0)
+    );
+    const approvedExtraAliases = Math.max(
+      0,
+      parseInteger(record.approvedExtraAliases, requestedExtraAliases)
+    );
+
+    return {
+      id: cleanString(record.id || '', 180),
+      empresaId: cleanString(record.empresaId || '', 140),
+      status: cleanString(record.status || 'pending_review', 80).toLowerCase(),
+      requestedExtraAliases,
+      approvedExtraAliases,
+      requestedByName: cleanString(record.requestedByName || '', 160),
+      requestedByEmail: normalizeEmailAddress(record.requestedByEmail || ''),
+      note: cleanString(record.note || '', 1000),
+      source: cleanString(record.source || 'self_service', 80).toLowerCase(),
+      reviewedBy: cleanString(record.reviewedBy || '', 160),
+      reviewNote: cleanString(record.reviewNote || '', 1000),
+      createdAt: toIso(record.createdAt),
+      updatedAt: toIso(record.updatedAt),
+      resolvedAt: toIso(record.resolvedAt),
     };
   }
 
@@ -749,6 +816,221 @@ export class CorporateEmailService {
     return 'pending_verification';
   }
 
+  resolveDefaultEmailPlanLimit() {
+    const fromEnv = parseInteger(process.env.CORPORATE_EMAIL_BASIC_PLAN_ALIAS_LIMIT, 1);
+    return Math.max(1, fromEnv);
+  }
+
+  resolveEmailPlanExpansionOptions() {
+    const fromEnv = String(process.env.CORPORATE_EMAIL_EXPANSION_OPTIONS || '').trim();
+    const parsed = (fromEnv || '5,10')
+      .split(',')
+      .map((item) => parseInteger(item, 0))
+      .filter((value) => Number.isInteger(value) && value > 0);
+    const unique = Array.from(new Set(parsed)).sort((a, b) => a - b);
+    return unique.length > 0 ? unique : [5, 10];
+  }
+
+  buildEmailPlanRequestId() {
+    const stamp = Date.now();
+    const random = crypto.randomBytes(4).toString('hex');
+    return `req_${stamp}_${random}`;
+  }
+
+  async ensureCorporateEmailPlan(empresaId) {
+    const safeEmpresaId = this.ensureEmpresaId(empresaId);
+    const existing = await this.repository.getCorporateEmailPlan(safeEmpresaId);
+    if (existing) return existing;
+
+    const defaultLimit = this.resolveDefaultEmailPlanLimit();
+    return this.repository.upsertCorporateEmailPlan({
+      empresaId: safeEmpresaId,
+      payload: {
+        status: 'active',
+        planCode: 'basic',
+        planName: 'Plan Basico',
+        baseAliasesIncluded: defaultLimit,
+        extraAliasesPurchased: 0,
+        maxAliases: defaultLimit,
+        pendingRequestId: '',
+        lastRequestStatus: '',
+        notes: '',
+      },
+    });
+  }
+
+  async getEmailPlanStatus({
+    empresaId,
+    includeRequests = true,
+    requestLimit = 20,
+  }) {
+    try {
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      await this.getCompanyOrThrow(safeEmpresaId);
+
+      const [planRaw, corporateEmailRecords, planRequestsRaw] = await Promise.all([
+        this.ensureCorporateEmailPlan(safeEmpresaId),
+        this.repository.listCorporateEmailsByCompany(safeEmpresaId),
+        includeRequests
+          ? this.repository.listCorporateEmailPlanRequestsByCompany(safeEmpresaId, {
+            limit: Math.max(1, Math.min(100, parseInteger(requestLimit, 20))),
+          })
+          : Promise.resolve([]),
+      ]);
+
+      const plan = this.serializeEmailPlan(planRaw || {});
+      const usedAliases = corporateEmailRecords.filter(
+        (item) => cleanString(item?.status || '', 80).toLowerCase() !== 'deleted'
+      ).length;
+      const maxAliases = Math.max(
+        1,
+        parseInteger(plan.maxAliases, plan.baseAliasesIncluded + plan.extraAliasesPurchased)
+      );
+      const availableAliases = Math.max(0, maxAliases - usedAliases);
+      const canCreateAlias = usedAliases < maxAliases;
+      const requests = includeRequests
+        ? planRequestsRaw.map((item) => this.serializeEmailPlanRequest(item))
+        : [];
+      const pendingRequest = requests.find((item) => item.status === 'pending_review') || null;
+
+      return {
+        empresaId: safeEmpresaId,
+        plan: {
+          ...plan,
+          maxAliases,
+        },
+        usage: {
+          usedAliases,
+          maxAliases,
+          availableAliases,
+          canCreateAlias,
+        },
+        expansionOptions: this.resolveEmailPlanExpansionOptions(),
+        pendingRequest,
+        requests,
+      };
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async assertAliasCreationAllowed(empresaId) {
+    const planStatus = await this.getEmailPlanStatus({
+      empresaId,
+      includeRequests: true,
+      requestLimit: 20,
+    });
+
+    if (planStatus?.usage?.canCreateAlias !== true) {
+      throw new CorporateEmailServiceError(
+        'Tu plan de correo llegó al límite de cuentas. Solicita una expansión para crear más alias.',
+        {
+          code: 'PLAN_ALIAS_LIMIT_REACHED',
+          statusCode: 409,
+          details: {
+            usedAliases: planStatus?.usage?.usedAliases || 0,
+            maxAliases: planStatus?.usage?.maxAliases || 0,
+            availableAliases: planStatus?.usage?.availableAliases || 0,
+            plan: planStatus?.plan || null,
+            pendingRequest: planStatus?.pendingRequest || null,
+            expansionOptions: planStatus?.expansionOptions || [5, 10],
+          },
+        }
+      );
+    }
+
+    return planStatus;
+  }
+
+  async requestEmailPlanExpansion({
+    empresaId,
+    extraAliases,
+    requestedByName = '',
+    requestedByEmail = '',
+    note = '',
+  }) {
+    try {
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const requestedExtraAliases = Math.max(0, parseInteger(extraAliases, 0));
+      const allowedOptions = this.resolveEmailPlanExpansionOptions();
+
+      if (!requestedExtraAliases || !allowedOptions.includes(requestedExtraAliases)) {
+        throw new CorporateEmailServiceError(
+          `Paquete inválido. Opciones permitidas: ${allowedOptions.join(', ')}`,
+          {
+            code: 'PLAN_UPGRADE_OPTION_INVALID',
+            statusCode: 400,
+            details: {
+              extraAliases: requestedExtraAliases || 0,
+              allowedOptions,
+            },
+          }
+        );
+      }
+
+      const status = await this.getEmailPlanStatus({
+        empresaId: safeEmpresaId,
+        includeRequests: true,
+        requestLimit: 50,
+      });
+      const pending = status?.pendingRequest || null;
+      if (pending) {
+        throw new CorporateEmailServiceError(
+          'Ya tienes una solicitud de expansión pendiente.',
+          {
+            code: 'PLAN_UPGRADE_REQUEST_PENDING',
+            statusCode: 409,
+            details: {
+              requestId: pending.id,
+              requestedExtraAliases: pending.requestedExtraAliases,
+              status: pending.status,
+              createdAt: pending.createdAt,
+            },
+          }
+        );
+      }
+
+      const requestId = this.buildEmailPlanRequestId();
+      const createdRequest = await this.repository.createCorporateEmailPlanRequest({
+        empresaId: safeEmpresaId,
+        requestId,
+        payload: {
+          status: 'pending_review',
+          requestedExtraAliases,
+          approvedExtraAliases: 0,
+          requestedByName: cleanString(requestedByName, 160),
+          requestedByEmail: normalizeEmailAddress(requestedByEmail || ''),
+          note: cleanString(note, 1000),
+          source: 'self_service',
+        },
+      });
+
+      const updatedPlan = await this.repository.upsertCorporateEmailPlan({
+        empresaId: safeEmpresaId,
+        payload: {
+          status: 'pending_upgrade',
+          pendingRequestId: cleanString(requestId, 180),
+          lastRequestStatus: 'pending_review',
+          lastRequestAt: Timestamp.now(),
+        },
+      });
+
+      return {
+        request: this.serializeEmailPlanRequest(createdRequest || {}),
+        plan: this.serializeEmailPlan(updatedPlan || {}),
+        usage: status?.usage || {
+          usedAliases: 0,
+          maxAliases: this.resolveDefaultEmailPlanLimit(),
+          availableAliases: this.resolveDefaultEmailPlanLimit(),
+          canCreateAlias: true,
+        },
+        expansionOptions: allowedOptions,
+      };
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
   mapError(error) {
     if (error instanceof CorporateEmailServiceError) return error;
 
@@ -785,6 +1067,20 @@ export class CorporateEmailService {
       return new CorporateEmailServiceError('Empresa no encontrada', {
         code: 'COMPANY_NOT_FOUND',
         statusCode: 404,
+      });
+    }
+
+    if (String(error?.code || '') === 'PLAN_REQUEST_NOT_FOUND') {
+      return new CorporateEmailServiceError('Solicitud de expansión no encontrada', {
+        code: 'PLAN_REQUEST_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+
+    if (String(error?.code || '') === 'PLAN_REQUEST_ALREADY_EXISTS') {
+      return new CorporateEmailServiceError('La solicitud de expansión ya existe', {
+        code: 'PLAN_REQUEST_ALREADY_EXISTS',
+        statusCode: 409,
       });
     }
 
@@ -829,6 +1125,8 @@ export class CorporateEmailService {
           statusCode: 409,
         });
       }
+
+      await this.assertAliasCreationAllowed(safeEmpresaId);
 
       const zoneId = await this.resolveZoneId({
         company,

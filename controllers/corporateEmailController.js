@@ -16,6 +16,9 @@ function resolveSafeMessage(error) {
 
   const shouldExposeMessage =
     code === 'DESTINATION_EMAIL_NOT_VERIFIED'
+    || code === 'PLAN_ALIAS_LIMIT_REACHED'
+    || code === 'PLAN_UPGRADE_OPTION_INVALID'
+    || code === 'PLAN_UPGRADE_REQUEST_PENDING'
     || code === 'CLOUDFLARE_NOT_CONFIGURED'
     || code === 'CLOUDFLARE_ZONE_NOT_FOUND'
     || code === 'CLOUDFLARE_ACCOUNT_NOT_FOUND'
@@ -140,6 +143,73 @@ export function createCorporateEmailController({
         });
       } catch (error) {
         logger.error('[corporate-emails] availability error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    getEmailPlanStatus: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const includeRequests = parseBoolean(req.query?.includeRequests, true);
+        const requestLimit = Number.parseInt(
+          cleanString(req.query?.requestLimit || req.query?.limit || '', 10),
+          10
+        );
+
+        const result = await service.getEmailPlanStatus({
+          empresaId,
+          includeRequests,
+          requestLimit: Number.isFinite(requestLimit) ? requestLimit : 20,
+        });
+
+        return res.status(200).json({
+          success: true,
+          ...result,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] get plan status error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    requestEmailPlanExpansion: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const extraAliases = Number.parseInt(
+          cleanString(
+            req.body?.extraAliases
+            || req.body?.requestedExtraAliases
+            || req.body?.paquete
+            || req.body?.planExtra
+            || '',
+            10
+          ),
+          10
+        );
+        const requestedByName = cleanString(
+          req.body?.requestedByName || req.body?.nombreSolicitante || '',
+          160
+        );
+        const requestedByEmail = cleanString(
+          req.body?.requestedByEmail || req.body?.emailSolicitante || '',
+          280
+        );
+        const note = cleanString(req.body?.note || req.body?.nota || '', 1000);
+
+        const result = await service.requestEmailPlanExpansion({
+          empresaId,
+          extraAliases: Number.isFinite(extraAliases) ? extraAliases : 0,
+          requestedByName,
+          requestedByEmail,
+          note,
+        });
+
+        return res.status(201).json({
+          success: true,
+          ...result,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] request plan expansion error:', error?.message || error);
         return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
       }
     },

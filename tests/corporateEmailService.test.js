@@ -18,11 +18,15 @@ class InMemoryCorporateEmailRepository {
     corporateEmails = {},
     destinations = {},
     senderProfiles = {},
+    plans = {},
+    planRequests = {},
   } = {}) {
     this.companies = new Map(Object.entries(companies));
     this.emailsByCompany = new Map();
     this.destinationsByCompany = new Map();
     this.senderProfilesByCompany = new Map();
+    this.plansByCompany = new Map();
+    this.planRequestsByCompany = new Map();
 
     for (const [empresaId, records] of Object.entries(corporateEmails)) {
       const byId = new Map();
@@ -43,6 +47,18 @@ class InMemoryCorporateEmailRepository {
     for (const [empresaId, profile] of Object.entries(senderProfiles)) {
       this.senderProfilesByCompany.set(empresaId, structuredClone(profile));
     }
+
+    for (const [empresaId, plan] of Object.entries(plans)) {
+      this.plansByCompany.set(empresaId, structuredClone(plan));
+    }
+
+    for (const [empresaId, requests] of Object.entries(planRequests)) {
+      const byId = new Map();
+      for (const item of requests) {
+        byId.set(item.id, structuredClone(item));
+      }
+      this.planRequestsByCompany.set(empresaId, byId);
+    }
   }
 
   getBucket(empresaId) {
@@ -57,6 +73,13 @@ class InMemoryCorporateEmailRepository {
       this.destinationsByCompany.set(empresaId, new Map());
     }
     return this.destinationsByCompany.get(empresaId);
+  }
+
+  getPlanRequestBucket(empresaId) {
+    if (!this.planRequestsByCompany.has(empresaId)) {
+      this.planRequestsByCompany.set(empresaId, new Map());
+    }
+    return this.planRequestsByCompany.get(empresaId);
   }
 
   async getCompanyById(empresaId) {
@@ -211,6 +234,105 @@ class InMemoryCorporateEmailRepository {
       updatedAt: now,
     };
     this.senderProfilesByCompany.set(empresaId, next);
+    return structuredClone(next);
+  }
+
+  async getCorporateEmailPlan(empresaId) {
+    const current = this.plansByCompany.get(empresaId);
+    return current ? structuredClone(current) : null;
+  }
+
+  async upsertCorporateEmailPlan({
+    empresaId,
+    payload = {},
+  }) {
+    if (!this.companies.has(empresaId)) {
+      const error = new Error('Empresa no encontrada');
+      error.code = 'COMPANY_NOT_FOUND';
+      throw error;
+    }
+    const current = this.plansByCompany.get(empresaId) || null;
+    const now = new Date().toISOString();
+    const next = {
+      ...(current ? structuredClone(current) : {}),
+      id: current?.id || 'current',
+      empresaId,
+      createdAt: current?.createdAt || now,
+      ...structuredClone(payload),
+      updatedAt: now,
+    };
+    this.plansByCompany.set(empresaId, next);
+    return structuredClone(next);
+  }
+
+  async listCorporateEmailPlanRequestsByCompany(empresaId, { limit = 20 } = {}) {
+    const bucket = this.getPlanRequestBucket(empresaId);
+    const size = Number.isFinite(Number(limit))
+      ? Math.max(1, Math.min(100, Math.floor(Number(limit))))
+      : 20;
+    const records = Array.from(bucket.values())
+      .sort((a, b) => {
+        const left = Date.parse(String(b?.createdAt || ''));
+        const right = Date.parse(String(a?.createdAt || ''));
+        return (Number.isFinite(left) ? left : 0) - (Number.isFinite(right) ? right : 0);
+      })
+      .slice(0, size);
+    return records.map((item) => structuredClone(item));
+  }
+
+  async getCorporateEmailPlanRequestById(empresaId, requestId) {
+    const bucket = this.getPlanRequestBucket(empresaId);
+    const current = bucket.get(requestId);
+    return current ? structuredClone(current) : null;
+  }
+
+  async createCorporateEmailPlanRequest({
+    empresaId,
+    requestId,
+    payload = {},
+  }) {
+    if (!this.companies.has(empresaId)) {
+      const error = new Error('Empresa no encontrada');
+      error.code = 'COMPANY_NOT_FOUND';
+      throw error;
+    }
+    const bucket = this.getPlanRequestBucket(empresaId);
+    if (bucket.has(requestId)) {
+      const error = new Error('Solicitud ya existe');
+      error.code = 'PLAN_REQUEST_ALREADY_EXISTS';
+      throw error;
+    }
+    const now = new Date().toISOString();
+    const next = {
+      id: requestId,
+      empresaId,
+      ...structuredClone(payload),
+      createdAt: now,
+      updatedAt: now,
+    };
+    bucket.set(requestId, next);
+    return structuredClone(next);
+  }
+
+  async updateCorporateEmailPlanRequest({
+    empresaId,
+    requestId,
+    payload = {},
+  }) {
+    const bucket = this.getPlanRequestBucket(empresaId);
+    const current = bucket.get(requestId);
+    if (!current) {
+      const error = new Error('Solicitud no encontrada');
+      error.code = 'PLAN_REQUEST_NOT_FOUND';
+      throw error;
+    }
+    const now = new Date().toISOString();
+    const next = {
+      ...structuredClone(current),
+      ...structuredClone(payload),
+      updatedAt: now,
+    };
+    bucket.set(requestId, next);
     return structuredClone(next);
   }
 }
@@ -494,12 +616,16 @@ function createService({
   corporateEmails = {},
   destinations = {},
   senderProfiles = {},
+  plans = {},
+  planRequests = {},
 } = {}) {
   const repository = new InMemoryCorporateEmailRepository({
     companies,
     corporateEmails,
     destinations,
     senderProfiles,
+    plans,
+    planRequests,
   });
   const cloudflareClient = new FakeCloudflareEmailRoutingClient();
   const sesClient = new FakeAmazonSesClient();
@@ -886,6 +1012,139 @@ test('no mezcla destinos de otra empresa al listar destinos', async () => {
   assert.deepEqual(
     emails,
     ['enuso@gmail.com', 'propio@gmail.com']
+  );
+});
+
+test('limita creacion de alias segun plan basico (1 cuenta)', async () => {
+  const existingId = buildCorporateEmailRecordId({
+    alias: 'info',
+    domain: 'cliente.com',
+  });
+  const { service, cloudflareClient } = createService({
+    companies: {
+      plan1: {
+        dominio: 'cliente.com',
+        cloudflareZoneId: 'zone-plan-001',
+      },
+    },
+    corporateEmails: {
+      plan1: [
+        {
+          id: existingId,
+          empresaId: 'plan1',
+          alias: 'info',
+          domain: 'cliente.com',
+          email: 'info@cliente.com',
+          destinationEmail: 'actual@gmail.com',
+          status: 'active',
+        },
+      ],
+    },
+  });
+
+  await assert.rejects(
+    () => service.createCorporateEmail({
+      empresaId: 'plan1',
+      alias: 'ventas',
+      destinationEmail: 'nuevo@gmail.com',
+    }),
+    (error) => error?.code === 'PLAN_ALIAS_LIMIT_REACHED'
+  );
+
+  assert.equal(cloudflareClient.created.length, 0);
+  assert.equal(cloudflareClient.dnsEnsures.length, 0);
+});
+
+test('permite solicitar expansion de plan y deja estado pendiente', async () => {
+  const existingId = buildCorporateEmailRecordId({
+    alias: 'info',
+    domain: 'cliente.com',
+  });
+  const { service } = createService({
+    companies: {
+      plan2: {
+        dominio: 'cliente.com',
+      },
+    },
+    corporateEmails: {
+      plan2: [
+        {
+          id: existingId,
+          empresaId: 'plan2',
+          alias: 'info',
+          domain: 'cliente.com',
+          email: 'info@cliente.com',
+          destinationEmail: 'actual@gmail.com',
+          status: 'active',
+        },
+      ],
+    },
+  });
+
+  const requestResult = await service.requestEmailPlanExpansion({
+    empresaId: 'plan2',
+    extraAliases: 5,
+    requestedByName: 'Sergio',
+    requestedByEmail: 'sergio@negociosweb.mx',
+    note: 'Necesito más cuentas para el equipo',
+  });
+
+  assert.equal(requestResult.request.status, 'pending_review');
+  assert.equal(requestResult.request.requestedExtraAliases, 5);
+  assert.equal(requestResult.plan.status, 'pending_upgrade');
+  assert.equal(requestResult.usage.maxAliases, 1);
+  assert.equal(requestResult.usage.usedAliases, 1);
+  assert.equal(requestResult.expansionOptions.includes(5), true);
+
+  const status = await service.getEmailPlanStatus({
+    empresaId: 'plan2',
+    includeRequests: true,
+  });
+  assert.equal(status.plan.status, 'pending_upgrade');
+  assert.equal(status.pendingRequest?.status, 'pending_review');
+  assert.equal(status.pendingRequest?.requestedExtraAliases, 5);
+});
+
+test('rechaza segunda solicitud de expansion cuando ya hay una pendiente', async () => {
+  const { service } = createService({
+    companies: {
+      plan3: {
+        dominio: 'cliente.com',
+      },
+    },
+  });
+
+  await service.requestEmailPlanExpansion({
+    empresaId: 'plan3',
+    extraAliases: 5,
+    requestedByName: 'Owner',
+  });
+
+  await assert.rejects(
+    () => service.requestEmailPlanExpansion({
+      empresaId: 'plan3',
+      extraAliases: 10,
+      requestedByName: 'Owner',
+    }),
+    (error) => error?.code === 'PLAN_UPGRADE_REQUEST_PENDING'
+  );
+});
+
+test('rechaza paquete de expansion invalido', async () => {
+  const { service } = createService({
+    companies: {
+      plan4: {
+        dominio: 'cliente.com',
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => service.requestEmailPlanExpansion({
+      empresaId: 'plan4',
+      extraAliases: 7,
+    }),
+    (error) => error?.code === 'PLAN_UPGRADE_OPTION_INVALID'
   );
 });
 

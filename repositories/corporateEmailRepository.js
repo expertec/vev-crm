@@ -33,6 +33,9 @@ export class FirestoreCorporateEmailRepository {
     destinationSubcollectionName = 'corporateEmailDestinations',
     senderProfileSubcollectionName = 'corporateEmailSenderProfiles',
     senderProfileDocId = 'amazonSes',
+    planSubcollectionName = 'corporateEmailPlans',
+    planDocId = 'current',
+    planRequestSubcollectionName = 'corporateEmailPlanRequests',
   } = {}) {
     this.db = dbClient;
     this.companiesCollection = companiesCollection;
@@ -40,6 +43,11 @@ export class FirestoreCorporateEmailRepository {
     this.destinationSubcollectionName = destinationSubcollectionName;
     this.senderProfileSubcollectionName = senderProfileSubcollectionName;
     this.senderProfileDocId = cleanId(senderProfileDocId || 'amazonSes', 120) || 'amazonSes';
+    this.planSubcollectionName = cleanId(planSubcollectionName || 'corporateEmailPlans', 120) || 'corporateEmailPlans';
+    this.planDocId = cleanId(planDocId || 'current', 120) || 'current';
+    this.planRequestSubcollectionName =
+      cleanId(planRequestSubcollectionName || 'corporateEmailPlanRequests', 120)
+      || 'corporateEmailPlanRequests';
   }
 
   getCompanyRef(empresaId) {
@@ -74,6 +82,21 @@ export class FirestoreCorporateEmailRepository {
     return this.getCompanyRef(safeEmpresaId)
       .collection(this.senderProfileSubcollectionName)
       .doc(this.senderProfileDocId);
+  }
+
+  getPlanRef(empresaId) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    return this.getCompanyRef(safeEmpresaId)
+      .collection(this.planSubcollectionName)
+      .doc(this.planDocId);
+  }
+
+  getPlanRequestRef(empresaId, requestId) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeRequestId = cleanId(requestId, 180);
+    return this.getCompanyRef(safeEmpresaId)
+      .collection(this.planRequestSubcollectionName)
+      .doc(safeRequestId);
   }
 
   async getCompanyById(empresaId) {
@@ -317,6 +340,171 @@ export class FirestoreCorporateEmailRepository {
     });
 
     const updated = await this.getCorporateEmailSenderProfile(safeEmpresaId);
+    return updated;
+  }
+
+  async getCorporateEmailPlan(empresaId) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    if (!safeEmpresaId) return null;
+    const snap = await this.getPlanRef(safeEmpresaId).get();
+    if (!snap.exists) return null;
+    return {
+      id: snap.id,
+      ...(snap.data() || {}),
+    };
+  }
+
+  async upsertCorporateEmailPlan({
+    empresaId,
+    payload = {},
+  }) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    if (!safeEmpresaId) {
+      throw repositoryError('empresaId es requerido', 'INVALID_INPUT');
+    }
+
+    const companyRef = this.getCompanyRef(safeEmpresaId);
+    const planRef = this.getPlanRef(safeEmpresaId);
+
+    await this.db.runTransaction(async (tx) => {
+      const companySnap = await tx.get(companyRef);
+      if (!companySnap.exists) {
+        throw repositoryError('Empresa no encontrada', 'COMPANY_NOT_FOUND');
+      }
+
+      const currentSnap = await tx.get(planRef);
+      const current = currentSnap.exists ? (currentSnap.data() || {}) : {};
+      const now = Timestamp.now();
+
+      tx.set(
+        planRef,
+        {
+          ...payload,
+          empresaId: safeEmpresaId,
+          createdAt: current.createdAt || now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    });
+
+    const updated = await this.getCorporateEmailPlan(safeEmpresaId);
+    return updated;
+  }
+
+  async listCorporateEmailPlanRequestsByCompany(empresaId, { limit = 20 } = {}) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    if (!safeEmpresaId) return [];
+
+    const safeLimit = Number.isFinite(Number(limit))
+      ? Math.max(1, Math.min(100, Math.floor(Number(limit))))
+      : 20;
+
+    const snap = await this.getCompanyRef(safeEmpresaId)
+      .collection(this.planRequestSubcollectionName)
+      .orderBy('createdAt', 'desc')
+      .limit(safeLimit)
+      .get();
+
+    return snap.docs.map((doc) => ({
+      id: doc.id,
+      ...(doc.data() || {}),
+    }));
+  }
+
+  async getCorporateEmailPlanRequestById(empresaId, requestId) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeRequestId = cleanId(requestId, 180);
+    if (!safeEmpresaId || !safeRequestId) return null;
+    const snap = await this.getPlanRequestRef(safeEmpresaId, safeRequestId).get();
+    if (!snap.exists) return null;
+    return {
+      id: snap.id,
+      ...(snap.data() || {}),
+    };
+  }
+
+  async createCorporateEmailPlanRequest({
+    empresaId,
+    requestId,
+    payload = {},
+  }) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeRequestId = cleanId(requestId, 180);
+    if (!safeEmpresaId || !safeRequestId) {
+      throw repositoryError('empresaId y requestId son requeridos', 'INVALID_INPUT');
+    }
+
+    const companyRef = this.getCompanyRef(safeEmpresaId);
+    const requestRef = this.getPlanRequestRef(safeEmpresaId, safeRequestId);
+
+    await this.db.runTransaction(async (tx) => {
+      const companySnap = await tx.get(companyRef);
+      if (!companySnap.exists) {
+        throw repositoryError('Empresa no encontrada', 'COMPANY_NOT_FOUND');
+      }
+
+      const currentSnap = await tx.get(requestRef);
+      if (currentSnap.exists) {
+        throw repositoryError('Solicitud ya existe', 'PLAN_REQUEST_ALREADY_EXISTS');
+      }
+
+      const now = Timestamp.now();
+      tx.set(
+        requestRef,
+        {
+          ...payload,
+          empresaId: safeEmpresaId,
+          createdAt: now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    });
+
+    const created = await this.getCorporateEmailPlanRequestById(safeEmpresaId, safeRequestId);
+    return created;
+  }
+
+  async updateCorporateEmailPlanRequest({
+    empresaId,
+    requestId,
+    payload = {},
+  }) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeRequestId = cleanId(requestId, 180);
+    if (!safeEmpresaId || !safeRequestId) {
+      throw repositoryError('empresaId y requestId son requeridos', 'INVALID_INPUT');
+    }
+
+    const companyRef = this.getCompanyRef(safeEmpresaId);
+    const requestRef = this.getPlanRequestRef(safeEmpresaId, safeRequestId);
+
+    await this.db.runTransaction(async (tx) => {
+      const companySnap = await tx.get(companyRef);
+      if (!companySnap.exists) {
+        throw repositoryError('Empresa no encontrada', 'COMPANY_NOT_FOUND');
+      }
+
+      const currentSnap = await tx.get(requestRef);
+      if (!currentSnap.exists) {
+        throw repositoryError('Solicitud no encontrada', 'PLAN_REQUEST_NOT_FOUND');
+      }
+
+      const current = currentSnap.data() || {};
+      const now = Timestamp.now();
+      tx.set(
+        requestRef,
+        {
+          ...payload,
+          createdAt: current.createdAt || now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    });
+
+    const updated = await this.getCorporateEmailPlanRequestById(safeEmpresaId, safeRequestId);
     return updated;
   }
 }

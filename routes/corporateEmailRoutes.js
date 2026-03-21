@@ -29,6 +29,16 @@ export function createCorporateEmailRouter({
     controller.validateAliasAvailability
   );
 
+  router.get(
+    '/empresas/:empresaId/correos-corporativos/plan',
+    controller.getEmailPlanStatus
+  );
+
+  router.post(
+    '/empresas/:empresaId/correos-corporativos/plan/solicitudes',
+    controller.requestEmailPlanExpansion
+  );
+
   router.post(
     '/empresas/:empresaId/correos-corporativos/destinos',
     controller.registerDestinationEmail
