@@ -1,5 +1,6 @@
 import { Timestamp } from 'firebase-admin/firestore';
 import { CloudflareEmailRoutingError } from './cloudflareEmailRoutingClient.js';
+import { AmazonSesClientError } from './amazonSesClient.js';
 import {
   DEFAULT_RESERVED_ALIASES,
   buildCorporateEmailAddress,
@@ -41,6 +42,35 @@ function toIso(value) {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 
+function parseCsvOrArray(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => cleanString(item, 320).toLowerCase())
+      .filter(Boolean);
+  }
+  return cleanString(value, 2000)
+    .split(',')
+    .map((item) => cleanString(item, 320).toLowerCase())
+    .filter(Boolean);
+}
+
+function extractDomainFromEmail(value = '') {
+  const safeEmail = normalizeEmailAddress(value);
+  if (!safeEmail || !safeEmail.includes('@')) return '';
+  const [, domain = ''] = safeEmail.split('@');
+  return normalizeDomain(domain);
+}
+
+function isEmailInsideDomain({
+  email = '',
+  domain = '',
+} = {}) {
+  const safeDomain = normalizeDomain(domain);
+  const emailDomain = extractDomainFromEmail(email);
+  if (!safeDomain || !emailDomain) return false;
+  return emailDomain === safeDomain || emailDomain.endsWith(`.${safeDomain}`);
+}
+
 export class CorporateEmailServiceError extends Error {
   constructor(
     message,
@@ -62,6 +92,7 @@ export class CorporateEmailService {
   constructor({
     repository,
     cloudflareClient,
+    sesClient = null,
     logger = console,
     reservedAliases = undefined,
   } = {}) {
@@ -71,6 +102,7 @@ export class CorporateEmailService {
 
     this.repository = repository;
     this.cloudflareClient = cloudflareClient;
+    this.sesClient = sesClient;
     this.logger = logger;
 
     const envReserved = String(process.env.CORPORATE_EMAIL_RESERVED_ALIASES || '')
@@ -131,6 +163,28 @@ export class CorporateEmailService {
     };
   }
 
+  serializeSesSenderProfile(record = {}) {
+    return {
+      id: cleanString(record.id || '', 160),
+      empresaId: cleanString(record.empresaId || '', 140),
+      provider: cleanString(record.provider || 'amazon_ses', 80).toLowerCase(),
+      enabled: record.enabled !== false,
+      domain: normalizeDomain(record.domain || ''),
+      fromEmail: normalizeEmailAddress(record.fromEmail || ''),
+      replyToEmail: normalizeEmailAddress(record.replyToEmail || ''),
+      defaultToEmail: normalizeEmailAddress(record.defaultToEmail || ''),
+      displayName: cleanString(record.displayName || '', 120),
+      configurationSetName: cleanString(record.configurationSetName || '', 120),
+      identityType: cleanString(record.identityType || '', 80).toLowerCase(),
+      identityExists: record.identityExists === true,
+      identityVerified: record.identityVerified === true,
+      identityDkimStatus: cleanString(record.identityDkimStatus || '', 80).toLowerCase(),
+      identityCheckedAt: toIso(record.identityCheckedAt),
+      createdAt: toIso(record.createdAt),
+      updatedAt: toIso(record.updatedAt),
+    };
+  }
+
   ensureEmpresaId(value = '') {
     const empresaId = cleanString(value, 140);
     if (!empresaId) {
@@ -140,6 +194,19 @@ export class CorporateEmailService {
       });
     }
     return empresaId;
+  }
+
+  ensureSesClient() {
+    if (!this.sesClient) {
+      throw new CorporateEmailServiceError(
+        'Amazon SES no está configurado en este servidor',
+        {
+          code: 'SES_NOT_CONFIGURED',
+          statusCode: 503,
+        }
+      );
+    }
+    return this.sesClient;
   }
 
   async getCompanyOrThrow(empresaId) {
@@ -218,6 +285,62 @@ export class CorporateEmailService {
       });
     }
     return destinationEmail;
+  }
+
+  validateSenderEmailForDomain({
+    fromEmail = '',
+    domain = '',
+  } = {}) {
+    const safeFromEmail = normalizeEmailAddress(fromEmail);
+    if (!safeFromEmail) {
+      throw new CorporateEmailServiceError('`fromEmail` es requerido', {
+        code: 'SES_FROM_EMAIL_REQUIRED',
+        statusCode: 400,
+      });
+    }
+    if (!isValidEmailAddress(safeFromEmail)) {
+      throw new CorporateEmailServiceError('`fromEmail` es inválido', {
+        code: 'SES_FROM_EMAIL_INVALID',
+        statusCode: 400,
+      });
+    }
+    if (!isEmailInsideDomain({ email: safeFromEmail, domain })) {
+      throw new CorporateEmailServiceError(
+        `El remitente debe pertenecer al dominio ${domain}`,
+        {
+          code: 'SES_FROM_EMAIL_DOMAIN_MISMATCH',
+          statusCode: 400,
+        }
+      );
+    }
+    return safeFromEmail;
+  }
+
+  validateRecipientEmails(values, {
+    fieldName = 'to',
+    required = false,
+  } = {}) {
+    const recipients = parseCsvOrArray(values);
+    if (required && recipients.length === 0) {
+      throw new CorporateEmailServiceError(`\`${fieldName}\` es requerido`, {
+        code: 'SES_RECIPIENTS_REQUIRED',
+        statusCode: 400,
+      });
+    }
+
+    for (const recipient of recipients) {
+      if (!isValidEmailAddress(recipient)) {
+        throw new CorporateEmailServiceError(
+          `Correo inválido en \`${fieldName}\`: ${recipient}`,
+          {
+            code: 'SES_RECIPIENT_INVALID',
+            statusCode: 400,
+          }
+        );
+      }
+    }
+
+    return recipients;
   }
 
   resolveDestinationOwnership(record = {}, empresaId = '') {
@@ -302,6 +425,17 @@ export class CorporateEmailService {
         cleanString(error.message || 'Error al sincronizar con Cloudflare', 320),
         {
           code: cleanString(error.code || 'CLOUDFLARE_API_ERROR', 120),
+          statusCode: Number(error.statusCode || 502),
+          details: error.details || null,
+        }
+      );
+    }
+
+    if (error instanceof AmazonSesClientError) {
+      return new CorporateEmailServiceError(
+        cleanString(error.message || 'Error al sincronizar con Amazon SES', 320),
+        {
+          code: cleanString(error.code || 'SES_API_ERROR', 120),
           statusCode: Number(error.statusCode || 502),
           details: error.details || null,
         }
@@ -830,6 +964,309 @@ export class CorporateEmailService {
         })
         .map((item) => this.serializeDestination(item))
         .filter((item) => item.destinationEmail);
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async getAmazonSesConfiguration({
+    empresaId,
+    domain,
+  }) {
+    try {
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({
+        requestedDomain: domain,
+        company,
+      });
+
+      const profile = await this.repository.getCorporateEmailSenderProfile(safeEmpresaId);
+      if (!profile) {
+        return {
+          empresaId: safeEmpresaId,
+          provider: 'amazon_ses',
+          enabled: false,
+          domain: safeDomain,
+          configured: false,
+          fromEmail: '',
+          replyToEmail: '',
+          displayName: '',
+          configurationSetName: '',
+          identityExists: false,
+          identityVerified: false,
+          identityType: '',
+          identityDkimStatus: '',
+          identityCheckedAt: null,
+        };
+      }
+
+      const serialized = this.serializeSesSenderProfile({
+        ...profile,
+        domain: safeDomain,
+      });
+      return {
+        ...serialized,
+        configured: Boolean(serialized.fromEmail),
+      };
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async verifyAmazonSesIdentity({
+    empresaId,
+    domain,
+    fromEmail,
+  }) {
+    try {
+      const sesClient = this.ensureSesClient();
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({
+        requestedDomain: domain,
+        company,
+      });
+
+      const normalizedFromEmail = cleanString(fromEmail, 320)
+        ? this.validateSenderEmailForDomain({ fromEmail, domain: safeDomain })
+        : '';
+
+      const targetIdentity = normalizedFromEmail || safeDomain;
+      let identity = await sesClient.getEmailIdentityStatus({
+        emailIdentity: targetIdentity,
+      });
+
+      if (!identity?.exists && normalizedFromEmail) {
+        identity = await sesClient.getEmailIdentityStatus({
+          emailIdentity: safeDomain,
+        });
+      }
+
+      const now = Timestamp.now();
+      const currentProfile = await this.repository.getCorporateEmailSenderProfile(safeEmpresaId);
+      if (currentProfile) {
+        await this.repository.upsertCorporateEmailSenderProfile({
+          empresaId: safeEmpresaId,
+          payload: {
+            identityType: cleanString(identity?.identityType || '', 80).toLowerCase(),
+            identityExists: identity?.exists === true,
+            identityVerified: identity?.verified === true,
+            identityDkimStatus: cleanString(identity?.dkimStatus || '', 80).toLowerCase(),
+            identityCheckedAt: now,
+          },
+        });
+      }
+
+      return {
+        identity: targetIdentity,
+        domain: safeDomain,
+        exists: identity?.exists === true,
+        verified: identity?.verified === true,
+        identityType: cleanString(identity?.identityType || '', 80).toLowerCase(),
+        dkimStatus: cleanString(identity?.dkimStatus || '', 80).toLowerCase(),
+        checkedAt: toIso(now),
+      };
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async configureAmazonSesSender({
+    empresaId,
+    domain,
+    enabled = true,
+    fromEmail,
+    replyToEmail,
+    defaultToEmail,
+    displayName,
+    configurationSetName,
+  }) {
+    try {
+      const sesClient = this.ensureSesClient();
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({
+        requestedDomain: domain,
+        company,
+      });
+
+      const safeFromEmail = this.validateSenderEmailForDomain({
+        fromEmail,
+        domain: safeDomain,
+      });
+
+      const safeReplyToEmail = cleanString(replyToEmail, 320)
+        ? this.validateDestinationEmail(replyToEmail)
+        : '';
+      const safeDefaultToEmail = cleanString(defaultToEmail, 320)
+        ? this.validateDestinationEmail(defaultToEmail)
+        : '';
+
+      const identity = await sesClient.getEmailIdentityStatus({
+        emailIdentity: safeDomain,
+      });
+
+      const saved = await this.repository.upsertCorporateEmailSenderProfile({
+        empresaId: safeEmpresaId,
+        payload: {
+          enabled: parseBoolean(enabled, true),
+          domain: safeDomain,
+          fromEmail: safeFromEmail,
+          replyToEmail: safeReplyToEmail,
+          defaultToEmail: safeDefaultToEmail,
+          displayName: cleanString(displayName, 120),
+          configurationSetName: cleanString(configurationSetName, 120),
+          identityType: cleanString(identity?.identityType || '', 80).toLowerCase(),
+          identityExists: identity?.exists === true,
+          identityVerified: identity?.verified === true,
+          identityDkimStatus: cleanString(identity?.dkimStatus || '', 80).toLowerCase(),
+          identityCheckedAt: Timestamp.now(),
+        },
+      });
+
+      return this.serializeSesSenderProfile(saved || {});
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async sendAmazonSesEmail({
+    empresaId,
+    domain,
+    fromEmail,
+    replyToEmail,
+    to,
+    cc,
+    bcc,
+    subject,
+    text,
+    html,
+    configurationSetName,
+    tags = [],
+  }) {
+    try {
+      const sesClient = this.ensureSesClient();
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({
+        requestedDomain: domain,
+        company,
+      });
+
+      const profile = await this.repository.getCorporateEmailSenderProfile(safeEmpresaId);
+      if (profile && profile.enabled === false) {
+        throw new CorporateEmailServiceError('El envío con Amazon SES está deshabilitado', {
+          code: 'SES_SENDER_DISABLED',
+          statusCode: 409,
+        });
+      }
+
+      const resolvedFromEmail = this.validateSenderEmailForDomain({
+        fromEmail: fromEmail || profile?.fromEmail || '',
+        domain: safeDomain,
+      });
+      const resolvedReplyToEmail = cleanString(
+        replyToEmail || profile?.replyToEmail || '',
+        320
+      )
+        ? this.validateDestinationEmail(replyToEmail || profile?.replyToEmail || '')
+        : '';
+      const resolvedConfigSet = cleanString(
+        configurationSetName || profile?.configurationSetName || '',
+        120
+      );
+
+      const toEmails = this.validateRecipientEmails(
+        to || profile?.defaultToEmail || '',
+        { fieldName: 'to', required: true }
+      );
+      const ccEmails = this.validateRecipientEmails(cc, {
+        fieldName: 'cc',
+        required: false,
+      });
+      const bccEmails = this.validateRecipientEmails(bcc, {
+        fieldName: 'bcc',
+        required: false,
+      });
+
+      const safeSubject = cleanString(subject, 220);
+      if (!safeSubject) {
+        throw new CorporateEmailServiceError('`subject` es requerido', {
+          code: 'SES_SUBJECT_REQUIRED',
+          statusCode: 400,
+        });
+      }
+
+      const textBody = String(text ?? '').trim();
+      const htmlBody = String(html ?? '').trim();
+      if (!textBody && !htmlBody) {
+        throw new CorporateEmailServiceError('Incluye `text` o `html` para enviar', {
+          code: 'SES_BODY_REQUIRED',
+          statusCode: 400,
+        });
+      }
+
+      const identity = await sesClient.getEmailIdentityStatus({
+        emailIdentity: safeDomain,
+      });
+      if (!identity?.exists || identity?.verified !== true) {
+        throw new CorporateEmailServiceError(
+          `La identidad SES del dominio ${safeDomain} no está verificada`,
+          {
+            code: 'SES_IDENTITY_NOT_VERIFIED',
+            statusCode: 409,
+            details: {
+              domain: safeDomain,
+              identityExists: identity?.exists === true,
+              identityVerified: identity?.verified === true,
+            },
+          }
+        );
+      }
+
+      const result = await sesClient.sendEmail({
+        fromEmail: resolvedFromEmail,
+        toEmails,
+        ccEmails,
+        bccEmails,
+        replyToEmails: resolvedReplyToEmail ? [resolvedReplyToEmail] : [],
+        subject: safeSubject,
+        textBody,
+        htmlBody,
+        configurationSetName: resolvedConfigSet,
+        tags,
+      });
+
+      await this.repository.upsertCorporateEmailSenderProfile({
+        empresaId: safeEmpresaId,
+        payload: {
+          enabled: profile?.enabled !== false,
+          domain: safeDomain,
+          fromEmail: resolvedFromEmail,
+          replyToEmail: resolvedReplyToEmail,
+          defaultToEmail: profile?.defaultToEmail || '',
+          displayName: profile?.displayName || '',
+          configurationSetName: resolvedConfigSet,
+          identityType: cleanString(identity?.identityType || '', 80).toLowerCase(),
+          identityExists: identity?.exists === true,
+          identityVerified: identity?.verified === true,
+          identityDkimStatus: cleanString(identity?.dkimStatus || '', 80).toLowerCase(),
+          identityCheckedAt: Timestamp.now(),
+          lastSentAt: Timestamp.now(),
+        },
+      });
+
+      return {
+        provider: 'amazon_ses',
+        domain: safeDomain,
+        fromEmail: resolvedFromEmail,
+        to: toEmails,
+        cc: ccEmails,
+        bcc: bccEmails,
+        messageId: cleanString(result?.messageId || '', 180),
+        sentAt: new Date().toISOString(),
+      };
     } catch (error) {
       throw this.mapError(error);
     }

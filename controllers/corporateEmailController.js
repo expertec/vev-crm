@@ -19,7 +19,8 @@ function resolveSafeMessage(error) {
     || code === 'CLOUDFLARE_NOT_CONFIGURED'
     || code === 'CLOUDFLARE_ZONE_NOT_FOUND'
     || code === 'CLOUDFLARE_ACCOUNT_NOT_FOUND'
-    || code.startsWith('CLOUDFLARE_');
+    || code.startsWith('CLOUDFLARE_')
+    || code.startsWith('SES_');
 
   if (shouldExposeMessage && safeMessage) return safeMessage;
   if (status >= 500) return 'Error interno al procesar la solicitud';
@@ -211,6 +212,137 @@ export function createCorporateEmailController({
         });
       } catch (error) {
         logger.error('[corporate-emails] destination verification error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    getAmazonSesConfiguration: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const domain = cleanString(req.query?.domain || req.query?.dominio || '', 200);
+        const configuration = await service.getAmazonSesConfiguration({
+          empresaId,
+          domain,
+        });
+        return res.status(200).json({
+          success: true,
+          configuration,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] ses get configuration error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    configureAmazonSesSender: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const domain = cleanString(req.body?.domain || req.body?.dominio || '', 200);
+        const enabled = parseBoolean(req.body?.enabled, true);
+        const fromEmail = cleanString(req.body?.fromEmail || req.body?.correoOrigen || '', 280);
+        const replyToEmail = cleanString(req.body?.replyToEmail || req.body?.correoRespuesta || '', 280);
+        const defaultToEmail = cleanString(req.body?.defaultToEmail || req.body?.correoDestinoDefault || '', 280);
+        const displayName = cleanString(req.body?.displayName || req.body?.nombreRemitente || '', 120);
+        const configurationSetName = cleanString(
+          req.body?.configurationSetName || req.body?.sesConfigurationSet || '',
+          120
+        );
+
+        const configuration = await service.configureAmazonSesSender({
+          empresaId,
+          domain,
+          enabled,
+          fromEmail,
+          replyToEmail,
+          defaultToEmail,
+          displayName,
+          configurationSetName,
+        });
+        return res.status(200).json({
+          success: true,
+          configuration,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] ses configure error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    verifyAmazonSesIdentity: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const domain = cleanString(
+          req.body?.domain
+          || req.body?.dominio
+          || req.query?.domain
+          || req.query?.dominio
+          || '',
+          200
+        );
+        const fromEmail = cleanString(
+          req.body?.fromEmail
+          || req.query?.fromEmail
+          || req.body?.correoOrigen
+          || '',
+          280
+        );
+        const identity = await service.verifyAmazonSesIdentity({
+          empresaId,
+          domain,
+          fromEmail,
+        });
+        return res.status(200).json({
+          success: true,
+          identity,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] ses verify identity error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    sendAmazonSesEmail: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const domain = cleanString(req.body?.domain || req.body?.dominio || '', 200);
+        const fromEmail = cleanString(req.body?.fromEmail || req.body?.correoOrigen || '', 280);
+        const replyToEmail = cleanString(
+          req.body?.replyToEmail || req.body?.correoRespuesta || '',
+          280
+        );
+        const to = req.body?.to || req.body?.toEmails || req.body?.correoDestino || '';
+        const cc = req.body?.cc || req.body?.ccEmails || '';
+        const bcc = req.body?.bcc || req.body?.bccEmails || '';
+        const subject = cleanString(req.body?.subject || req.body?.asunto || '', 220);
+        const text = cleanString(req.body?.text || req.body?.texto || '', 40000);
+        const html = String(req.body?.html || req.body?.htmlBody || '').trim().slice(0, 200000);
+        const configurationSetName = cleanString(
+          req.body?.configurationSetName || req.body?.sesConfigurationSet || '',
+          120
+        );
+        const tags = Array.isArray(req.body?.tags) ? req.body.tags : [];
+
+        const result = await service.sendAmazonSesEmail({
+          empresaId,
+          domain,
+          fromEmail,
+          replyToEmail,
+          to,
+          cc,
+          bcc,
+          subject,
+          text,
+          html,
+          configurationSetName,
+          tags,
+        });
+
+        return res.status(202).json({
+          success: true,
+          result,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] ses send error:', error?.message || error);
         return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
       }
     },

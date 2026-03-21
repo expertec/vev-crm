@@ -9,10 +9,12 @@ class InMemoryCorporateEmailRepository {
     companies = {},
     corporateEmails = {},
     destinations = {},
+    senderProfiles = {},
   } = {}) {
     this.companies = new Map(Object.entries(companies));
     this.emailsByCompany = new Map();
     this.destinationsByCompany = new Map();
+    this.senderProfilesByCompany = new Map();
 
     for (const [empresaId, records] of Object.entries(corporateEmails)) {
       const byId = new Map();
@@ -28,6 +30,10 @@ class InMemoryCorporateEmailRepository {
         byId.set(item.id, structuredClone(item));
       }
       this.destinationsByCompany.set(empresaId, byId);
+    }
+
+    for (const [empresaId, profile] of Object.entries(senderProfiles)) {
+      this.senderProfilesByCompany.set(empresaId, structuredClone(profile));
     }
   }
 
@@ -169,6 +175,36 @@ class InMemoryCorporateEmailRepository {
     bucket.set(destinationId, next);
     return structuredClone(next);
   }
+
+  async getCorporateEmailSenderProfile(empresaId) {
+    const profile = this.senderProfilesByCompany.get(empresaId);
+    return profile ? structuredClone(profile) : null;
+  }
+
+  async upsertCorporateEmailSenderProfile({
+    empresaId,
+    payload = {},
+  }) {
+    if (!this.companies.has(empresaId)) {
+      const error = new Error('Empresa no encontrada');
+      error.code = 'COMPANY_NOT_FOUND';
+      throw error;
+    }
+
+    const current = this.senderProfilesByCompany.get(empresaId) || null;
+    const now = new Date().toISOString();
+    const next = {
+      ...(current ? structuredClone(current) : {}),
+      id: current?.id || 'amazonSes',
+      empresaId,
+      provider: 'amazon_ses',
+      createdAt: current?.createdAt || now,
+      ...structuredClone(payload),
+      updatedAt: now,
+    };
+    this.senderProfilesByCompany.set(empresaId, next);
+    return structuredClone(next);
+  }
 }
 
 class FakeCloudflareEmailRoutingClient {
@@ -268,19 +304,65 @@ class FakeCloudflareEmailRoutingClient {
   }
 }
 
-function createService({ companies = {}, corporateEmails = {}, destinations = {} } = {}) {
+class FakeAmazonSesClient {
+  constructor() {
+    this.identityStatus = new Map();
+    this.sent = [];
+  }
+
+  setIdentity(emailIdentity, payload = {}) {
+    const key = String(emailIdentity || '').trim().toLowerCase();
+    this.identityStatus.set(key, {
+      exists: true,
+      verified: true,
+      identityType: key.includes('@') ? 'email_address' : 'domain',
+      dkimStatus: 'success',
+      ...structuredClone(payload),
+    });
+  }
+
+  async getEmailIdentityStatus({ emailIdentity }) {
+    const key = String(emailIdentity || '').trim().toLowerCase();
+    if (this.identityStatus.has(key)) {
+      return structuredClone(this.identityStatus.get(key));
+    }
+    return {
+      exists: false,
+      verified: false,
+      identityType: key.includes('@') ? 'email_address' : 'domain',
+      dkimStatus: '',
+    };
+  }
+
+  async sendEmail(payload = {}) {
+    this.sent.push(structuredClone(payload));
+    return {
+      messageId: `ses-msg-${this.sent.length}`,
+    };
+  }
+}
+
+function createService({
+  companies = {},
+  corporateEmails = {},
+  destinations = {},
+  senderProfiles = {},
+} = {}) {
   const repository = new InMemoryCorporateEmailRepository({
     companies,
     corporateEmails,
     destinations,
+    senderProfiles,
   });
   const cloudflareClient = new FakeCloudflareEmailRoutingClient();
+  const sesClient = new FakeAmazonSesClient();
   const service = new CorporateEmailService({
     repository,
     cloudflareClient,
+    sesClient,
     logger: { error() {}, warn() {}, info() {} },
   });
-  return { service, repository, cloudflareClient };
+  return { service, repository, cloudflareClient, sesClient };
 }
 
 test('crea alias corporativo y guarda datos', async () => {
@@ -658,4 +740,129 @@ test('no mezcla destinos de otra empresa al listar destinos', async () => {
     emails,
     ['enuso@gmail.com', 'propio@gmail.com']
   );
+});
+
+test('configura perfil de Amazon SES por empresa', async () => {
+  const { service, sesClient } = createService({
+    companies: {
+      ses1: {
+        dominio: 'cliente.com',
+      },
+    },
+  });
+
+  sesClient.setIdentity('cliente.com', {
+    exists: true,
+    verified: true,
+    identityType: 'domain',
+    dkimStatus: 'success',
+  });
+
+  const profile = await service.configureAmazonSesSender({
+    empresaId: 'ses1',
+    fromEmail: 'ventas@cliente.com',
+    replyToEmail: 'soporte@gmail.com',
+    displayName: 'Ventas Cliente',
+  });
+
+  assert.equal(profile.fromEmail, 'ventas@cliente.com');
+  assert.equal(profile.replyToEmail, 'soporte@gmail.com');
+  assert.equal(profile.identityExists, true);
+  assert.equal(profile.identityVerified, true);
+});
+
+test('rechaza remitente SES si no pertenece al dominio de la empresa', async () => {
+  const { service, sesClient } = createService({
+    companies: {
+      ses2: {
+        dominio: 'cliente.com',
+      },
+    },
+  });
+  sesClient.setIdentity('cliente.com', { exists: true, verified: true });
+
+  await assert.rejects(
+    () => service.configureAmazonSesSender({
+      empresaId: 'ses2',
+      fromEmail: 'ventas@otrodominio.com',
+    }),
+    (error) => error?.code === 'SES_FROM_EMAIL_DOMAIN_MISMATCH'
+  );
+});
+
+test('envia correo con Amazon SES usando perfil guardado', async () => {
+  const { service, sesClient } = createService({
+    companies: {
+      ses3: {
+        dominio: 'cliente.com',
+      },
+    },
+    senderProfiles: {
+      ses3: {
+        id: 'amazonSes',
+        empresaId: 'ses3',
+        provider: 'amazon_ses',
+        enabled: true,
+        domain: 'cliente.com',
+        fromEmail: 'ventas@cliente.com',
+        replyToEmail: 'reply@cliente.com',
+      },
+    },
+  });
+  sesClient.setIdentity('cliente.com', {
+    exists: true,
+    verified: true,
+    identityType: 'domain',
+    dkimStatus: 'success',
+  });
+
+  const sent = await service.sendAmazonSesEmail({
+    empresaId: 'ses3',
+    to: ['destino@gmail.com'],
+    subject: 'Hola',
+    text: 'Mensaje de prueba',
+  });
+
+  assert.equal(sent.messageId, 'ses-msg-1');
+  assert.equal(sent.fromEmail, 'ventas@cliente.com');
+  assert.deepEqual(sent.to, ['destino@gmail.com']);
+  assert.equal(sesClient.sent.length, 1);
+  assert.equal(sesClient.sent[0].fromEmail, 'ventas@cliente.com');
+});
+
+test('bloquea envio SES cuando la identidad de dominio no esta verificada', async () => {
+  const { service, sesClient } = createService({
+    companies: {
+      ses4: {
+        dominio: 'cliente.com',
+      },
+    },
+    senderProfiles: {
+      ses4: {
+        id: 'amazonSes',
+        empresaId: 'ses4',
+        provider: 'amazon_ses',
+        enabled: true,
+        domain: 'cliente.com',
+        fromEmail: 'ventas@cliente.com',
+      },
+    },
+  });
+  sesClient.setIdentity('cliente.com', {
+    exists: true,
+    verified: false,
+    identityType: 'domain',
+    dkimStatus: 'pending',
+  });
+
+  await assert.rejects(
+    () => service.sendAmazonSesEmail({
+      empresaId: 'ses4',
+      to: ['destino@gmail.com'],
+      subject: 'No deberia salir',
+      text: 'Pendiente verificacion',
+    }),
+    (error) => error?.code === 'SES_IDENTITY_NOT_VERIFIED'
+  );
+  assert.equal(sesClient.sent.length, 0);
 });

@@ -31,11 +31,15 @@ export class FirestoreCorporateEmailRepository {
     companiesCollection = 'Negocios',
     subcollectionName = 'corporateEmails',
     destinationSubcollectionName = 'corporateEmailDestinations',
+    senderProfileSubcollectionName = 'corporateEmailSenderProfiles',
+    senderProfileDocId = 'amazonSes',
   } = {}) {
     this.db = dbClient;
     this.companiesCollection = companiesCollection;
     this.subcollectionName = subcollectionName;
     this.destinationSubcollectionName = destinationSubcollectionName;
+    this.senderProfileSubcollectionName = senderProfileSubcollectionName;
+    this.senderProfileDocId = cleanId(senderProfileDocId || 'amazonSes', 120) || 'amazonSes';
   }
 
   getCompanyRef(empresaId) {
@@ -63,6 +67,13 @@ export class FirestoreCorporateEmailRepository {
     const safeEmpresaId = cleanId(empresaId, 140);
     const destinationId = buildDestinationRecordId(email);
     return this.getDestinationRefByDocId(safeEmpresaId, destinationId);
+  }
+
+  getSenderProfileRef(empresaId) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    return this.getCompanyRef(safeEmpresaId)
+      .collection(this.senderProfileSubcollectionName)
+      .doc(this.senderProfileDocId);
   }
 
   async getCompanyById(empresaId) {
@@ -257,6 +268,55 @@ export class FirestoreCorporateEmailRepository {
       safeEmpresaId,
       safeDestinationEmail
     );
+    return updated;
+  }
+
+  async getCorporateEmailSenderProfile(empresaId) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    if (!safeEmpresaId) return null;
+    const snap = await this.getSenderProfileRef(safeEmpresaId).get();
+    if (!snap.exists) return null;
+    return {
+      id: snap.id,
+      ...(snap.data() || {}),
+    };
+  }
+
+  async upsertCorporateEmailSenderProfile({
+    empresaId,
+    payload = {},
+  }) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    if (!safeEmpresaId) {
+      throw repositoryError('empresaId es requerido', 'INVALID_INPUT');
+    }
+
+    const companyRef = this.getCompanyRef(safeEmpresaId);
+    const profileRef = this.getSenderProfileRef(safeEmpresaId);
+
+    await this.db.runTransaction(async (tx) => {
+      const companySnap = await tx.get(companyRef);
+      if (!companySnap.exists) {
+        throw repositoryError('Empresa no encontrada', 'COMPANY_NOT_FOUND');
+      }
+
+      const currentSnap = await tx.get(profileRef);
+      const current = currentSnap.exists ? (currentSnap.data() || {}) : {};
+      const now = Timestamp.now();
+      tx.set(
+        profileRef,
+        {
+          ...payload,
+          empresaId: safeEmpresaId,
+          provider: 'amazon_ses',
+          createdAt: current.createdAt || now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    });
+
+    const updated = await this.getCorporateEmailSenderProfile(safeEmpresaId);
     return updated;
   }
 }
