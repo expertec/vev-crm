@@ -69,6 +69,15 @@ import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
 
 // ================ 🆕 AUTENTICACIÓN DE CLIENTE ================
 import { loginCliente, verificarSesion, logoutCliente } from './clienteAuthRoutes.js';
+import {
+  createClienteStorageUploadUrl,
+  getClienteNegocioById,
+  loginClientePortalAuth,
+  logoutClientePortalAuth,
+  meClientePortalAuth,
+  refreshClientePortalAuth,
+  rejectClienteTokenOnAdminRoutes,
+} from './clientePortalAuthRoutes.js';
 import { createProcessInformationRouter } from './routes/processInformationRoutes.js';
 import { createCorporateEmailRouter } from './routes/corporateEmailRoutes.js';
 import { generarPIN, generarMensajeCredenciales } from './pinUtils.js';
@@ -1816,6 +1825,14 @@ app.post('/api/cliente/login', loginCliente);
 app.post('/api/cliente/verificar-sesion', verificarSesion);
 app.post('/api/cliente/logout', logoutCliente);
 
+// ============== 🆕 RUTAS CLIENTE PORTAL (EMAIL/PASSWORD + REALM) ==============
+app.post('/api/cliente/auth/login', loginClientePortalAuth);
+app.get('/api/cliente/auth/me', meClientePortalAuth);
+app.post('/api/cliente/auth/refresh', refreshClientePortalAuth);
+app.post('/api/cliente/auth/logout', logoutClientePortalAuth);
+app.get('/api/cliente/negocios/:negocioId', getClienteNegocioById);
+app.post('/api/cliente/storage/upload-url', createClienteStorageUploadUrl);
+
 // ============== 🆕 FLUJO INFORMACION (SIN SECUENCIAS) ==============
 app.use('/api/web', createProcessInformationRouter());
 app.use('/api/web', createCorporateEmailRouter());
@@ -1862,6 +1879,8 @@ app.post('/api/whatsapp/send-direct', async (req, res) => {
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
+
+app.use('/api/admin', rejectClienteTokenOnAdminRoutes);
 
 app.post('/api/admin/custom-domain', async (req, res) => {
   const {
