@@ -234,6 +234,9 @@ function getClientJwtSecret() {
   const candidates = [
     process.env.CLIENT_PORTAL_JWT_SECRET,
     process.env.SESSION_SECRET,
+    process.env.JWT_SECRET,
+    process.env.APP_JWT_SECRET,
+    process.env.INTERNAL_API_SECRET,
     process.env.INTERNAL_API_KEY,
   ];
   const found = candidates.find((value) => String(value || '').trim());
@@ -536,6 +539,66 @@ function computeRolePermissions(role) {
   };
 }
 
+function buildPhoneCandidates(rawPhone) {
+  const digits = String(rawPhone || '').replace(/\D/g, '');
+  if (!digits) return [];
+
+  const candidates = [];
+  const add = (value) => {
+    const safe = String(value || '').replace(/\D/g, '');
+    if (!safe) return;
+    if (!candidates.includes(safe)) candidates.push(safe);
+  };
+
+  add(digits);
+
+  if (digits.length === 10) {
+    add(`52${digits}`);
+    add(`521${digits}`);
+  }
+
+  if (digits.startsWith('52') && digits.length === 12) {
+    const local10 = digits.slice(2);
+    add(local10);
+    add(`521${local10}`);
+  }
+
+  if (digits.startsWith('521') && digits.length === 13) {
+    const local10 = digits.slice(3);
+    add(local10);
+    add(`52${local10}`);
+  }
+
+  if (digits.length > 10) {
+    add(digits.slice(-10));
+  }
+
+  return candidates.slice(0, 10);
+}
+
+async function findAgentsByPhoneCandidates(negocioRef, phoneInput) {
+  const candidates = buildPhoneCandidates(phoneInput);
+  if (!candidates.length) return [];
+
+  const found = new Map();
+
+  for (const candidate of candidates) {
+    const snap = await negocioRef
+      .collection('hotelAgents')
+      .where('phone', '==', candidate)
+      .limit(10)
+      .get();
+
+    for (const docSnap of snap.docs) {
+      if (!found.has(docSnap.id)) {
+        found.set(docSnap.id, docSnap);
+      }
+    }
+  }
+
+  return [...found.values()];
+}
+
 function pickCheckoutBaseUrl(req) {
   const origin = String(req.headers.origin || '').trim();
   if (origin) return origin.replace(/\/+$/, '');
@@ -603,6 +666,7 @@ function buildRoomTypePayload(input = {}, current = {}) {
 async function resolveNegocioForHotelAuth(req) {
   const host = extractRequestHost(req);
   const headerNegocioId = String(req.get('x-negocio-id') || '').trim();
+  const headerNegocioSlug = String(req.get('x-negocio-slug') || '').trim().toLowerCase();
 
   let negocioRecord = null;
 
@@ -629,6 +693,19 @@ async function resolveNegocioForHotelAuth(req) {
       };
     }
 
+    if (negocioRecord && headerNegocioSlug) {
+      const slugRecord = await findNegocioBySlug(headerNegocioSlug);
+      if (!slugRecord || slugRecord.id !== negocioRecord.id) {
+        return {
+          error: {
+            status: 403,
+            code: 'FORBIDDEN',
+            message: 'El slug enviado no coincide con el dominio.',
+          },
+        };
+      }
+    }
+
     return {
       negocioRecord,
       host,
@@ -637,6 +714,10 @@ async function resolveNegocioForHotelAuth(req) {
 
   if (!negocioRecord && headerNegocioId) {
     negocioRecord = await readNegocioById(headerNegocioId);
+  }
+
+  if (!negocioRecord && headerNegocioSlug) {
+    negocioRecord = await findNegocioBySlug(headerNegocioSlug);
   }
 
   if (!negocioRecord) {
@@ -1141,6 +1222,60 @@ export function createHotelAppRouter() {
     }
   });
 
+  router.get('/public/tenant/by-slug/:slug', async (req, res) => {
+    try {
+      const slug = String(req.params?.slug || '').trim().toLowerCase();
+      if (!slug) {
+        return jsonError(res, 400, 'VALIDATION_ERROR', 'slug es obligatorio.');
+      }
+
+      const negocioRecord = await findNegocioBySlug(slug);
+      if (!negocioRecord) {
+        return jsonError(res, 404, 'TENANT_NOT_FOUND', 'No encontramos un negocio para ese slug.');
+      }
+
+      const negocioData = negocioRecord.data || {};
+      return res.json({
+        success: true,
+        data: {
+          ...sanitizeNegocio(negocioRecord.id, negocioData),
+          premiumEligible: isPremiumActive(negocioData),
+          appActive: isHotelAdvancedAppActive(negocioData),
+        },
+      });
+    } catch (error) {
+      console.error('[hotel tenant by-slug] Error:', error);
+      return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo resolver el tenant por slug.', error?.message || null);
+    }
+  });
+
+  router.get('/public/tenant/by-negocio/:negocioId', async (req, res) => {
+    try {
+      const negocioId = String(req.params?.negocioId || '').trim();
+      if (!negocioId) {
+        return jsonError(res, 400, 'VALIDATION_ERROR', 'negocioId es obligatorio.');
+      }
+
+      const negocioRecord = await readNegocioById(negocioId);
+      if (!negocioRecord) {
+        return jsonError(res, 404, 'TENANT_NOT_FOUND', 'No encontramos un negocio para ese ID.');
+      }
+
+      const negocioData = negocioRecord.data || {};
+      return res.json({
+        success: true,
+        data: {
+          ...sanitizeNegocio(negocioRecord.id, negocioData),
+          premiumEligible: isPremiumActive(negocioData),
+          appActive: isHotelAdvancedAppActive(negocioData),
+        },
+      });
+    } catch (error) {
+      console.error('[hotel tenant by-negocio] Error:', error);
+      return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo resolver el tenant por negocio.', error?.message || null);
+    }
+  });
+
   router.post('/cliente/hotel/auth/login', async (req, res) => {
     try {
       const phoneDigits = normalizarTelefono(req.body?.phone || '');
@@ -1176,19 +1311,19 @@ export function createHotelAppRouter() {
         );
       }
 
-      const agentsSnap = await negocioRecord.ref
-        .collection('hotelAgents')
-        .where('phone', '==', phoneDigits)
-        .limit(10)
-        .get();
+      await ensureDefaultOwnerAgentForNegocio({
+        negocioRecord,
+        actor: 'system_login_bootstrap',
+      });
 
-      if (agentsSnap.empty) {
+      const agentDocs = await findAgentsByPhoneCandidates(negocioRecord.ref, phoneDigits);
+      if (!agentDocs.length) {
         return jsonError(res, 401, 'INVALID_CREDENTIALS', 'Credenciales inválidas.');
       }
 
       let matchedAgent = null;
 
-      for (const docSnap of agentsSnap.docs) {
+      for (const docSnap of agentDocs) {
         const agentData = docSnap.data() || {};
         if (agentData.active === false) continue;
 
@@ -1208,15 +1343,26 @@ export function createHotelAppRouter() {
 
       const agentRole = normalizeRole(matchedAgent.data.role || ROLE_AGENT);
 
-      const session = signJwt(
-        buildHotelSessionPayload({
-          negocioId: negocioRecord.id,
-          agentId: matchedAgent.id,
-          agentRole,
-          phone: phoneDigits,
-        }),
-        { expiresInSeconds: DEFAULT_TOKEN_TTL_SECONDS }
-      );
+      let session;
+      try {
+        session = signJwt(
+          buildHotelSessionPayload({
+            negocioId: negocioRecord.id,
+            agentId: matchedAgent.id,
+            agentRole,
+            phone: phoneDigits,
+          }),
+          { expiresInSeconds: DEFAULT_TOKEN_TTL_SECONDS }
+        );
+      } catch (signError) {
+        return jsonError(
+          res,
+          500,
+          'SESSION_CONFIG_ERROR',
+          'No se pudo iniciar sesión por configuración de token en el servidor.',
+          signError?.message || null
+        );
+      }
 
       await matchedAgent.ref.set(
         {
