@@ -78,6 +78,11 @@ import {
   refreshClientePortalAuth,
   rejectClienteTokenOnAdminRoutes,
 } from './clientePortalAuthRoutes.js';
+import {
+  createAdvancedAppsRouter,
+  createHotelAppRouter,
+  hotelStripeWebhook,
+} from './hotelAdvancedRoutes.js';
 import { createProcessInformationRouter } from './routes/processInformationRoutes.js';
 import { createCorporateEmailRouter } from './routes/corporateEmailRoutes.js';
 import { generarPIN, generarMensajeCredenciales } from './pinUtils.js';
@@ -1779,6 +1784,12 @@ app.post(
   subscriptionRoutes.stripeWebhook
 );
 
+app.post(
+  '/api/public/hotel/webhook',
+  express.raw({ type: 'application/json' }),
+  hotelStripeWebhook
+);
+
 // Redirecciones para limpiar session_id y evitar ModSecurity
 app.get('/api/subscription/redirect-success', subscriptionRedirectSuccess);
 app.get('/api/subscription/redirect-cancel', subscriptionRedirectCancel);
@@ -1832,6 +1843,10 @@ app.post('/api/cliente/auth/refresh', refreshClientePortalAuth);
 app.post('/api/cliente/auth/logout', logoutClientePortalAuth);
 app.get('/api/cliente/negocios/:negocioId', getClienteNegocioById);
 app.post('/api/cliente/storage/upload-url', createClienteStorageUploadUrl);
+
+// ============== 🆕 APPS AVANZADAS + HOTEL PREMIUM ==============
+app.use('/api', createAdvancedAppsRouter());
+app.use('/api', createHotelAppRouter());
 
 // ============== 🆕 FLUJO INFORMACION (SIN SECUENCIAS) ==============
 app.use('/api/web', createProcessInformationRouter());

@@ -195,6 +195,16 @@ export async function loginCliente(req, res) {
         logoURL: negocioData.logoURL || '',
         contactEmail: negocioData.contactEmail || '',
         contactWhatsapp: negocioData.contactWhatsapp || '',
+        dominio:
+          negocioData.dominio ||
+          negocioData.domain ||
+          negocioData.customDomain ||
+          negocioData.custom_domain ||
+          '',
+        advancedApp: negocioData.advancedApp || null,
+        advancedAppActive:
+          String(negocioData?.advancedApp?.key || '').toLowerCase() === 'hotel_premium' &&
+          String(negocioData?.advancedApp?.status || '').toLowerCase() === 'active',
         // Información de suscripción
         subscriptionType: accessReason,
         subscriptionStatus: negocioData.subscriptionStatus,
@@ -337,6 +347,16 @@ export async function verificarSesion(req, res) {
         logoURL: negocioData.logoURL || '',
         contactEmail: negocioData.contactEmail || '',
         contactWhatsapp: negocioData.contactWhatsapp || '',
+        dominio:
+          negocioData.dominio ||
+          negocioData.domain ||
+          negocioData.customDomain ||
+          negocioData.custom_domain ||
+          '',
+        advancedApp: negocioData.advancedApp || null,
+        advancedAppActive:
+          String(negocioData?.advancedApp?.key || '').toLowerCase() === 'hotel_premium' &&
+          String(negocioData?.advancedApp?.status || '').toLowerCase() === 'active',
         subscriptionStatus: negocioData.subscriptionStatus,
         hasStripeSubscription: !!negocioData.subscriptionId,
         expiresAt:
