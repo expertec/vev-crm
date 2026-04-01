@@ -19,10 +19,24 @@ function getClientJwtSecret() {
   const candidates = [
     process.env.CLIENT_PORTAL_JWT_SECRET,
     process.env.SESSION_SECRET,
+    process.env.JWT_SECRET,
+    process.env.APP_JWT_SECRET,
+    process.env.INTERNAL_API_SECRET,
     process.env.INTERNAL_API_KEY,
   ];
   const found = candidates.find((value) => String(value || '').trim());
-  return String(found || '').trim();
+  if (found) return String(found).trim();
+
+  const nodeEnv = toLowerSafe(process.env.NODE_ENV || 'development');
+  if (nodeEnv !== 'production') {
+    return String(
+      process.env.CLIENT_PORTAL_DEV_JWT_SECRET ||
+      process.env.DEV_SESSION_SECRET ||
+      'dev_local_cliente_portal_secret_change_me'
+    ).trim();
+  }
+
+  return '';
 }
 
 function getClientTokenTtlSeconds() {

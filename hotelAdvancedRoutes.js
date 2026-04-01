@@ -240,7 +240,19 @@ function getClientJwtSecret() {
     process.env.INTERNAL_API_KEY,
   ];
   const found = candidates.find((value) => String(value || '').trim());
-  return String(found || '').trim();
+  if (found) return String(found).trim();
+
+  const nodeEnv = toLowerSafe(process.env.NODE_ENV || 'development');
+  if (nodeEnv !== 'production') {
+    const localFallback = String(
+      process.env.CLIENT_PORTAL_DEV_JWT_SECRET ||
+      process.env.DEV_SESSION_SECRET ||
+      'dev_local_cliente_portal_secret_change_me'
+    ).trim();
+    return localFallback;
+  }
+
+  return '';
 }
 
 function timingSafeEqualString(a, b) {
@@ -661,6 +673,96 @@ function buildRoomTypePayload(input = {}, current = {}) {
     unitsTotal,
     active: merged.active !== false,
   };
+}
+
+function normalizeAmenities(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => String(entry || '').trim())
+      .filter(Boolean)
+      .slice(0, 24);
+  }
+
+  const text = String(value || '').trim();
+  if (!text) return [];
+
+  return text
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .slice(0, 24);
+}
+
+function normalizeRoomImages(roomData = {}) {
+  const source = roomData && typeof roomData === 'object' ? roomData : {};
+  const candidates = [];
+
+  const add = (value) => {
+    const url = String(value || '').trim();
+    if (!url) return;
+    if (!candidates.includes(url)) candidates.push(url);
+  };
+
+  if (Array.isArray(source.images)) {
+    source.images.forEach(add);
+  }
+  if (Array.isArray(source.imageUrls)) {
+    source.imageUrls.forEach(add);
+  }
+  add(source.coverImage);
+  add(source.image);
+  add(source.imageUrl);
+
+  return candidates.slice(0, 12);
+}
+
+function sanitizePublicRoomType(roomTypeId, roomTypeData = {}) {
+  const images = normalizeRoomImages(roomTypeData);
+  const description = String(roomTypeData.description || '').trim();
+  const amenities = normalizeAmenities(roomTypeData.amenities);
+
+  return {
+    id: String(roomTypeId || '').trim(),
+    name: String(roomTypeData.name || '').trim(),
+    description,
+    capacity: Math.max(1, Math.floor(toNumberSafe(roomTypeData.capacity, 1))),
+    baseRate: Math.max(0, toNumberSafe(roomTypeData.baseRate, 0)),
+    unitsTotal: Math.max(1, Math.floor(toNumberSafe(roomTypeData.unitsTotal, 1))),
+    active: roomTypeData.active !== false,
+    amenities,
+    images,
+    coverImage: images[0] || '',
+  };
+}
+
+function computeRemainingUnits({
+  inventoryData,
+  fallbackUnits,
+}) {
+  const rawUnitsAvailable = toNumberSafe(inventoryData?.unitsAvailable, fallbackUnits);
+  const unitsAvailable = Number.isFinite(rawUnitsAvailable) && rawUnitsAvailable > 0
+    ? Math.floor(rawUnitsAvailable)
+    : Math.max(1, Math.floor(toNumberSafe(fallbackUnits, 1)));
+  const unitsBooked = Math.max(0, Math.floor(toNumberSafe(inventoryData?.unitsBooked, 0)));
+  return Math.max(0, unitsAvailable - unitsBooked);
+}
+
+function parseMonthStrict(value) {
+  const parsed = dayjs(String(value || '').trim(), 'YYYY-MM', true);
+  if (!parsed.isValid()) return null;
+  return parsed.startOf('month');
+}
+
+function buildInventoryIndex(inventoryDocs = []) {
+  const map = new Map();
+  for (const docSnap of inventoryDocs) {
+    const data = docSnap.data() || {};
+    const date = String(data.date || '').trim();
+    const roomTypeId = String(data.roomTypeId || '').trim();
+    if (!date || !roomTypeId) continue;
+    map.set(`${date}_${roomTypeId}`, data);
+  }
+  return map;
 }
 
 async function resolveNegocioForHotelAuth(req) {
@@ -2098,6 +2200,246 @@ export function createHotelAppRouter() {
       }
     }
   );
+
+  router.get('/public/hotel/:slug/room-types', async (req, res) => {
+    try {
+      const slug = String(req.params?.slug || '').trim().toLowerCase();
+      if (!slug) {
+        return jsonError(res, 400, 'VALIDATION_ERROR', 'slug es obligatorio.');
+      }
+
+      const negocioRecord = await findNegocioBySlug(slug);
+      if (!negocioRecord) {
+        return jsonError(res, 404, 'NEGOCIO_NOT_FOUND', 'Negocio no encontrado.');
+      }
+
+      const negocioData = negocioRecord.data || {};
+      if (!isHotelAdvancedAppActive(negocioData)) {
+        return jsonError(res, 403, 'APP_NOT_ACTIVE', 'La app hotel no está activa para este negocio.');
+      }
+
+      const currency = normalizeCurrency(
+        negocioData?.advancedApp?.config?.currency || 'mxn'
+      );
+
+      const roomSnap = await negocioRecord.ref.collection('hotelRoomTypes').get();
+      const items = roomSnap.docs
+        .map((docSnap) => sanitizePublicRoomType(docSnap.id, docSnap.data() || {}))
+        .filter((item) => item.active !== false)
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'es'));
+
+      return res.json({
+        success: true,
+        data: {
+          negocio: sanitizeNegocio(negocioRecord.id, negocioData),
+          currency,
+          roomTypes: items,
+        },
+      });
+    } catch (error) {
+      console.error('[hotel public room-types] Error:', error);
+      return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudieron listar las habitaciones públicas.');
+    }
+  });
+
+  router.get('/public/hotel/:slug/calendar', async (req, res) => {
+    try {
+      const slug = String(req.params?.slug || '').trim().toLowerCase();
+      if (!slug) {
+        return jsonError(res, 400, 'VALIDATION_ERROR', 'slug es obligatorio.');
+      }
+
+      const requestedMonth = String(req.query?.month || '').trim();
+      const monthDate = parseMonthStrict(requestedMonth) || dayjs().startOf('month');
+      const monthKey = monthDate.format('YYYY-MM');
+      const startKey = monthDate.startOf('month').format('YYYY-MM-DD');
+      const endKey = monthDate.endOf('month').format('YYYY-MM-DD');
+
+      const negocioRecord = await findNegocioBySlug(slug);
+      if (!negocioRecord) {
+        return jsonError(res, 404, 'NEGOCIO_NOT_FOUND', 'Negocio no encontrado.');
+      }
+
+      const negocioData = negocioRecord.data || {};
+      if (!isHotelAdvancedAppActive(negocioData)) {
+        return jsonError(res, 403, 'APP_NOT_ACTIVE', 'La app hotel no está activa para este negocio.');
+      }
+
+      const roomSnap = await negocioRecord.ref.collection('hotelRoomTypes').get();
+      const roomTypes = roomSnap.docs
+        .map((docSnap) => sanitizePublicRoomType(docSnap.id, docSnap.data() || {}))
+        .filter((item) => item.active !== false);
+
+      const roomCount = roomTypes.length;
+      const totalUnits = roomTypes.reduce(
+        (acc, item) => acc + Math.max(1, Math.floor(toNumberSafe(item.unitsTotal, 1))),
+        0
+      );
+
+      const inventorySnap = await negocioRecord.ref.collection('hotelInventoryDaily').get();
+      const inventoryIndex = buildInventoryIndex(inventorySnap.docs);
+
+      const daysInMonth = monthDate.daysInMonth();
+      const days = [];
+
+      for (let day = 1; day <= daysInMonth; day += 1) {
+        const dateKey = monthDate.date(day).format('YYYY-MM-DD');
+
+        let availableUnits = 0;
+        let availableRoomTypes = 0;
+
+        for (const room of roomTypes) {
+          const docData = inventoryIndex.get(`${dateKey}_${room.id}`) || null;
+          const remaining = computeRemainingUnits({
+            inventoryData: docData,
+            fallbackUnits: room.unitsTotal,
+          });
+          if (remaining > 0) {
+            availableRoomTypes += 1;
+            availableUnits += remaining;
+          }
+        }
+
+        let level = 'none';
+        if (availableUnits > 0) {
+          const thresholdLow = Math.max(1, Math.round(Math.max(1, totalUnits) * 0.25));
+          level = availableUnits <= thresholdLow ? 'low' : 'high';
+        }
+
+        days.push({
+          date: dateKey,
+          day,
+          weekday: monthDate.date(day).day(),
+          availableUnits,
+          availableRoomTypes,
+          roomTypesTotal: roomCount,
+          level,
+        });
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          month: monthKey,
+          from: startKey,
+          to: endKey,
+          roomTypesTotal: roomCount,
+          totalUnits,
+          days,
+        },
+      });
+    } catch (error) {
+      console.error('[hotel public calendar] Error:', error);
+      return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo construir el calendario público.');
+    }
+  });
+
+  router.get('/public/hotel/:slug/availability', async (req, res) => {
+    try {
+      const slug = String(req.params?.slug || '').trim().toLowerCase();
+      if (!slug) {
+        return jsonError(res, 400, 'VALIDATION_ERROR', 'slug es obligatorio.');
+      }
+
+      const checkIn = String(req.query?.checkIn || '').trim();
+      const checkOut = String(req.query?.checkOut || '').trim();
+
+      if (!checkIn || !checkOut) {
+        return jsonError(res, 400, 'VALIDATION_ERROR', 'checkIn y checkOut son obligatorios.');
+      }
+
+      const nights = calculateNights(checkIn, checkOut);
+      if (!nights) {
+        return jsonError(res, 400, 'VALIDATION_ERROR', 'Rango de fechas inválido.');
+      }
+
+      if (nights > 60) {
+        return jsonError(res, 400, 'VALIDATION_ERROR', 'Rango de fechas demasiado amplio (máximo 60 noches).');
+      }
+
+      const negocioRecord = await findNegocioBySlug(slug);
+      if (!negocioRecord) {
+        return jsonError(res, 404, 'NEGOCIO_NOT_FOUND', 'Negocio no encontrado.');
+      }
+
+      const negocioData = negocioRecord.data || {};
+      if (!isHotelAdvancedAppActive(negocioData)) {
+        return jsonError(res, 403, 'APP_NOT_ACTIVE', 'La app hotel no está activa para este negocio.');
+      }
+
+      const currency = normalizeCurrency(
+        negocioData?.advancedApp?.config?.currency || 'mxn'
+      );
+
+      const roomSnap = await negocioRecord.ref.collection('hotelRoomTypes').get();
+      const roomTypes = roomSnap.docs
+        .map((docSnap) => sanitizePublicRoomType(docSnap.id, docSnap.data() || {}))
+        .filter((item) => item.active !== false);
+
+      const stayDates = listStayDates(checkIn, checkOut);
+      if (!stayDates.length) {
+        return jsonError(res, 400, 'VALIDATION_ERROR', 'Rango de fechas inválido.');
+      }
+
+      const inventorySnap = await negocioRecord.ref.collection('hotelInventoryDaily').get();
+      const inventoryIndex = buildInventoryIndex(inventorySnap.docs);
+
+      const availableRooms = roomTypes
+        .map((room) => {
+          let minRemaining = Number.MAX_SAFE_INTEGER;
+
+          for (const dateKey of stayDates) {
+            const data = inventoryIndex.get(`${dateKey}_${room.id}`) || null;
+            const remaining = computeRemainingUnits({
+              inventoryData: data,
+              fallbackUnits: room.unitsTotal,
+            });
+            if (remaining < minRemaining) {
+              minRemaining = remaining;
+            }
+          }
+
+          const unitsAvailable = Number.isFinite(minRemaining) && minRemaining >= 0
+            ? minRemaining
+            : 0;
+
+          const deposit = Math.max(0, toNumberSafe(room.baseRate, 0));
+          const total = Math.max(0, deposit * nights);
+
+          return {
+            ...room,
+            nights,
+            unitsAvailable,
+            available: unitsAvailable > 0,
+            deposit,
+            total,
+            currency,
+          };
+        })
+        .filter((room) => room.available)
+        .sort((a, b) => {
+          if (a.baseRate === b.baseRate) return String(a.name || '').localeCompare(String(b.name || ''), 'es');
+          return a.baseRate - b.baseRate;
+        });
+
+      return res.json({
+        success: true,
+        data: {
+          negocio: sanitizeNegocio(negocioRecord.id, negocioData),
+          checkIn,
+          checkOut,
+          nights,
+          currency,
+          availableRooms,
+          roomTypesTotal: roomTypes.length,
+          availableCount: availableRooms.length,
+        },
+      });
+    } catch (error) {
+      console.error('[hotel public availability] Error:', error);
+      return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo calcular disponibilidad pública.');
+    }
+  });
 
   router.post('/public/hotel/:slug/reservations/checkout', async (req, res) => {
     try {
