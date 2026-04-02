@@ -57,6 +57,18 @@ function normalizeDomain(value) {
   return domain;
 }
 
+function normalizeAbsoluteBaseUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  try {
+    const parsed = new URL(raw);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return '';
+  }
+}
+
 function extractRequestHost(req) {
   const host =
     req.get('x-request-host') ||
@@ -613,10 +625,27 @@ async function findAgentsByPhoneCandidates(negocioRef, phoneInput) {
 
 function pickCheckoutBaseUrl(req) {
   const origin = String(req.headers.origin || '').trim();
-  if (origin) return origin.replace(/\/+$/, '');
+  const originHost = normalizeDomain(origin);
+  if (origin && originHost && !isBaseHost(originHost)) {
+    return origin.replace(/\/+$/, '');
+  }
 
   const host = extractRequestHost(req);
-  if (!host) return '';
+  const configuredClientBaseUrl = [
+    process.env.CLIENT_PANEL_URL,
+    process.env.CLIENT_URL,
+    process.env.NEXT_PUBLIC_SITE_URL,
+    process.env.CLIENT_APP_BASE_URL,
+    process.env.SITE_PUBLIC_BASE_URL,
+  ]
+    .map((value) => normalizeAbsoluteBaseUrl(value))
+    .find(Boolean);
+
+  if (!host || isBaseHost(host)) {
+    if (configuredClientBaseUrl) return configuredClientBaseUrl;
+    if (origin) return origin.replace(/\/+$/, '');
+    if (!host) return '';
+  }
 
   const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').trim();
   return `${proto}://${host}`;
