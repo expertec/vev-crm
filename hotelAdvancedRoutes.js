@@ -225,6 +225,45 @@ function jsonError(res, status, code, message, details) {
   });
 }
 
+function parseStripeApiError(error, fallbackMessage) {
+  const statusFromStripe = Number(
+    error?.statusCode || error?.raw?.statusCode || error?.status || 0
+  );
+  const safeStatus =
+    Number.isInteger(statusFromStripe) && statusFromStripe >= 400 && statusFromStripe < 600
+      ? statusFromStripe
+      : 500;
+
+  const code =
+    String(
+      error?.raw?.code ||
+      error?.code ||
+      'STRIPE_API_ERROR'
+    ).trim() || 'STRIPE_API_ERROR';
+
+  const message =
+    String(
+      error?.raw?.message ||
+      error?.message ||
+      fallbackMessage ||
+      'Error de Stripe.'
+    ).trim() || fallbackMessage || 'Error de Stripe.';
+
+  const details = {
+    type: String(error?.type || error?.raw?.type || '').trim() || null,
+    declineCode: String(error?.decline_code || error?.raw?.decline_code || '').trim() || null,
+    param: String(error?.param || error?.raw?.param || '').trim() || null,
+    requestId: String(error?.requestId || error?.raw?.requestId || '').trim() || null,
+  };
+
+  return {
+    status: safeStatus,
+    code,
+    message,
+    details,
+  };
+}
+
 function base64UrlEncode(input) {
   const buffer = Buffer.isBuffer(input) ? input : Buffer.from(String(input));
   return buffer
@@ -632,6 +671,7 @@ function pickCheckoutBaseUrl(req) {
 
   const host = extractRequestHost(req);
   const configuredClientBaseUrl = [
+    process.env.HOTEL_CONNECT_RETURN_BASE_URL,
     process.env.CLIENT_PANEL_URL,
     process.env.CLIENT_URL,
     process.env.NEXT_PUBLIC_SITE_URL,
@@ -643,8 +683,8 @@ function pickCheckoutBaseUrl(req) {
 
   if (!host || isBaseHost(host)) {
     if (configuredClientBaseUrl) return configuredClientBaseUrl;
-    if (origin) return origin.replace(/\/+$/, '');
-    if (!host) return '';
+    // Evita enviar localhost a Stripe accountLinks (lo rechaza en Render/prod).
+    return 'https://negociosweb.mx';
   }
 
   const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').trim();
@@ -1701,13 +1741,11 @@ export function createHotelAppRouter() {
         });
       } catch (error) {
         console.error('[hotel stripe connect] Error consultando status:', error);
-        return jsonError(
-          res,
-          500,
-          'INTERNAL_ERROR',
-          'No se pudo consultar estado de Stripe Connect.',
-          error?.message || null
+        const stripeError = parseStripeApiError(
+          error,
+          'No se pudo consultar estado de Stripe Connect.'
         );
+        return jsonError(res, stripeError.status, stripeError.code, stripeError.message, stripeError.details);
       }
     }
   );
@@ -1800,13 +1838,11 @@ export function createHotelAppRouter() {
         });
       } catch (error) {
         console.error('[hotel stripe connect] Error iniciando onboarding:', error);
-        return jsonError(
-          res,
-          500,
-          'INTERNAL_ERROR',
-          'No se pudo iniciar onboarding de Stripe Connect.',
-          error?.message || null
+        const stripeError = parseStripeApiError(
+          error,
+          'No se pudo iniciar onboarding de Stripe Connect.'
         );
+        return jsonError(res, stripeError.status, stripeError.code, stripeError.message, stripeError.details);
       }
     }
   );
@@ -1843,13 +1879,11 @@ export function createHotelAppRouter() {
         });
       } catch (error) {
         console.error('[hotel stripe connect] Error creando login link:', error);
-        return jsonError(
-          res,
-          500,
-          'INTERNAL_ERROR',
-          'No se pudo abrir el panel de Stripe.',
-          error?.message || null
+        const stripeError = parseStripeApiError(
+          error,
+          'No se pudo abrir el panel de Stripe.'
         );
+        return jsonError(res, stripeError.status, stripeError.code, stripeError.message, stripeError.details);
       }
     }
   );
@@ -1891,13 +1925,11 @@ export function createHotelAppRouter() {
         });
       } catch (error) {
         console.error('[hotel stripe connect] Error desconectando cuenta:', error);
-        return jsonError(
-          res,
-          500,
-          'INTERNAL_ERROR',
-          'No se pudo desconectar Stripe Connect.',
-          error?.message || null
+        const stripeError = parseStripeApiError(
+          error,
+          'No se pudo desconectar Stripe Connect.'
         );
+        return jsonError(res, stripeError.status, stripeError.code, stripeError.message, stripeError.details);
       }
     }
   );
