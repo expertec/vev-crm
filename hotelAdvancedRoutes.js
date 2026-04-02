@@ -626,6 +626,86 @@ function formatCheckoutPathForHost(hostname) {
   return isBaseHost(hostname) ? '/cliente-login' : '/acceso';
 }
 
+function parseStripeFeePercent(value, fallback = 0) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(0, Math.min(100, numeric));
+}
+
+function sanitizeStripeConnectConfig(input = {}) {
+  const source = input && typeof input === 'object' ? input : {};
+  return {
+    accountId: String(source.accountId || '').trim(),
+    status: String(source.status || '').trim().toLowerCase() || 'not_connected',
+    onboardingComplete: source.onboardingComplete === true,
+    detailsSubmitted: source.detailsSubmitted === true,
+    chargesEnabled: source.chargesEnabled === true,
+    payoutsEnabled: source.payoutsEnabled === true,
+    configuredAt: parseTimestamp(source.configuredAt),
+    updatedAt: parseTimestamp(source.updatedAt),
+    platformFeePercent: parseStripeFeePercent(source.platformFeePercent, 0),
+  };
+}
+
+function readStripeConnectConfigFromNegocio(negocioData = {}) {
+  const appConfig =
+    negocioData?.advancedApp?.config &&
+    typeof negocioData.advancedApp.config === 'object'
+      ? negocioData.advancedApp.config
+      : {};
+  const paymentsConfig =
+    appConfig?.payments && typeof appConfig.payments === 'object'
+      ? appConfig.payments
+      : {};
+  const stripeConnect = paymentsConfig?.stripeConnect || appConfig?.stripeConnect || {};
+  return sanitizeStripeConnectConfig(stripeConnect);
+}
+
+async function saveStripeConnectConfig(negocioRef, negocioData, nextConfig = {}) {
+  const app = sanitizeAdvancedApp(negocioData?.advancedApp || {});
+  const currentConfig =
+    app.config && typeof app.config === 'object'
+      ? app.config
+      : {};
+  const paymentsConfig =
+    currentConfig.payments && typeof currentConfig.payments === 'object'
+      ? currentConfig.payments
+      : {};
+
+  const stripeConnectPayload = sanitizeStripeConnectConfig(nextConfig);
+  const now = Timestamp.now();
+
+  const merged = {
+    ...currentConfig,
+    payments: {
+      ...paymentsConfig,
+      stripeConnect: {
+        accountId: stripeConnectPayload.accountId || '',
+        status: stripeConnectPayload.status || 'not_connected',
+        onboardingComplete: stripeConnectPayload.onboardingComplete === true,
+        detailsSubmitted: stripeConnectPayload.detailsSubmitted === true,
+        chargesEnabled: stripeConnectPayload.chargesEnabled === true,
+        payoutsEnabled: stripeConnectPayload.payoutsEnabled === true,
+        platformFeePercent: stripeConnectPayload.platformFeePercent,
+        configuredAt:
+          stripeConnectPayload.configuredAt || now,
+        updatedAt: now,
+      },
+    },
+  };
+
+  await negocioRef.set(
+    {
+      advancedApp: {
+        ...(negocioData?.advancedApp || {}),
+        config: merged,
+      },
+      updatedAt: now,
+    },
+    { merge: true }
+  );
+}
+
 function validateCheckoutBody(body = {}) {
   const checkIn = String(body.checkIn || '').trim();
   const checkOut = String(body.checkOut || '').trim();
@@ -925,6 +1005,14 @@ function requirePermission(permissionKey) {
   };
 }
 
+function requireOwnerRole(req, res, next) {
+  const role = normalizeRole(req.hotelSession?.agentRole || '');
+  if (role !== ROLE_OWNER) {
+    return jsonError(res, 403, 'FORBIDDEN', 'Solo el owner puede realizar esta acción.');
+  }
+  return next();
+}
+
 async function ensureInventoryAvailable({ negocioRef, roomTypeId, stayDates, fallbackUnits }) {
   for (const dateKey of stayDates) {
     const inventoryId = buildInventoryDocId(dateKey, roomTypeId);
@@ -986,6 +1074,8 @@ async function confirmReservationAfterCheckout(session = {}) {
   const metadata = session.metadata || {};
   const negocioId = String(metadata.negocioId || '').trim();
   const reservationId = String(metadata.reservationId || '').trim();
+  const connectedAccountId = String(metadata.connectedAccountId || '').trim();
+  const paymentProvider = connectedAccountId ? 'stripe_connect' : 'stripe';
 
   if (!negocioId || !reservationId) {
     throw new Error('checkout.session.completed sin metadata de negocio/reserva.');
@@ -1072,7 +1162,8 @@ async function confirmReservationAfterCheckout(session = {}) {
       updatedAt: Timestamp.now(),
       payment: {
         status: 'paid',
-        provider: 'stripe',
+        provider: paymentProvider,
+        connectedAccountId: connectedAccountId || null,
         checkoutSessionId: String(session.id || '').trim() || null,
         paymentIntentId: String(session.payment_intent || '').trim() || null,
         amountReceived,
@@ -1501,6 +1592,7 @@ export function createHotelAppRouter() {
         advancedApp: sanitizeAdvancedApp(session.negocioData.advancedApp || {}),
         agent: sanitizeAgent(session.agentData || {}, session.agentId),
         role: session.agentRole,
+        permissions: session.permissions,
       },
     });
   });
@@ -1511,6 +1603,275 @@ export function createHotelAppRouter() {
       message: 'Sesión cerrada.',
     });
   });
+
+  router.get(
+    '/cliente/hotel/payments/stripe/status',
+    verifyHotelSession,
+    requireOwnerRole,
+    async (req, res) => {
+      try {
+        if (!isHotelAdvancedAppActive(req.hotelSession?.negocioData || {})) {
+          return jsonError(res, 403, 'APP_NOT_ACTIVE', 'La app hotel no está activa para este negocio.');
+        }
+
+        const negocioData = req.hotelSession.negocioData || {};
+        const stripeConnect = readStripeConnectConfigFromNegocio(negocioData);
+        const accountId = String(stripeConnect.accountId || '').trim();
+
+        if (!accountId) {
+          return res.json({
+            success: true,
+            data: {
+              connected: false,
+              accountId: '',
+              status: 'not_connected',
+              onboardingComplete: false,
+              detailsSubmitted: false,
+              chargesEnabled: false,
+              payoutsEnabled: false,
+              platformFeePercent: stripeConnect.platformFeePercent,
+            },
+          });
+        }
+
+        const account = await stripe.accounts.retrieve(accountId);
+        const detailsSubmitted = account?.details_submitted === true;
+        const chargesEnabled = account?.charges_enabled === true;
+        const payoutsEnabled = account?.payouts_enabled === true;
+        const onboardingComplete = detailsSubmitted && chargesEnabled;
+        const status = onboardingComplete ? 'active' : 'onboarding_pending';
+
+        await saveStripeConnectConfig(
+          req.hotelSession.negocioRef,
+          negocioData,
+          {
+            ...stripeConnect,
+            accountId,
+            status,
+            onboardingComplete,
+            detailsSubmitted,
+            chargesEnabled,
+            payoutsEnabled,
+          }
+        );
+
+        return res.json({
+          success: true,
+          data: {
+            connected: true,
+            accountId,
+            status,
+            onboardingComplete,
+            detailsSubmitted,
+            chargesEnabled,
+            payoutsEnabled,
+            country: String(account?.country || '').trim().toUpperCase() || 'MX',
+            defaultCurrency: normalizeCurrency(account?.default_currency || 'mxn'),
+            platformFeePercent: stripeConnect.platformFeePercent,
+          },
+        });
+      } catch (error) {
+        console.error('[hotel stripe connect] Error consultando status:', error);
+        return jsonError(
+          res,
+          500,
+          'INTERNAL_ERROR',
+          'No se pudo consultar estado de Stripe Connect.',
+          error?.message || null
+        );
+      }
+    }
+  );
+
+  router.post(
+    '/cliente/hotel/payments/stripe/connect/start',
+    verifyHotelSession,
+    requireOwnerRole,
+    async (req, res) => {
+      try {
+        if (!isHotelAdvancedAppActive(req.hotelSession?.negocioData || {})) {
+          return jsonError(res, 403, 'APP_NOT_ACTIVE', 'La app hotel no está activa para este negocio.');
+        }
+
+        const negocioId = req.hotelSession.negocioId;
+        const negocioData = req.hotelSession.negocioData || {};
+        const stripeConnect = readStripeConnectConfigFromNegocio(negocioData);
+        const platformFeePercent = parseStripeFeePercent(
+          req.body?.platformFeePercent,
+          stripeConnect.platformFeePercent
+        );
+
+        let accountId = String(stripeConnect.accountId || '').trim();
+        if (!accountId) {
+          const account = await stripe.accounts.create({
+            type: 'express',
+            country: 'MX',
+            email: String(
+              negocioData.contactEmail ||
+                negocioData.email ||
+                negocioData.advancedBrief?.email ||
+                ''
+            ).trim() || undefined,
+            business_type: 'individual',
+            capabilities: {
+              card_payments: { requested: true },
+              transfers: { requested: true },
+            },
+            metadata: {
+              appKey: APP_KEY_HOTEL,
+              negocioId,
+              negocioSlug: String(negocioData.slug || '').trim().toLowerCase(),
+            },
+          });
+          accountId = String(account.id || '').trim();
+        }
+
+        if (!accountId) {
+          return jsonError(
+            res,
+            500,
+            'INTERNAL_ERROR',
+            'No se pudo crear la cuenta conectada de Stripe.'
+          );
+        }
+
+        const host = extractRequestHost(req);
+        const baseUrl = pickCheckoutBaseUrl(req);
+        const panelPath = isBaseHost(host) ? '/cliente/hotel' : '/cliente/hotel';
+        const refreshUrl = `${baseUrl}${panelPath}?stripe_connect=refresh`;
+        const returnUrl = `${baseUrl}${panelPath}?stripe_connect=return`;
+
+        const link = await stripe.accountLinks.create({
+          account: accountId,
+          type: 'account_onboarding',
+          refresh_url: refreshUrl,
+          return_url: returnUrl,
+        });
+
+        await saveStripeConnectConfig(
+          req.hotelSession.negocioRef,
+          negocioData,
+          {
+            ...stripeConnect,
+            accountId,
+            status: 'onboarding_pending',
+            onboardingComplete: false,
+            platformFeePercent,
+          }
+        );
+
+        return res.status(201).json({
+          success: true,
+          data: {
+            accountId,
+            onboardingUrl: String(link.url || '').trim(),
+            status: 'onboarding_pending',
+            platformFeePercent,
+          },
+        });
+      } catch (error) {
+        console.error('[hotel stripe connect] Error iniciando onboarding:', error);
+        return jsonError(
+          res,
+          500,
+          'INTERNAL_ERROR',
+          'No se pudo iniciar onboarding de Stripe Connect.',
+          error?.message || null
+        );
+      }
+    }
+  );
+
+  router.post(
+    '/cliente/hotel/payments/stripe/dashboard-link',
+    verifyHotelSession,
+    requireOwnerRole,
+    async (req, res) => {
+      try {
+        if (!isHotelAdvancedAppActive(req.hotelSession?.negocioData || {})) {
+          return jsonError(res, 403, 'APP_NOT_ACTIVE', 'La app hotel no está activa para este negocio.');
+        }
+
+        const stripeConnect = readStripeConnectConfigFromNegocio(req.hotelSession.negocioData || {});
+        const accountId = String(stripeConnect.accountId || '').trim();
+        if (!accountId) {
+          return jsonError(
+            res,
+            409,
+            'STRIPE_NOT_CONNECTED',
+            'Este negocio aún no conecta su cuenta de Stripe.'
+          );
+        }
+
+        const link = await stripe.accounts.createLoginLink(accountId);
+
+        return res.json({
+          success: true,
+          data: {
+            accountId,
+            dashboardUrl: String(link.url || '').trim(),
+          },
+        });
+      } catch (error) {
+        console.error('[hotel stripe connect] Error creando login link:', error);
+        return jsonError(
+          res,
+          500,
+          'INTERNAL_ERROR',
+          'No se pudo abrir el panel de Stripe.',
+          error?.message || null
+        );
+      }
+    }
+  );
+
+  router.post(
+    '/cliente/hotel/payments/stripe/disconnect',
+    verifyHotelSession,
+    requireOwnerRole,
+    async (req, res) => {
+      try {
+        if (!isHotelAdvancedAppActive(req.hotelSession?.negocioData || {})) {
+          return jsonError(res, 403, 'APP_NOT_ACTIVE', 'La app hotel no está activa para este negocio.');
+        }
+
+        const stripeConnect = readStripeConnectConfigFromNegocio(req.hotelSession.negocioData || {});
+        const accountId = String(stripeConnect.accountId || '').trim();
+
+        await saveStripeConnectConfig(
+          req.hotelSession.negocioRef,
+          req.hotelSession.negocioData || {},
+          {
+            ...stripeConnect,
+            accountId: '',
+            status: 'not_connected',
+            onboardingComplete: false,
+            detailsSubmitted: false,
+            chargesEnabled: false,
+            payoutsEnabled: false,
+          }
+        );
+
+        return res.json({
+          success: true,
+          data: {
+            disconnected: true,
+            previousAccountId: accountId || null,
+          },
+          message: 'Cuenta de Stripe desconectada.',
+        });
+      } catch (error) {
+        console.error('[hotel stripe connect] Error desconectando cuenta:', error);
+        return jsonError(
+          res,
+          500,
+          'INTERNAL_ERROR',
+          'No se pudo desconectar Stripe Connect.',
+          error?.message || null
+        );
+      }
+    }
+  );
 
   router.get(
     '/cliente/hotel/room-types',
@@ -2507,6 +2868,49 @@ export function createHotelAppRouter() {
           req.body?.currency ||
           'mxn'
       );
+      const stripeConnectConfig = readStripeConnectConfigFromNegocio(negocioData);
+      const connectedAccountId = String(stripeConnectConfig.accountId || '').trim();
+      const platformFeePercent = parseStripeFeePercent(
+        req.body?.platformFeePercent,
+        stripeConnectConfig.platformFeePercent
+      );
+
+      let paymentProvider = 'stripe';
+      let paymentAccountId = '';
+      if (connectedAccountId) {
+        const account = await stripe.accounts.retrieve(connectedAccountId);
+        const detailsSubmitted = account?.details_submitted === true;
+        const chargesEnabled = account?.charges_enabled === true;
+        const payoutsEnabled = account?.payouts_enabled === true;
+        const onboardingComplete = detailsSubmitted && chargesEnabled;
+
+        await saveStripeConnectConfig(
+          negocioRecord.ref,
+          negocioData,
+          {
+            ...stripeConnectConfig,
+            accountId: connectedAccountId,
+            status: onboardingComplete ? 'active' : 'onboarding_pending',
+            onboardingComplete,
+            detailsSubmitted,
+            chargesEnabled,
+            payoutsEnabled,
+            platformFeePercent,
+          }
+        );
+
+        if (!onboardingComplete) {
+          return jsonError(
+            res,
+            409,
+            'STRIPE_CONNECT_INCOMPLETE',
+            'La cuenta de Stripe del negocio no ha completado onboarding.'
+          );
+        }
+
+        paymentProvider = 'stripe_connect';
+        paymentAccountId = connectedAccountId;
+      }
 
       const now = Timestamp.now();
       const reservationRef = await negocioRecord.ref.collection('hotelReservations').add({
@@ -2522,9 +2926,21 @@ export function createHotelAppRouter() {
         guestEmail,
         guestPhone,
         notes,
+        occupancy: {
+          adults: Math.max(0, Math.floor(toNumberSafe(req.body?.adults, 0))),
+          children: Math.max(0, Math.floor(toNumberSafe(req.body?.children, 0))),
+          totalGuests: Math.max(0, Math.floor(toNumberSafe(req.body?.totalGuests, 0))),
+          childrenAges: Array.isArray(req.body?.childrenAges)
+            ? req.body.childrenAges
+                .map((age) => Math.floor(toNumberSafe(age, -1)))
+                .filter((age) => age >= 0 && age <= 17)
+                .slice(0, 12)
+            : [],
+        },
         payment: {
           status: 'pending',
-          provider: 'stripe',
+          provider: paymentProvider,
+          connectedAccountId: paymentAccountId || null,
         },
         refundStatus: null,
         createdAt: now,
@@ -2543,8 +2959,12 @@ export function createHotelAppRouter() {
       )}`;
 
       const amountCents = Math.max(100, Math.round(deposit * 100));
+      const feeCents = Math.max(
+        0,
+        Math.round((amountCents * platformFeePercent) / 100)
+      );
 
-      const stripeSession = await stripe.checkout.sessions.create({
+      const checkoutPayload = {
         mode: 'payment',
         payment_method_types: ['card'],
         line_items: [
@@ -2569,18 +2989,36 @@ export function createHotelAppRouter() {
           roomTypeId,
           checkIn,
           checkOut,
+          paymentProvider,
+          connectedAccountId: paymentAccountId || '',
         },
         locale: 'es-419',
         ...(guestEmail ? { customer_email: guestEmail } : {}),
-      });
+      };
+
+      if (paymentProvider === 'stripe_connect' && feeCents > 0 && feeCents < amountCents) {
+        checkoutPayload.payment_intent_data = {
+          application_fee_amount: feeCents,
+        };
+      }
+
+      const stripeSession =
+        paymentProvider === 'stripe_connect'
+          ? await stripe.checkout.sessions.create(
+              checkoutPayload,
+              { stripeAccount: paymentAccountId }
+            )
+          : await stripe.checkout.sessions.create(checkoutPayload);
 
       await reservationRef.set(
         {
           payment: {
             status: 'pending',
-            provider: 'stripe',
+            provider: paymentProvider,
+            connectedAccountId: paymentAccountId || null,
             checkoutSessionId: String(stripeSession.id || ''),
             checkoutUrl: String(stripeSession.url || ''),
+            platformFeePercent,
           },
           updatedAt: Timestamp.now(),
         },
