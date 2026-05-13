@@ -13,6 +13,7 @@ import ffprobeInstaller from '@ffprobe-installer/ffprobe';
 import dayjs from 'dayjs';
 import slugify from 'slugify';
 import axios from 'axios';
+import { createHash } from 'node:crypto';
 import { Timestamp } from 'firebase-admin/firestore';
 
 dotenv.config();
@@ -1293,6 +1294,446 @@ async function createFinanceTransaction({
   };
 }
 
+
+const DEFAULT_META_CUSTOMER_MARKERS = [
+  'cliente',
+  'clientes',
+  'customer',
+  'customers',
+  'ganado',
+  'ganada',
+  'cerrado_ganado',
+  'closed_won',
+  'compro',
+  'comprado',
+  'compra_confirmada',
+];
+
+function normalizeMetaKey(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function splitCsvEnv(value = '', fallback = []) {
+  const items = String(value || '')
+    .split(/[;,\n]+/)
+    .map((item) => normalizeMetaKey(item))
+    .filter(Boolean);
+
+  const base = items.length > 0 ? items : fallback.map((item) => normalizeMetaKey(item)).filter(Boolean);
+  return new Set(base);
+}
+
+function getMetaCapiConfig() {
+  const datasetId = String(
+    process.env.META_CAPI_DATASET_ID
+      || process.env.META_DATASET_ID
+      || process.env.META_PIXEL_ID
+      || ''
+  ).trim();
+  const accessToken = String(
+    process.env.META_CAPI_ACCESS_TOKEN
+      || process.env.META_ACCESS_TOKEN
+      || ''
+  ).trim();
+  const graphVersion = String(process.env.META_CAPI_GRAPH_VERSION || 'v21.0').trim() || 'v21.0';
+  const actionSource = String(process.env.META_CAPI_ACTION_SOURCE || 'system_generated').trim() || 'system_generated';
+  const customerEventName = String(process.env.META_CAPI_CUSTOMER_EVENT_NAME || 'CRMCustomer').trim() || 'CRMCustomer';
+  const purchaseEventName = String(process.env.META_CAPI_PURCHASE_EVENT_NAME || 'Purchase').trim() || 'Purchase';
+  const testEventCode = String(process.env.META_CAPI_TEST_EVENT_CODE || '').trim();
+  const enabled = parseBooleanInput(
+    process.env.META_CAPI_ENABLED,
+    Boolean(datasetId && accessToken)
+  );
+
+  return {
+    enabled,
+    datasetId,
+    accessToken,
+    graphVersion,
+    actionSource,
+    customerEventName,
+    purchaseEventName,
+    testEventCode,
+    customerMarkers: splitCsvEnv(
+      process.env.META_CAPI_CUSTOMER_MARKERS,
+      DEFAULT_META_CUSTOMER_MARKERS
+    ),
+  };
+}
+
+function hashSha256(value = '') {
+  return createHash('sha256').update(String(value)).digest('hex');
+}
+
+function normalizeMetaEmail(value = '') {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeMetaPhone(value = '') {
+  if (!value) return '';
+  const e164 = toE164(value);
+  return normalizePhoneDigits(e164 || value);
+}
+
+function splitPersonName(fullName = '') {
+  const parts = String(fullName || '').trim().replace(/\s+/g, ' ').split(' ').filter(Boolean);
+  if (parts.length === 0) return { first: '', last: '' };
+  return {
+    first: parts[0] || '',
+    last: parts.slice(1).join(' '),
+  };
+}
+
+function buildMetaUserData({ leadId = '', phone = '', email = '', name = '' } = {}) {
+  const userData = {};
+  const normalizedPhone = normalizeMetaPhone(phone);
+  const normalizedEmail = normalizeMetaEmail(email);
+  const { first, last } = splitPersonName(name);
+
+  if (normalizedPhone) userData.ph = [hashSha256(normalizedPhone)];
+  if (normalizedEmail) userData.em = [hashSha256(normalizedEmail)];
+  if (first) userData.fn = hashSha256(first.trim().toLowerCase());
+  if (last) userData.ln = hashSha256(last.trim().toLowerCase());
+
+  const externalIdSeed = String(leadId || normalizedPhone || normalizedEmail).trim();
+  if (externalIdSeed) userData.external_id = hashSha256(externalIdSeed);
+
+  return userData;
+}
+
+function hasMetaUserData(userData = {}) {
+  return Boolean(
+    userData?.external_id
+      || (Array.isArray(userData?.ph) && userData.ph.length > 0)
+      || (Array.isArray(userData?.em) && userData.em.length > 0)
+  );
+}
+
+function shouldTrackMetaCustomer({ status = '', stageName = '', stageKey = '' } = {}) {
+  const config = getMetaCapiConfig();
+  const candidates = [status, stageName, stageKey]
+    .map((item) => normalizeMetaKey(item))
+    .filter(Boolean);
+
+  return candidates.some((candidate) => config.customerMarkers.has(candidate));
+}
+
+async function postMetaConversionEvent({
+  eventName = '',
+  eventId = '',
+  eventTime = Math.floor(Date.now() / 1000),
+  userData = {},
+  customData = {},
+  requestContext = {},
+} = {}) {
+  const config = getMetaCapiConfig();
+  if (!config.enabled || !config.datasetId || !config.accessToken) {
+    return { ok: false, skipped: true, reason: 'not-configured' };
+  }
+  if (!eventName) {
+    return { ok: false, skipped: true, reason: 'missing-event-name' };
+  }
+  if (!hasMetaUserData(userData)) {
+    return { ok: false, skipped: true, reason: 'missing-user-data' };
+  }
+
+  const payload = {
+    data: [
+      {
+        event_name: eventName,
+        event_time: eventTime,
+        event_id: eventId,
+        action_source: config.actionSource,
+        user_data: {
+          ...userData,
+          ...(requestContext.ip ? { client_ip_address: String(requestContext.ip) } : {}),
+          ...(requestContext.userAgent ? { client_user_agent: String(requestContext.userAgent) } : {}),
+        },
+        custom_data: customData,
+      },
+    ],
+  };
+
+  if (config.testEventCode) {
+    payload.test_event_code = config.testEventCode;
+  }
+
+  const url = new URL('https://graph.facebook.com/' + config.graphVersion + '/' + config.datasetId + '/events');
+  url.searchParams.set('access_token', config.accessToken);
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = String(
+      body?.error?.message
+        || body?.message
+        || body?.error_user_msg
+        || ''
+    ).trim();
+    throw new Error(detail || 'Meta Conversions API HTTP ' + response.status);
+  }
+
+  return {
+    ok: true,
+    skipped: false,
+    body,
+  };
+}
+
+async function trackLeadCustomerEvent({
+  leadId = '',
+  leadPhone = '',
+  negocioId = '',
+  status = '',
+  stageName = '',
+  stageKey = '',
+  source = 'crm',
+  requestContext = {},
+} = {}) {
+  const config = getMetaCapiConfig();
+  if (!config.enabled) {
+    return { ok: false, skipped: true, reason: 'not-configured' };
+  }
+  if (!shouldTrackMetaCustomer({ status, stageName, stageKey })) {
+    return { ok: false, skipped: true, reason: 'no-match' };
+  }
+
+  let leadRef = null;
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone: leadPhone });
+    leadRef = leadCtx?.leadRef || null;
+    if (!leadRef || !leadCtx?.leadId) {
+      return { ok: false, skipped: true, reason: 'lead-not-found' };
+    }
+
+    const leadSnap = leadCtx.leadSnap || await leadRef.get();
+    if (!leadSnap.exists) {
+      return { ok: false, skipped: true, reason: 'lead-not-found' };
+    }
+
+    const leadData = leadSnap.data() || {};
+    if (leadData?.metaConversions?.customer?.sentAt) {
+      return { ok: false, skipped: true, reason: 'already-sent' };
+    }
+
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    const finalStatus = String(status || leadData.estado || '').trim();
+    const finalStageKey = String(stageKey || leadData.etapa || '').trim();
+    const finalStageName = String(stageName || leadData.etapaNombre || '').trim();
+    const displayName = String(
+      leadData.nombre
+        || negocioCtx.negocioData?.companyInfo
+        || ''
+    ).trim();
+    const email = String(negocioCtx.negocioData?.contactEmail || '').trim();
+    const userData = buildMetaUserData({
+      leadId: leadCtx.leadId,
+      phone: leadCtx.phoneDigits || leadData.telefono || '',
+      email,
+      name: displayName,
+    });
+
+    if (!hasMetaUserData(userData)) {
+      return { ok: false, skipped: true, reason: 'missing-user-data' };
+    }
+
+    const eventTime = Math.floor(Date.now() / 1000);
+    const eventId = 'crm_customer:' + normalizeMetaKey(leadCtx.leadId || leadCtx.phoneDigits || 'lead') + ':' + eventTime;
+    const result = await postMetaConversionEvent({
+      eventName: config.customerEventName,
+      eventId,
+      eventTime,
+      userData,
+      customData: {
+        source: String(source || 'crm').trim(),
+        lead_id: String(leadCtx.leadId || ''),
+        lead_status: finalStatus,
+        stage_key: finalStageKey,
+        stage_name: finalStageName,
+        negocio_id: String(negocioCtx.negocioId || '').trim(),
+        channel: 'whatsapp_crm',
+      },
+      requestContext,
+    });
+
+    await leadRef.set(
+      {
+        metaConversions: {
+          customer: {
+            sentAt: Timestamp.now(),
+            lastAttemptAt: Timestamp.now(),
+            lastError: '',
+            eventId,
+            eventName: config.customerEventName,
+            status: finalStatus,
+            stageKey: finalStageKey,
+            stageName: finalStageName,
+            source: String(source || 'crm').trim(),
+            fbtraceId: String(result?.body?.fbtrace_id || '').trim(),
+          },
+        },
+      },
+      { merge: true }
+    );
+
+    return { ok: true, skipped: false, eventId };
+  } catch (error) {
+    console.error('[meta-capi/customer] Error:', error?.message || error);
+    if (leadRef) {
+      await leadRef.set(
+        {
+          metaConversions: {
+            customer: {
+              lastAttemptAt: Timestamp.now(),
+              lastError: String(error?.message || error),
+              source: String(source || 'crm').trim(),
+            },
+          },
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
+    return { ok: false, skipped: false, error: String(error?.message || error) };
+  }
+}
+
+async function trackServicePurchaseEvent({
+  service = null,
+  source = 'finance',
+  requestContext = {},
+} = {}) {
+  const config = getMetaCapiConfig();
+  if (!config.enabled) {
+    return { ok: false, skipped: true, reason: 'not-configured' };
+  }
+
+  const serviceId = String(service?.id || '').trim();
+  if (!serviceId) {
+    return { ok: false, skipped: true, reason: 'missing-service-id' };
+  }
+
+  const serviceRef = db.collection(FINANCE_SERVICES_COLLECTION).doc(serviceId);
+  try {
+    const serviceSnap = await serviceRef.get();
+    if (!serviceSnap.exists) {
+      return { ok: false, skipped: true, reason: 'service-not-found' };
+    }
+
+    const rawService = serviceSnap.data() || {};
+    if (rawService?.metaConversions?.purchase?.sentAt) {
+      return { ok: false, skipped: true, reason: 'already-sent' };
+    }
+
+    const currentService = serializeFinanceService(serviceSnap.id, rawService);
+    if (!currentService || currentService.status !== 'pagado') {
+      return { ok: false, skipped: true, reason: 'service-not-paid' };
+    }
+
+    const leadCtx = await resolveLeadByIdentity({
+      leadId: currentService.leadId,
+      phone: currentService.leadPhone,
+    });
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId: currentService.negocioId,
+      leadId: leadCtx?.leadId || currentService.leadId,
+      phoneDigits: leadCtx?.phoneDigits || currentService.leadPhone,
+    });
+
+    const displayName = String(
+      currentService.clientName
+        || leadCtx?.leadData?.nombre
+        || negocioCtx.negocioData?.companyInfo
+        || ''
+    ).trim();
+    const email = String(negocioCtx.negocioData?.contactEmail || '').trim();
+    const userData = buildMetaUserData({
+      leadId: leadCtx?.leadId || currentService.leadId,
+      phone: leadCtx?.phoneDigits || currentService.leadPhone,
+      email,
+      name: displayName,
+    });
+
+    if (!hasMetaUserData(userData)) {
+      return { ok: false, skipped: true, reason: 'missing-user-data' };
+    }
+
+    const eventDate = currentService.lastPaymentAt || currentService.updatedAt || new Date().toISOString();
+    const eventTime = Math.floor(new Date(eventDate).getTime() / 1000) || Math.floor(Date.now() / 1000);
+    const eventId = 'purchase:' + serviceId + ':' + eventTime;
+    const result = await postMetaConversionEvent({
+      eventName: config.purchaseEventName,
+      eventId,
+      eventTime,
+      userData,
+      customData: {
+        source: String(source || 'finance').trim(),
+        value: Number(currentService.totalAmount || 0),
+        currency: String(currentService.currency || 'MXN').trim() || 'MXN',
+        order_id: serviceId,
+        content_name: String(currentService.serviceName || 'Servicio CRM').trim(),
+        lead_id: String(leadCtx?.leadId || currentService.leadId || '').trim(),
+        negocio_id: String(negocioCtx.negocioId || currentService.negocioId || '').trim(),
+        channel: 'whatsapp_crm',
+      },
+      requestContext,
+    });
+
+    await serviceRef.set(
+      {
+        metaConversions: {
+          purchase: {
+            sentAt: Timestamp.now(),
+            lastAttemptAt: Timestamp.now(),
+            lastError: '',
+            eventId,
+            eventName: config.purchaseEventName,
+            source: String(source || 'finance').trim(),
+            value: Number(currentService.totalAmount || 0),
+            currency: String(currentService.currency || 'MXN').trim() || 'MXN',
+            fbtraceId: String(result?.body?.fbtrace_id || '').trim(),
+          },
+        },
+      },
+      { merge: true }
+    );
+
+    return { ok: true, skipped: false, eventId };
+  } catch (error) {
+    console.error('[meta-capi/purchase] Error:', error?.message || error);
+    await serviceRef.set(
+      {
+        metaConversions: {
+          purchase: {
+            lastAttemptAt: Timestamp.now(),
+            lastError: String(error?.message || error),
+            source: String(source || 'finance').trim(),
+          },
+        },
+      },
+      { merge: true }
+    ).catch(() => {});
+
+    return { ok: false, skipped: false, error: String(error?.message || error) };
+  }
+}
+
 function getVercelHeaders() {
   const token = String(process.env.VERCEL_TOKEN || '').trim();
   if (!token) throw new Error('Falta VERCEL_TOKEN');
@@ -1926,6 +2367,51 @@ app.post('/api/admin/custom-domain', async (req, res) => {
     return res.json({ success: true, ...sync });
   } catch (error) {
     console.error('[admin/custom-domain] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/leads/:leadId/status', async (req, res) => {
+  const requestedLeadId = String(req.params?.leadId || '').trim();
+  const { status = '', phone = '', negocioId = '' } = req.body || {};
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({
+      leadId: requestedLeadId,
+      phone,
+    });
+    if (!leadCtx?.leadRef || !leadCtx?.leadId) {
+      return res.status(404).json({ error: 'Lead no encontrado.' });
+    }
+
+    const nextStatus = String(status || '').trim().slice(0, 80);
+    await leadCtx.leadRef.set(
+      {
+        estado: nextStatus,
+        lastStatusChangeAt: new Date(),
+      },
+      { merge: true }
+    );
+
+    await trackLeadCustomerEvent({
+      leadId: leadCtx.leadId,
+      leadPhone: leadCtx.phoneDigits || phone || '',
+      negocioId,
+      status: nextStatus,
+      source: 'manual-status',
+      requestContext: {
+        ip: req.ip,
+        userAgent: req.get('user-agent') || '',
+      },
+    });
+
+    return res.json({
+      success: true,
+      leadId: leadCtx.leadId,
+      status: nextStatus,
+    });
+  } catch (error) {
+    console.error('[crm/leads/status] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
@@ -3119,6 +3605,17 @@ app.post('/api/crm/finance/services', async (req, res) => {
       initialPayment = serializeFinanceTransaction(initialTxRef.id, initialTxSnap.data() || {});
     }
 
+    if (createdService?.status === 'pagado') {
+      await trackServicePurchaseEvent({
+        service: createdService,
+        source: initialPayment ? 'finance-service-create-initial-payment' : 'finance-service-create',
+        requestContext: {
+          ip: req.ip,
+          userAgent: req.get('user-agent') || '',
+        },
+      });
+    }
+
     return res.status(201).json({
       success: true,
       service: createdService,
@@ -3224,10 +3721,22 @@ app.post('/api/crm/finance/services/:serviceId', async (req, res) => {
 
     await serviceRef.set(patch, { merge: true });
     const updatedSnap = await serviceRef.get();
+    const updatedService = serializeFinanceService(updatedSnap.id, updatedSnap.data() || {});
+
+    if (updatedService?.status === 'pagado' && current.status !== 'pagado') {
+      await trackServicePurchaseEvent({
+        service: updatedService,
+        source: 'finance-service-update',
+        requestContext: {
+          ip: req.ip,
+          userAgent: req.get('user-agent') || '',
+        },
+      });
+    }
 
     return res.json({
       success: true,
-      service: serializeFinanceService(updatedSnap.id, updatedSnap.data() || {}),
+      service: updatedService,
     });
   } catch (error) {
     console.error('[crm/finance/services:update] Error:', error);
@@ -3327,6 +3836,17 @@ app.post('/api/crm/finance/services/:serviceId/payments', async (req, res) => {
       createdBy,
       affectService: true,
     });
+
+    if (result?.service?.status === 'pagado') {
+      await trackServicePurchaseEvent({
+        service: result.service,
+        source: 'finance-service-payment',
+        requestContext: {
+          ip: req.ip,
+          userAgent: req.get('user-agent') || '',
+        },
+      });
+    }
 
     return res.status(201).json({
       success: true,
@@ -4511,6 +5031,25 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
     }
 
     await leadRef.set(leadPatch, { merge: true });
+
+    const nextLeadStatus = !clearStage
+      ? String(leadPatch.estado || currentData.estado || '').trim()
+      : '';
+
+    if (!clearStage) {
+      await trackLeadCustomerEvent({
+        leadId: finalLeadId,
+        leadPhone: phoneDigits || currentData.telefono || '',
+        status: nextLeadStatus,
+        stageName,
+        stageKey,
+        source: 'apply-stage',
+        requestContext: {
+          ip: req.ip,
+          userAgent: req.get('user-agent') || '',
+        },
+      });
+    }
 
     let scheduled = false;
     if (!clearStage && sequenceTrigger && !shouldStopSequences && !isClosed && hasReachableDestination) {

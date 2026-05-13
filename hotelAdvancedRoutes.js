@@ -1,6 +1,7 @@
 import express from 'express';
 import crypto from 'crypto';
 import dayjs from 'dayjs';
+import Stripe from 'stripe';
 import { Timestamp } from 'firebase-admin/firestore';
 import { db } from './firebaseAdmin.js';
 import { normalizarTelefono } from './pinUtils.js';
@@ -24,6 +25,17 @@ const BASE_HOSTS = new Set([
 const ROLE_OWNER = 'owner';
 const ROLE_MANAGER = 'manager';
 const ROLE_AGENT = 'agent';
+
+const hotelStripe = (() => {
+  const dedicatedKey = String(
+    process.env.STRIPE_CONNECT_SECRET_KEY ||
+    process.env.HOTEL_STRIPE_SECRET_KEY ||
+    ''
+  ).trim();
+
+  if (!dedicatedKey) return stripe;
+  return new Stripe(dedicatedKey);
+})();
 
 function toLowerSafe(value) {
   return String(value || '').trim().toLowerCase();
@@ -1251,7 +1263,7 @@ export async function hotelStripeWebhook(req, res) {
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
     if (signature && webhookSecret && Buffer.isBuffer(req.body)) {
-      event = stripe.webhooks.constructEvent(req.body, signature, webhookSecret);
+      event = hotelStripe.webhooks.constructEvent(req.body, signature, webhookSecret);
     } else if (Buffer.isBuffer(req.body)) {
       const parsed = JSON.parse(req.body.toString('utf8'));
       event = parsed && typeof parsed === 'object' ? parsed : null;
@@ -1703,7 +1715,7 @@ export function createHotelAppRouter() {
           });
         }
 
-        const account = await stripe.accounts.retrieve(accountId);
+        const account = await hotelStripe.accounts.retrieve(accountId);
         const detailsSubmitted = account?.details_submitted === true;
         const chargesEnabled = account?.charges_enabled === true;
         const payoutsEnabled = account?.payouts_enabled === true;
@@ -1770,7 +1782,7 @@ export function createHotelAppRouter() {
 
         let accountId = String(stripeConnect.accountId || '').trim();
         if (!accountId) {
-          const account = await stripe.accounts.create({
+          const account = await hotelStripe.accounts.create({
             type: 'express',
             country: 'MX',
             email: String(
@@ -1808,7 +1820,7 @@ export function createHotelAppRouter() {
         const refreshUrl = `${baseUrl}${panelPath}?stripe_connect=refresh`;
         const returnUrl = `${baseUrl}${panelPath}?stripe_connect=return`;
 
-        const link = await stripe.accountLinks.create({
+        const link = await hotelStripe.accountLinks.create({
           account: accountId,
           type: 'account_onboarding',
           refresh_url: refreshUrl,
@@ -1868,7 +1880,7 @@ export function createHotelAppRouter() {
           );
         }
 
-        const link = await stripe.accounts.createLoginLink(accountId);
+        const link = await hotelStripe.accounts.createLoginLink(accountId);
 
         return res.json({
           success: true,
@@ -2939,7 +2951,7 @@ export function createHotelAppRouter() {
       let paymentProvider = 'stripe';
       let paymentAccountId = '';
       if (connectedAccountId) {
-        const account = await stripe.accounts.retrieve(connectedAccountId);
+          const account = await hotelStripe.accounts.retrieve(connectedAccountId);
         const detailsSubmitted = account?.details_submitted === true;
         const chargesEnabled = account?.charges_enabled === true;
         const payoutsEnabled = account?.payouts_enabled === true;
@@ -3065,11 +3077,11 @@ export function createHotelAppRouter() {
 
       const stripeSession =
         paymentProvider === 'stripe_connect'
-          ? await stripe.checkout.sessions.create(
+          ? await hotelStripe.checkout.sessions.create(
               checkoutPayload,
               { stripeAccount: paymentAccountId }
             )
-          : await stripe.checkout.sessions.create(checkoutPayload);
+          : await hotelStripe.checkout.sessions.create(checkoutPayload);
 
       await reservationRef.set(
         {

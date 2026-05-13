@@ -4,3 +4,7 @@
 /node_modules
 /.pnp
 .pnp.js
+
+# local model/binary artifacts
+*.gguf
+llamafile-*
