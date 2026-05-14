@@ -1328,6 +1328,29 @@ function splitCsvEnv(value = '', fallback = []) {
   return new Set(base);
 }
 
+function normalizeMetaOptionalEventName(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  const normalized = raw.toLowerCase();
+  if (['0', 'false', 'off', 'none', 'disabled'].includes(normalized)) return '';
+  return raw;
+}
+
+function logMetaCapiOutcome(scope = '', details = {}) {
+  const suffix = Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(' ');
+
+  if (suffix) {
+    console.log(`[meta-capi/${scope}] ${suffix}`);
+    return;
+  }
+
+  console.log(`[meta-capi/${scope}]`);
+}
+
 function getMetaCapiConfig() {
   const datasetId = String(
     process.env.META_CAPI_DATASET_ID
@@ -1343,6 +1366,9 @@ function getMetaCapiConfig() {
   const graphVersion = String(process.env.META_CAPI_GRAPH_VERSION || 'v21.0').trim() || 'v21.0';
   const actionSource = String(process.env.META_CAPI_ACTION_SOURCE || 'system_generated').trim() || 'system_generated';
   const customerEventName = String(process.env.META_CAPI_CUSTOMER_EVENT_NAME || 'CRMCustomer').trim() || 'CRMCustomer';
+  const customerMirrorEventName = normalizeMetaOptionalEventName(
+    process.env.META_CAPI_CUSTOMER_STANDARD_EVENT_NAME || 'CompleteRegistration'
+  );
   const purchaseEventName = String(process.env.META_CAPI_PURCHASE_EVENT_NAME || 'Purchase').trim() || 'Purchase';
   const testEventCode = String(process.env.META_CAPI_TEST_EVENT_CODE || '').trim();
   const enabled = parseBooleanInput(
@@ -1357,6 +1383,7 @@ function getMetaCapiConfig() {
     graphVersion,
     actionSource,
     customerEventName,
+    customerMirrorEventName,
     purchaseEventName,
     testEventCode,
     customerMarkers: splitCsvEnv(
@@ -1504,9 +1531,11 @@ async function trackLeadCustomerEvent({
 } = {}) {
   const config = getMetaCapiConfig();
   if (!config.enabled) {
+    logMetaCapiOutcome('customer', { status: 'skip', reason: 'not-configured', lead: leadId || leadPhone });
     return { ok: false, skipped: true, reason: 'not-configured' };
   }
   if (!shouldTrackMetaCustomer({ status, stageName, stageKey })) {
+    logMetaCapiOutcome('customer', { status: 'skip', reason: 'no-match', lead: leadId || leadPhone, source });
     return { ok: false, skipped: true, reason: 'no-match' };
   }
 
@@ -1515,18 +1544,24 @@ async function trackLeadCustomerEvent({
     const leadCtx = await resolveLeadByIdentity({ leadId, phone: leadPhone });
     leadRef = leadCtx?.leadRef || null;
     if (!leadRef || !leadCtx?.leadId) {
+      logMetaCapiOutcome('customer', { status: 'skip', reason: 'lead-not-found', lead: leadId || leadPhone, source });
       return { ok: false, skipped: true, reason: 'lead-not-found' };
     }
 
     const leadSnap = leadCtx.leadSnap || await leadRef.get();
     if (!leadSnap.exists) {
+      logMetaCapiOutcome('customer', { status: 'skip', reason: 'lead-not-found', lead: leadCtx?.leadId || leadId || leadPhone, source });
       return { ok: false, skipped: true, reason: 'lead-not-found' };
     }
 
     const leadData = leadSnap.data() || {};
-    if (leadData?.metaConversions?.customer?.sentAt) {
-      return { ok: false, skipped: true, reason: 'already-sent' };
-    }
+    const customerMeta =
+      leadData?.metaConversions?.customer && typeof leadData.metaConversions.customer === 'object'
+        ? leadData.metaConversions.customer
+        : {};
+    const primaryAlreadySent = Boolean(customerMeta?.sentAt);
+    const mirrorConfigured = Boolean(config.customerMirrorEventName);
+    const mirrorAlreadySent = mirrorConfigured ? Boolean(customerMeta?.mirrorSentAt) : true;
 
     const negocioCtx = await resolveNegocioByIdentity({
       negocioId,
@@ -1551,49 +1586,117 @@ async function trackLeadCustomerEvent({
     });
 
     if (!hasMetaUserData(userData)) {
+      logMetaCapiOutcome('customer', {
+        status: 'skip',
+        reason: 'missing-user-data',
+        lead: leadCtx.leadId,
+        source,
+      });
       return { ok: false, skipped: true, reason: 'missing-user-data' };
     }
 
     const eventTime = Math.floor(Date.now() / 1000);
-    const eventId = 'crm_customer:' + normalizeMetaKey(leadCtx.leadId || leadCtx.phoneDigits || 'lead') + ':' + eventTime;
-    const result = await postMetaConversionEvent({
-      eventName: config.customerEventName,
-      eventId,
-      eventTime,
-      userData,
-      customData: {
-        source: String(source || 'crm').trim(),
-        lead_id: String(leadCtx.leadId || ''),
-        lead_status: finalStatus,
-        stage_key: finalStageKey,
-        stage_name: finalStageName,
-        negocio_id: String(negocioCtx.negocioId || '').trim(),
-        channel: 'whatsapp_crm',
-      },
-      requestContext,
-    });
+    const eventSeed = normalizeMetaKey(leadCtx.leadId || leadCtx.phoneDigits || 'lead');
+    const sendPrimary = !primaryAlreadySent;
+    const sendMirror = mirrorConfigured && !mirrorAlreadySent;
+
+    if (!sendPrimary && !sendMirror) {
+      logMetaCapiOutcome('customer', {
+        status: 'skip',
+        reason: 'already-sent',
+        lead: leadCtx.leadId,
+        source,
+      });
+      return { ok: false, skipped: true, reason: 'already-sent' };
+    }
+
+    const baseCustomData = {
+      source: String(source || 'crm').trim(),
+      lead_id: String(leadCtx.leadId || ''),
+      lead_status: finalStatus,
+      stage_key: finalStageKey,
+      stage_name: finalStageName,
+      negocio_id: String(negocioCtx.negocioId || '').trim(),
+      channel: 'whatsapp_crm',
+    };
+
+    let primaryResult = null;
+    let mirrorResult = null;
+    let eventId = String(customerMeta?.eventId || '').trim();
+    let mirrorEventId = String(customerMeta?.mirrorEventId || '').trim();
+
+    if (sendPrimary) {
+      eventId = `crm_customer:${eventSeed}:${eventTime}`;
+      primaryResult = await postMetaConversionEvent({
+        eventName: config.customerEventName,
+        eventId,
+        eventTime,
+        userData,
+        customData: baseCustomData,
+        requestContext,
+      });
+    }
+
+    if (sendMirror) {
+      mirrorEventId = `crm_customer_alias:${eventSeed}:${eventTime}`;
+      mirrorResult = await postMetaConversionEvent({
+        eventName: config.customerMirrorEventName,
+        eventId: mirrorEventId,
+        eventTime,
+        userData,
+        customData: baseCustomData,
+        requestContext,
+      });
+    }
 
     await leadRef.set(
       {
         metaConversions: {
           customer: {
-            sentAt: Timestamp.now(),
             lastAttemptAt: Timestamp.now(),
             lastError: '',
-            eventId,
-            eventName: config.customerEventName,
             status: finalStatus,
             stageKey: finalStageKey,
             stageName: finalStageName,
             source: String(source || 'crm').trim(),
-            fbtraceId: String(result?.body?.fbtrace_id || '').trim(),
+            ...(sendPrimary
+              ? {
+                  sentAt: Timestamp.now(),
+                  eventId,
+                  eventName: config.customerEventName,
+                  fbtraceId: String(primaryResult?.body?.fbtrace_id || '').trim(),
+                }
+              : {}),
+            ...(sendMirror
+              ? {
+                  mirrorSentAt: Timestamp.now(),
+                  mirrorEventId,
+                  mirrorEventName: config.customerMirrorEventName,
+                  mirrorFbtraceId: String(mirrorResult?.body?.fbtrace_id || '').trim(),
+                }
+              : {}),
           },
         },
       },
       { merge: true }
     );
 
-    return { ok: true, skipped: false, eventId };
+    logMetaCapiOutcome('customer', {
+      status: 'sent',
+      lead: leadCtx.leadId,
+      source,
+      event: sendPrimary ? config.customerEventName : '',
+      mirror: sendMirror ? config.customerMirrorEventName : '',
+    });
+
+    return {
+      ok: true,
+      skipped: false,
+      eventId,
+      mirrorEventId,
+      primarySent: sendPrimary,
+      mirrorSent: sendMirror,
+    };
   } catch (error) {
     console.error('[meta-capi/customer] Error:', error?.message || error);
     if (leadRef) {
@@ -1621,11 +1724,13 @@ async function trackServicePurchaseEvent({
 } = {}) {
   const config = getMetaCapiConfig();
   if (!config.enabled) {
+    logMetaCapiOutcome('purchase', { status: 'skip', reason: 'not-configured', service: service?.id || '' });
     return { ok: false, skipped: true, reason: 'not-configured' };
   }
 
   const serviceId = String(service?.id || '').trim();
   if (!serviceId) {
+    logMetaCapiOutcome('purchase', { status: 'skip', reason: 'missing-service-id' });
     return { ok: false, skipped: true, reason: 'missing-service-id' };
   }
 
@@ -1633,16 +1738,25 @@ async function trackServicePurchaseEvent({
   try {
     const serviceSnap = await serviceRef.get();
     if (!serviceSnap.exists) {
+      logMetaCapiOutcome('purchase', { status: 'skip', reason: 'service-not-found', service: serviceId, source });
       return { ok: false, skipped: true, reason: 'service-not-found' };
     }
 
     const rawService = serviceSnap.data() || {};
     if (rawService?.metaConversions?.purchase?.sentAt) {
+      logMetaCapiOutcome('purchase', { status: 'skip', reason: 'already-sent', service: serviceId, source });
       return { ok: false, skipped: true, reason: 'already-sent' };
     }
 
     const currentService = serializeFinanceService(serviceSnap.id, rawService);
     if (!currentService || currentService.status !== 'pagado') {
+      logMetaCapiOutcome('purchase', {
+        status: 'skip',
+        reason: 'service-not-paid',
+        service: serviceId,
+        source,
+        currentStatus: currentService?.status || '',
+      });
       return { ok: false, skipped: true, reason: 'service-not-paid' };
     }
 
@@ -1671,6 +1785,12 @@ async function trackServicePurchaseEvent({
     });
 
     if (!hasMetaUserData(userData)) {
+      logMetaCapiOutcome('purchase', {
+        status: 'skip',
+        reason: 'missing-user-data',
+        service: serviceId,
+        source,
+      });
       return { ok: false, skipped: true, reason: 'missing-user-data' };
     }
 
@@ -1713,6 +1833,15 @@ async function trackServicePurchaseEvent({
       },
       { merge: true }
     );
+
+    logMetaCapiOutcome('purchase', {
+      status: 'sent',
+      service: serviceId,
+      source,
+      event: config.purchaseEventName,
+      value: Number(currentService.totalAmount || 0),
+      currency: String(currentService.currency || 'MXN').trim() || 'MXN',
+    });
 
     return { ok: true, skipped: false, eventId };
   } catch (error) {
