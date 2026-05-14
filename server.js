@@ -1309,6 +1309,14 @@ const DEFAULT_META_CUSTOMER_MARKERS = [
   'compra_confirmada',
 ];
 
+const DEFAULT_META_QUALIFIED_MARKERS = [
+  'calificado',
+  'calificados',
+  'qualified',
+  'qualified_lead',
+  'lead_calificado',
+];
+
 function normalizeMetaKey(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -1369,6 +1377,10 @@ function getMetaCapiConfig() {
   const customerMirrorEventName = normalizeMetaOptionalEventName(
     process.env.META_CAPI_CUSTOMER_STANDARD_EVENT_NAME || 'CompleteRegistration'
   );
+  const qualifiedEventName = String(process.env.META_CAPI_QUALIFIED_EVENT_NAME || 'CRMQualified').trim() || 'CRMQualified';
+  const qualifiedMirrorEventName = normalizeMetaOptionalEventName(
+    process.env.META_CAPI_QUALIFIED_STANDARD_EVENT_NAME || 'Lead'
+  );
   const purchaseEventName = String(process.env.META_CAPI_PURCHASE_EVENT_NAME || 'Purchase').trim() || 'Purchase';
   const testEventCode = String(process.env.META_CAPI_TEST_EVENT_CODE || '').trim();
   const enabled = parseBooleanInput(
@@ -1384,11 +1396,17 @@ function getMetaCapiConfig() {
     actionSource,
     customerEventName,
     customerMirrorEventName,
+    qualifiedEventName,
+    qualifiedMirrorEventName,
     purchaseEventName,
     testEventCode,
     customerMarkers: splitCsvEnv(
       process.env.META_CAPI_CUSTOMER_MARKERS,
       DEFAULT_META_CUSTOMER_MARKERS
+    ),
+    qualifiedMarkers: splitCsvEnv(
+      process.env.META_CAPI_QUALIFIED_MARKERS,
+      DEFAULT_META_QUALIFIED_MARKERS
     ),
   };
 }
@@ -1448,6 +1466,15 @@ function shouldTrackMetaCustomer({ status = '', stageName = '', stageKey = '' } 
     .filter(Boolean);
 
   return candidates.some((candidate) => config.customerMarkers.has(candidate));
+}
+
+function shouldTrackMetaQualified({ status = '', stageName = '', stageKey = '' } = {}) {
+  const config = getMetaCapiConfig();
+  const candidates = [status, stageName, stageKey]
+    .map((item) => normalizeMetaKey(item))
+    .filter(Boolean);
+
+  return candidates.some((candidate) => config.qualifiedMarkers.has(candidate));
 }
 
 async function postMetaConversionEvent({
@@ -1704,6 +1731,205 @@ async function trackLeadCustomerEvent({
         {
           metaConversions: {
             customer: {
+              lastAttemptAt: Timestamp.now(),
+              lastError: String(error?.message || error),
+              source: String(source || 'crm').trim(),
+            },
+          },
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
+    return { ok: false, skipped: false, error: String(error?.message || error) };
+  }
+}
+
+async function trackLeadQualifiedEvent({
+  leadId = '',
+  leadPhone = '',
+  negocioId = '',
+  status = '',
+  stageName = '',
+  stageKey = '',
+  source = 'crm',
+  requestContext = {},
+} = {}) {
+  const config = getMetaCapiConfig();
+  if (!config.enabled) {
+    logMetaCapiOutcome('qualified', { status: 'skip', reason: 'not-configured', lead: leadId || leadPhone });
+    return { ok: false, skipped: true, reason: 'not-configured' };
+  }
+  if (!shouldTrackMetaQualified({ status, stageName, stageKey })) {
+    logMetaCapiOutcome('qualified', { status: 'skip', reason: 'no-match', lead: leadId || leadPhone, source });
+    return { ok: false, skipped: true, reason: 'no-match' };
+  }
+
+  let leadRef = null;
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone: leadPhone });
+    leadRef = leadCtx?.leadRef || null;
+    if (!leadRef || !leadCtx?.leadId) {
+      logMetaCapiOutcome('qualified', { status: 'skip', reason: 'lead-not-found', lead: leadId || leadPhone, source });
+      return { ok: false, skipped: true, reason: 'lead-not-found' };
+    }
+
+    const leadSnap = leadCtx.leadSnap || await leadRef.get();
+    if (!leadSnap.exists) {
+      logMetaCapiOutcome('qualified', { status: 'skip', reason: 'lead-not-found', lead: leadCtx?.leadId || leadId || leadPhone, source });
+      return { ok: false, skipped: true, reason: 'lead-not-found' };
+    }
+
+    const leadData = leadSnap.data() || {};
+    const qualifiedMeta =
+      leadData?.metaConversions?.qualified && typeof leadData.metaConversions.qualified === 'object'
+        ? leadData.metaConversions.qualified
+        : {};
+    const primaryAlreadySent = Boolean(qualifiedMeta?.sentAt);
+    const mirrorConfigured = Boolean(config.qualifiedMirrorEventName);
+    const mirrorAlreadySent = mirrorConfigured ? Boolean(qualifiedMeta?.mirrorSentAt) : true;
+
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    const finalStatus = String(status || leadData.estado || '').trim();
+    const finalStageKey = String(stageKey || leadData.etapa || '').trim();
+    const finalStageName = String(stageName || leadData.etapaNombre || '').trim();
+    const displayName = String(
+      leadData.nombre
+        || negocioCtx.negocioData?.companyInfo
+        || ''
+    ).trim();
+    const email = String(negocioCtx.negocioData?.contactEmail || '').trim();
+    const userData = buildMetaUserData({
+      leadId: leadCtx.leadId,
+      phone: leadCtx.phoneDigits || leadData.telefono || '',
+      email,
+      name: displayName,
+    });
+
+    if (!hasMetaUserData(userData)) {
+      logMetaCapiOutcome('qualified', {
+        status: 'skip',
+        reason: 'missing-user-data',
+        lead: leadCtx.leadId,
+        source,
+      });
+      return { ok: false, skipped: true, reason: 'missing-user-data' };
+    }
+
+    const eventTime = Math.floor(Date.now() / 1000);
+    const eventSeed = normalizeMetaKey(leadCtx.leadId || leadCtx.phoneDigits || 'lead');
+    const sendPrimary = !primaryAlreadySent;
+    const sendMirror = mirrorConfigured && !mirrorAlreadySent;
+
+    if (!sendPrimary && !sendMirror) {
+      logMetaCapiOutcome('qualified', {
+        status: 'skip',
+        reason: 'already-sent',
+        lead: leadCtx.leadId,
+        source,
+      });
+      return { ok: false, skipped: true, reason: 'already-sent' };
+    }
+
+    const baseCustomData = {
+      source: String(source || 'crm').trim(),
+      lead_id: String(leadCtx.leadId || ''),
+      lead_status: finalStatus,
+      stage_key: finalStageKey,
+      stage_name: finalStageName,
+      negocio_id: String(negocioCtx.negocioId || '').trim(),
+      qualification_stage: finalStageKey || finalStageName,
+      channel: 'whatsapp_crm',
+    };
+
+    let primaryResult = null;
+    let mirrorResult = null;
+    let eventId = String(qualifiedMeta?.eventId || '').trim();
+    let mirrorEventId = String(qualifiedMeta?.mirrorEventId || '').trim();
+
+    if (sendPrimary) {
+      eventId = `crm_qualified:${eventSeed}:${eventTime}`;
+      primaryResult = await postMetaConversionEvent({
+        eventName: config.qualifiedEventName,
+        eventId,
+        eventTime,
+        userData,
+        customData: baseCustomData,
+        requestContext,
+      });
+    }
+
+    if (sendMirror) {
+      mirrorEventId = `crm_qualified_alias:${eventSeed}:${eventTime}`;
+      mirrorResult = await postMetaConversionEvent({
+        eventName: config.qualifiedMirrorEventName,
+        eventId: mirrorEventId,
+        eventTime,
+        userData,
+        customData: baseCustomData,
+        requestContext,
+      });
+    }
+
+    await leadRef.set(
+      {
+        metaConversions: {
+          qualified: {
+            lastAttemptAt: Timestamp.now(),
+            lastError: '',
+            status: finalStatus,
+            stageKey: finalStageKey,
+            stageName: finalStageName,
+            source: String(source || 'crm').trim(),
+            ...(sendPrimary
+              ? {
+                  sentAt: Timestamp.now(),
+                  eventId,
+                  eventName: config.qualifiedEventName,
+                  fbtraceId: String(primaryResult?.body?.fbtrace_id || '').trim(),
+                }
+              : {}),
+            ...(sendMirror
+              ? {
+                  mirrorSentAt: Timestamp.now(),
+                  mirrorEventId,
+                  mirrorEventName: config.qualifiedMirrorEventName,
+                  mirrorFbtraceId: String(mirrorResult?.body?.fbtrace_id || '').trim(),
+                }
+              : {}),
+          },
+        },
+      },
+      { merge: true }
+    );
+
+    logMetaCapiOutcome('qualified', {
+      status: 'sent',
+      lead: leadCtx.leadId,
+      source,
+      event: sendPrimary ? config.qualifiedEventName : '',
+      mirror: sendMirror ? config.qualifiedMirrorEventName : '',
+    });
+
+    return {
+      ok: true,
+      skipped: false,
+      eventId,
+      mirrorEventId,
+      primarySent: sendPrimary,
+      mirrorSent: sendMirror,
+    };
+  } catch (error) {
+    console.error('[meta-capi/qualified] Error:', error?.message || error);
+    if (leadRef) {
+      await leadRef.set(
+        {
+          metaConversions: {
+            qualified: {
               lastAttemptAt: Timestamp.now(),
               lastError: String(error?.message || error),
               source: String(source || 'crm').trim(),
@@ -2523,6 +2749,18 @@ app.post('/api/crm/leads/:leadId/status', async (req, res) => {
     );
 
     await trackLeadCustomerEvent({
+      leadId: leadCtx.leadId,
+      leadPhone: leadCtx.phoneDigits || phone || '',
+      negocioId,
+      status: nextStatus,
+      source: 'manual-status',
+      requestContext: {
+        ip: req.ip,
+        userAgent: req.get('user-agent') || '',
+      },
+    });
+
+    await trackLeadQualifiedEvent({
       leadId: leadCtx.leadId,
       leadPhone: leadCtx.phoneDigits || phone || '',
       negocioId,
@@ -5167,6 +5405,19 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
 
     if (!clearStage) {
       await trackLeadCustomerEvent({
+        leadId: finalLeadId,
+        leadPhone: phoneDigits || currentData.telefono || '',
+        status: nextLeadStatus,
+        stageName,
+        stageKey,
+        source: 'apply-stage',
+        requestContext: {
+          ip: req.ip,
+          userAgent: req.get('user-agent') || '',
+        },
+      });
+
+      await trackLeadQualifiedEvent({
         leadId: finalLeadId,
         leadPhone: phoneDigits || currentData.telefono || '',
         status: nextLeadStatus,
