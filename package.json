@@ -9,6 +9,8 @@
     "dev": "nodemon server.js",
     "test": "node --test",
     "postinstall": "npx puppeteer browsers install chrome",
+    "leads:reactivate:last-week:dry": "node scripts/runLastWeekLeadFollowup.js",
+    "leads:reactivate:last-week": "node scripts/runLastWeekLeadFollowup.js --commit",
     "backfill:meta-customers:dry": "node scripts/backfillMetaCustomers.js",
     "backfill:meta-customers": "node scripts/backfillMetaCustomers.js --commit"
   },

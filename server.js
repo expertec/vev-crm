@@ -87,6 +87,7 @@ import {
 import { createProcessInformationRouter } from './routes/processInformationRoutes.js';
 import { createCorporateEmailRouter } from './routes/corporateEmailRoutes.js';
 import { generarPIN, generarMensajeCredenciales } from './pinUtils.js';
+import { runLastWeekLeadReactivation } from './services/leadReactivationService.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
@@ -2722,6 +2723,52 @@ app.post('/api/admin/custom-domain', async (req, res) => {
     return res.json({ success: true, ...sync });
   } catch (error) {
     console.error('[admin/custom-domain] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/admin/lead-reactivation/last-week', async (req, res) => {
+  const {
+    commit = false,
+    limit = 0,
+    fromDate = '',
+    toDate = '',
+    timezone = '',
+    minSilenceHours = 24,
+    baseDelayMinutes = 3,
+    spacingSeconds = 95,
+  } = req.body || {};
+
+  const parseBool = (value, defaultValue = false) => {
+    if (value === undefined || value === null || value === '') return defaultValue;
+    if (typeof value === 'boolean') return value;
+    return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+  };
+
+  const safeLimit = Math.max(0, Number(limit || 0) || 0);
+  const safeMinSilenceHours = Math.max(12, Number(minSilenceHours || 24) || 24);
+  const safeBaseDelayMinutes = Math.max(1, Number(baseDelayMinutes || 3) || 3);
+  const safeSpacingSeconds = Math.max(45, Number(spacingSeconds || 95) || 95);
+  const safeTimezone = String(timezone || '').trim() || 'America/Monterrey';
+
+  try {
+    const result = await runLastWeekLeadReactivation({
+      commit: parseBool(commit, false),
+      limit: safeLimit,
+      fromDate: String(fromDate || '').trim(),
+      toDate: String(toDate || '').trim(),
+      timezone: safeTimezone,
+      minSilenceHours: safeMinSilenceHours,
+      baseDelayMinutes: safeBaseDelayMinutes,
+      spacingSeconds: safeSpacingSeconds,
+    });
+
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error('[admin/lead-reactivation/last-week] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
