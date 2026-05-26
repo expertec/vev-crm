@@ -755,9 +755,28 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
         processedAt: FieldValue.serverTimestamp()
       });
 
-      await db.collection('leads').doc(job.leadId).set({
-        lastMessageAt: FieldValue.serverTimestamp()
-      }, { merge: true });
+      const leadPatch = {
+        lastMessageAt: FieldValue.serverTimestamp(),
+      };
+      const jobType = String(job?.jobType || '').toLowerCase();
+      if (jobType === 'ai_followup') {
+        leadPatch['aiFollowup.lastSentAt'] = FieldValue.serverTimestamp();
+        leadPatch['aiFollowup.lastCampaignStatus'] = 'sent';
+        leadPatch['aiFollowup.lastCampaignSource'] = String(job?.source || 'always-on-reactivation');
+        leadPatch['aiFollowup.lastCampaignId'] = String(job?.campaign?.id || '');
+        leadPatch['aiFollowup.lastVariationKey'] = String(job?.campaign?.variationKey || '');
+        leadPatch['aiFollowup.lastContextKey'] = String(job?.campaign?.contextKey || '');
+        leadPatch['aiFollowup.lastMessagePreview'] = String(job?.payload?.contenido || '').trim().slice(0, 220);
+        leadPatch['aiFollowup.nextAiTouchAt'] = FieldValue.delete();
+        leadPatch['aiFollowup.touchCount'] = FieldValue.increment(1);
+      }
+
+      const leadRef = db.collection('leads').doc(job.leadId);
+      try {
+        await leadRef.update(leadPatch);
+      } catch {
+        await leadRef.set(leadPatch, { merge: true });
+      }
 
       await sleep(350);
     } catch (err) {

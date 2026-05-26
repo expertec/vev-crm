@@ -87,7 +87,13 @@ import {
 import { createProcessInformationRouter } from './routes/processInformationRoutes.js';
 import { createCorporateEmailRouter } from './routes/corporateEmailRoutes.js';
 import { generarPIN, generarMensajeCredenciales } from './pinUtils.js';
-import { runLastWeekLeadReactivation } from './services/leadReactivationService.js';
+import {
+  getLeadReactivationSettings,
+  runAlwaysOnLeadReactivation,
+  runLastWeekLeadReactivation,
+  runLeadReactivationAutomationTick,
+  updateLeadReactivationSettings,
+} from './services/leadReactivationService.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
@@ -2769,6 +2775,85 @@ app.post('/api/admin/lead-reactivation/last-week', async (req, res) => {
     });
   } catch (error) {
     console.error('[admin/lead-reactivation/last-week] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get('/api/admin/lead-reactivation/settings', async (_req, res) => {
+  try {
+    const settings = await getLeadReactivationSettings();
+    return res.json({ success: true, settings });
+  } catch (error) {
+    console.error('[admin/lead-reactivation/settings:get] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/admin/lead-reactivation/settings', async (req, res) => {
+  const {
+    enabled,
+    timezone,
+    minSilenceHours,
+    baseDelayMinutes,
+    spacingSeconds,
+    maxTouches,
+    limitPerRun,
+    cadenceHours,
+  } = req.body || {};
+
+  try {
+    const settings = await updateLeadReactivationSettings(
+      {
+        enabled,
+        timezone,
+        minSilenceHours,
+        baseDelayMinutes,
+        spacingSeconds,
+        maxTouches,
+        limitPerRun,
+        cadenceHours,
+        updatedBy: String(req.headers['x-user-email'] || req.headers['x-user-id'] || 'crm'),
+      }
+    );
+    return res.json({ success: true, settings });
+  } catch (error) {
+    console.error('[admin/lead-reactivation/settings:save] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/admin/lead-reactivation/always-on', async (req, res) => {
+  const {
+    commit = false,
+    limit = 40,
+    minSilenceHours = 24,
+    baseDelayMinutes = 3,
+    spacingSeconds = 95,
+    maxTouches = 6,
+    cadenceHours = [24, 72, 168],
+    timezone = 'America/Monterrey',
+  } = req.body || {};
+
+  const parseBool = (value, defaultValue = false) => {
+    if (value === undefined || value === null || value === '') return defaultValue;
+    if (typeof value === 'boolean') return value;
+    return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+  };
+
+  try {
+    const result = await runAlwaysOnLeadReactivation({
+      commit: parseBool(commit, false),
+      limit: Math.max(1, Number(limit || 40) || 40),
+      minSilenceHours: Math.max(12, Number(minSilenceHours || 24) || 24),
+      baseDelayMinutes: Math.max(1, Number(baseDelayMinutes || 3) || 3),
+      spacingSeconds: Math.max(45, Number(spacingSeconds || 95) || 95),
+      maxTouches: Math.max(1, Number(maxTouches || 6) || 6),
+      cadenceHours,
+      timezone: String(timezone || '').trim() || 'America/Monterrey',
+    });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('[admin/lead-reactivation/always-on] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
@@ -6744,6 +6829,26 @@ cron.schedule('0 * * * *', async () => {
       'Error verificando trials expirados:',
       err
     );
+  }
+});
+
+cron.schedule('*/10 * * * *', async () => {
+  try {
+    const result = await runLeadReactivationAutomationTick();
+    if (result?.skipped) {
+      if (result?.reason === 'disabled') return;
+      console.log('[lead-reactivation:24x7] skip:', result?.reason || 'unknown');
+      return;
+    }
+    if (result?.ok) {
+      const scheduledCount = Number(result?.result?.summary?.scheduledCount || 0);
+      const eligibleCount = Number(result?.result?.summary?.eligibleCount || 0);
+      console.log(`[lead-reactivation:24x7] ok eligible=${eligibleCount} scheduled=${scheduledCount}`);
+      return;
+    }
+    console.error('[lead-reactivation:24x7] error:', result?.error || result?.reason || 'unknown');
+  } catch (error) {
+    console.error('[lead-reactivation:24x7] fatal:', error?.message || error);
   }
 });
 

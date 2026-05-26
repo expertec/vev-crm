@@ -11,7 +11,16 @@ const DEFAULT_TIMEZONE = String(process.env.CRM_TIMEZONE || 'America/Monterrey')
 const DEFAULT_MIN_SILENCE_HOURS = Math.max(12, Number(process.env.AI_REACTIVATION_MIN_SILENCE_HOURS || 24));
 const DEFAULT_BASE_DELAY_MINUTES = Math.max(1, Number(process.env.AI_REACTIVATION_BASE_DELAY_MINUTES || 3));
 const DEFAULT_SPACING_SECONDS = Math.max(45, Number(process.env.AI_REACTIVATION_SPACING_SECONDS || 95));
-const FOLLOWUP_SOURCE = 'last-week-reactivation';
+const DEFAULT_MAX_TOUCHES = Math.max(1, Number(process.env.AI_REACTIVATION_MAX_TOUCHES || 6));
+const DEFAULT_LIMIT_PER_RUN = Math.max(1, Number(process.env.AI_REACTIVATION_LIMIT_PER_RUN || 40));
+const DEFAULT_CADENCE_HOURS = [24, 72, 168];
+const LAST_WEEK_SOURCE = 'last-week-reactivation';
+const ALWAYS_ON_SOURCE = 'always-on-reactivation';
+const SETTINGS_COLLECTION = 'automationSettings';
+const SETTINGS_DOC_ID = 'leadReactivation24x7';
+const LOCK_COLLECTION = 'automationLocks';
+const LOCK_DOC_ID = 'leadReactivation24x7';
+const LOCK_TTL_MS = 8 * 60 * 1000;
 
 const OPENERS = [
   'Hola {{nombre}}, te escribo para dar seguimiento a tu pagina web.',
@@ -74,6 +83,34 @@ function renderTemplate(template = '', lead = {}) {
   const safeName = firstName(lead?.nombre || '') || '';
   const text = String(template || '').replace(/\{\{nombre\}\}/g, safeName);
   return cleanText(text.replace(/\s([,.!?;:])/g, '$1'));
+}
+
+function asPositiveNumber(value, fallback = 0, min = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, parsed);
+}
+
+function normalizeCadenceHours(input) {
+  const values = Array.isArray(input)
+    ? input
+    : String(input || '')
+      .split(/[,\s;]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const normalized = values
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item) && item >= 12)
+    .map((item) => Math.floor(item));
+
+  if (normalized.length === 0) return [...DEFAULT_CADENCE_HOURS];
+  return normalized.slice(0, 12);
+}
+
+function clone(value = null) {
+  if (value === null || value === undefined) return null;
+  return JSON.parse(JSON.stringify(value));
 }
 
 export function toMillis(value) {
@@ -155,12 +192,164 @@ function resolveMessagePool(contextKey = 'generic') {
   return GENERIC_LINES;
 }
 
-function toDateKey(value) {
-  return dayjs(value).format('YYYY-MM-DD');
-}
-
 function buildCampaignId(window) {
   return `last-week-${window.fromDate}_${window.toDate}`;
+}
+
+function serializeLead(docSnap) {
+  return {
+    id: docSnap.id,
+    ...(docSnap.data() || {}),
+  };
+}
+
+function buildMessagePreview(message = '') {
+  return cleanText(message).slice(0, 220);
+}
+
+function createDefaultSettings() {
+  return {
+    enabled: false,
+    timezone: DEFAULT_TIMEZONE,
+    minSilenceHours: DEFAULT_MIN_SILENCE_HOURS,
+    baseDelayMinutes: DEFAULT_BASE_DELAY_MINUTES,
+    spacingSeconds: DEFAULT_SPACING_SECONDS,
+    maxTouches: DEFAULT_MAX_TOUCHES,
+    limitPerRun: DEFAULT_LIMIT_PER_RUN,
+    cadenceHours: [...DEFAULT_CADENCE_HOURS],
+    updatedAt: null,
+    updatedBy: '',
+    status: {
+      lastRunAt: null,
+      lastRunMode: '',
+      lastRunSummary: null,
+      lastError: '',
+    },
+  };
+}
+
+function normalizeSettingsInput(input = {}, previous = null) {
+  const base = previous && typeof previous === 'object' ? previous : createDefaultSettings();
+  const status = base?.status && typeof base.status === 'object'
+    ? base.status
+    : createDefaultSettings().status;
+
+  return {
+    enabled: input.enabled === undefined ? Boolean(base.enabled) : Boolean(input.enabled),
+    timezone: cleanText(input.timezone || base.timezone || DEFAULT_TIMEZONE) || DEFAULT_TIMEZONE,
+    minSilenceHours: Math.max(12, Math.floor(asPositiveNumber(input.minSilenceHours, base.minSilenceHours, 12))),
+    baseDelayMinutes: Math.max(1, Math.floor(asPositiveNumber(input.baseDelayMinutes, base.baseDelayMinutes, 1))),
+    spacingSeconds: Math.max(45, Math.floor(asPositiveNumber(input.spacingSeconds, base.spacingSeconds, 45))),
+    maxTouches: Math.max(1, Math.floor(asPositiveNumber(input.maxTouches, base.maxTouches, 1))),
+    limitPerRun: Math.max(1, Math.floor(asPositiveNumber(input.limitPerRun, base.limitPerRun, 1))),
+    cadenceHours: normalizeCadenceHours(input.cadenceHours !== undefined ? input.cadenceHours : base.cadenceHours),
+    updatedAt: base.updatedAt || null,
+    updatedBy: String(base.updatedBy || ''),
+    status: {
+      lastRunAt: status.lastRunAt || null,
+      lastRunMode: String(status.lastRunMode || ''),
+      lastRunSummary: status.lastRunSummary || null,
+      lastError: String(status.lastError || ''),
+    },
+  };
+}
+
+async function getDb(dbOverride = null) {
+  if (dbOverride) return dbOverride;
+  const { db } = await import('../firebaseAdmin.js');
+  return db;
+}
+
+async function loadSettingsDoc(db) {
+  const ref = db.collection(SETTINGS_COLLECTION).doc(SETTINGS_DOC_ID);
+  const snap = await ref.get();
+  const raw = snap.exists ? (snap.data() || {}) : {};
+  const normalized = normalizeSettingsInput(raw, createDefaultSettings());
+  return { ref, snap, settings: normalized };
+}
+
+async function acquireLock(db, lockId = LOCK_DOC_ID, ttlMs = LOCK_TTL_MS) {
+  const ref = db.collection(LOCK_COLLECTION).doc(lockId);
+  const nowMs = Date.now();
+  const lockUntil = new Date(nowMs + Math.max(30_000, Number(ttlMs || LOCK_TTL_MS)));
+
+  const acquired = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const data = snap.exists ? (snap.data() || {}) : {};
+    const lockedUntilMs = toMillis(data.lockedUntil);
+    if (lockedUntilMs > nowMs) {
+      return false;
+    }
+
+    tx.set(ref, {
+      lockId,
+      lockedAt: new Date(nowMs),
+      lockedUntil: lockUntil,
+      updatedAt: new Date(nowMs),
+    }, { merge: true });
+    return true;
+  });
+
+  return { acquired, ref };
+}
+
+async function releaseLock(ref) {
+  if (!ref) return;
+  await ref.set(
+    {
+      lockedUntil: new Date(0),
+      updatedAt: new Date(),
+    },
+    { merge: true }
+  ).catch(() => {});
+}
+
+export async function getLeadReactivationSettings({
+  dbOverride = null,
+} = {}) {
+  const db = await getDb(dbOverride);
+  const { settings } = await loadSettingsDoc(db);
+  return settings;
+}
+
+export async function updateLeadReactivationSettings({
+  enabled,
+  timezone,
+  minSilenceHours,
+  baseDelayMinutes,
+  spacingSeconds,
+  maxTouches,
+  limitPerRun,
+  cadenceHours,
+  updatedBy = '',
+} = {}, {
+  dbOverride = null,
+} = {}) {
+  const db = await getDb(dbOverride);
+  const loaded = await loadSettingsDoc(db);
+
+  const next = normalizeSettingsInput(
+    {
+      enabled,
+      timezone,
+      minSilenceHours,
+      baseDelayMinutes,
+      spacingSeconds,
+      maxTouches,
+      limitPerRun,
+      cadenceHours,
+    },
+    loaded.settings
+  );
+
+  const payload = {
+    ...next,
+    updatedAt: Timestamp.now(),
+    updatedBy: cleanText(updatedBy).slice(0, 120) || 'crm',
+  };
+
+  await loaded.ref.set(payload, { merge: true });
+  return normalizeSettingsInput(payload, loaded.settings);
 }
 
 export function getPreviousCalendarWeekWindow({
@@ -261,9 +450,7 @@ export function buildLeadFollowupVariant(lead = {}, {
   };
 }
 
-export function evaluateLeadForReactivation(lead = {}, {
-  window,
-  campaignId = window?.campaignId || '',
+function evaluateLeadBase(lead = {}, {
   now = new Date(),
   minSilenceHours = DEFAULT_MIN_SILENCE_HOURS,
 } = {}) {
@@ -275,71 +462,97 @@ export function evaluateLeadForReactivation(lead = {}, {
   );
   const nowMs = toMillis(now) || Date.now();
   const minSilenceMs = Math.max(1, Number(minSilenceHours || DEFAULT_MIN_SILENCE_HOURS)) * 60 * 60 * 1000;
-  const aiState = lead?.aiFollowup && typeof lead.aiFollowup === 'object' ? lead.aiFollowup : {};
 
-  if (!createdMs) {
-    return { eligible: false, reason: 'missing_created_at', createdMs, lastActivityMs };
+  if (!createdMs) return { eligible: false, reason: 'missing_created_at', createdMs, lastActivityMs };
+  if (lead?.mergedInto) return { eligible: false, reason: 'merged_lead', createdMs, lastActivityMs };
+  if (isLeadArchived(lead)) return { eligible: false, reason: 'archived', createdMs, lastActivityMs };
+  if (hasHardStop(lead)) return { eligible: false, reason: 'hard_stop', createdMs, lastActivityMs };
+  if (Number(lead?.unreadCount || 0) > 0) return { eligible: false, reason: 'has_unread_messages', createdMs, lastActivityMs };
+  if (hasActiveSequences(lead)) return { eligible: false, reason: 'active_sequence', createdMs, lastActivityMs };
+  if (!hasReachableTarget(lead)) return { eligible: false, reason: 'missing_target', createdMs, lastActivityMs };
+  if ((nowMs - lastActivityMs) < minSilenceMs) return { eligible: false, reason: 'recent_activity', createdMs, lastActivityMs };
+
+  return { eligible: true, reason: 'eligible', createdMs, lastActivityMs };
+}
+
+export function evaluateLeadForReactivation(lead = {}, {
+  window,
+  campaignId = window?.campaignId || '',
+  now = new Date(),
+  minSilenceHours = DEFAULT_MIN_SILENCE_HOURS,
+} = {}) {
+  const base = evaluateLeadBase(lead, { now, minSilenceHours });
+  if (!base.eligible) return base;
+
+  if (window?.startDate && base.createdMs < window.startDate.getTime()) {
+    return { ...base, eligible: false, reason: 'outside_window' };
   }
-  if (window?.startDate && createdMs < window.startDate.getTime()) {
-    return { eligible: false, reason: 'outside_window', createdMs, lastActivityMs };
+  if (window?.endExclusiveDate && base.createdMs >= window.endExclusiveDate.getTime()) {
+    return { ...base, eligible: false, reason: 'outside_window' };
   }
-  if (window?.endExclusiveDate && createdMs >= window.endExclusiveDate.getTime()) {
-    return { eligible: false, reason: 'outside_window', createdMs, lastActivityMs };
-  }
-  if (lead?.mergedInto) {
-    return { eligible: false, reason: 'merged_lead', createdMs, lastActivityMs };
-  }
-  if (isLeadArchived(lead)) {
-    return { eligible: false, reason: 'archived', createdMs, lastActivityMs };
-  }
-  if (hasHardStop(lead)) {
-    return { eligible: false, reason: 'hard_stop', createdMs, lastActivityMs };
-  }
-  if (Number(lead?.unreadCount || 0) > 0) {
-    return { eligible: false, reason: 'has_unread_messages', createdMs, lastActivityMs };
-  }
-  if (hasActiveSequences(lead)) {
-    return { eligible: false, reason: 'active_sequence', createdMs, lastActivityMs };
-  }
-  if (!hasReachableTarget(lead)) {
-    return { eligible: false, reason: 'missing_target', createdMs, lastActivityMs };
-  }
+
+  const aiState = lead?.aiFollowup && typeof lead.aiFollowup === 'object' ? lead.aiFollowup : {};
   if (String(aiState?.lastCampaignId || '').trim() === String(campaignId || '').trim()) {
-    return { eligible: false, reason: 'already_scheduled_in_campaign', createdMs, lastActivityMs };
-  }
-  if ((nowMs - lastActivityMs) < minSilenceMs) {
-    return { eligible: false, reason: 'recent_activity', createdMs, lastActivityMs };
+    return { ...base, eligible: false, reason: 'already_scheduled_in_campaign' };
   }
 
   return {
-    eligible: true,
-    reason: 'eligible',
-    createdMs,
-    lastActivityMs,
+    ...base,
     contextKey: detectLeadContext(lead),
   };
 }
 
-function serializeLead(docSnap) {
+export function evaluateLeadForAlwaysOn(lead = {}, {
+  settings = createDefaultSettings(),
+  now = new Date(),
+} = {}) {
+  const cadenceHours = normalizeCadenceHours(settings?.cadenceHours);
+  const aiState = lead?.aiFollowup && typeof lead.aiFollowup === 'object' ? lead.aiFollowup : {};
+  if (aiState?.enabled === false || aiState?.paused === true) {
+    return { eligible: false, reason: 'agent_paused' };
+  }
+
+  const touchCount = Math.max(0, Math.floor(asPositiveNumber(aiState?.touchCount, 0, 0)));
+  const maxTouches = Math.max(1, Math.floor(asPositiveNumber(settings?.maxTouches, DEFAULT_MAX_TOUCHES, 1)));
+  if (touchCount >= maxTouches) {
+    return { eligible: false, reason: 'max_touches_reached' };
+  }
+
+  const requiredCadenceHours = cadenceHours[Math.min(touchCount, cadenceHours.length - 1)];
+  const requiredSilenceHours = Math.max(
+    asPositiveNumber(settings?.minSilenceHours, DEFAULT_MIN_SILENCE_HOURS, 12),
+    requiredCadenceHours
+  );
+  const base = evaluateLeadBase(lead, { now, minSilenceHours: requiredSilenceHours });
+  if (!base.eligible) return base;
+
+  const nowMs = toMillis(now) || Date.now();
+  const nextTouchMs = toMillis(aiState?.nextAiTouchAt);
+  if (nextTouchMs && nextTouchMs > (nowMs - (15 * 60 * 1000))) {
+    return { ...base, eligible: false, reason: 'waiting_next_touch' };
+  }
+
   return {
-    id: docSnap.id,
-    ...(docSnap.data() || {}),
+    ...base,
+    contextKey: detectLeadContext(lead),
+    touchCount,
+    requiredSilenceHours,
   };
 }
 
 async function loadLeadsForWindow(db, window, { limit = 0 } = {}) {
   const collection = db.collection('leads');
   try {
-    let query = collection
+    let q = collection
       .where('fecha_creacion', '>=', Timestamp.fromDate(window.startDate))
       .where('fecha_creacion', '<', Timestamp.fromDate(window.endExclusiveDate))
       .orderBy('fecha_creacion', 'asc');
 
     if (Number(limit) > 0) {
-      query = query.limit(Number(limit));
+      q = q.limit(Number(limit));
     }
 
-    const snap = await query.get();
+    const snap = await q.get();
     return {
       mode: 'range_query',
       queryError: '',
@@ -363,8 +576,60 @@ async function loadLeadsForWindow(db, window, { limit = 0 } = {}) {
   }
 }
 
-function buildMessagePreview(message = '') {
-  return cleanText(message).slice(0, 220);
+async function loadLeadsForAlwaysOn(db, {
+  limit = DEFAULT_LIMIT_PER_RUN,
+  minSilenceHours = DEFAULT_MIN_SILENCE_HOURS,
+} = {}) {
+  const cutoffDate = new Date(Date.now() - (Math.max(12, Number(minSilenceHours || DEFAULT_MIN_SILENCE_HOURS)) * 60 * 60 * 1000));
+  const collection = db.collection('leads');
+  const expandedLimit = Math.max(200, Math.min(1500, Math.max(1, Number(limit || DEFAULT_LIMIT_PER_RUN)) * 8));
+
+  try {
+    const snap = await collection
+      .orderBy('lastMessageAt', 'asc')
+      .limit(expandedLimit)
+      .get();
+
+    const rows = snap.docs
+      .map(serializeLead)
+      .filter((lead) => {
+        const activityMs = Math.max(
+          toMillis(lead?.lastInboundAt),
+          toMillis(lead?.lastMessageAt),
+          toMillis(lead?.fecha_creacion)
+        );
+        return activityMs > 0 && activityMs <= cutoffDate.getTime();
+      });
+
+    return {
+      mode: 'order_by_last_message',
+      queryError: '',
+      leads: rows,
+    };
+  } catch (error) {
+    const scan = await collection.get();
+    const rows = scan.docs
+      .map(serializeLead)
+      .filter((lead) => {
+        const activityMs = Math.max(
+          toMillis(lead?.lastInboundAt),
+          toMillis(lead?.lastMessageAt),
+          toMillis(lead?.fecha_creacion)
+        );
+        return activityMs > 0 && activityMs <= cutoffDate.getTime();
+      })
+      .sort((a, b) => {
+        const aMs = Math.max(toMillis(a?.lastMessageAt), toMillis(a?.fecha_creacion));
+        const bMs = Math.max(toMillis(b?.lastMessageAt), toMillis(b?.fecha_creacion));
+        return aMs - bMs;
+      });
+
+    return {
+      mode: 'full_scan_fallback',
+      queryError: String(error?.message || error || ''),
+      leads: rows,
+    };
+  }
 }
 
 function computeDueAt({
@@ -383,14 +648,16 @@ function computeDueAt({
   return new Date((toMillis(now) || Date.now()) + totalMs);
 }
 
-async function scheduleLeadJob(db, lead, plan, window, options = {}) {
+async function scheduleLeadJob(db, lead, plan, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
+  const source = cleanText(options.source || LAST_WEEK_SOURCE) || LAST_WEEK_SOURCE;
+  const campaign = options.campaign && typeof options.campaign === 'object' ? options.campaign : {};
   const dueAt = computeDueAt({
     now,
     index: options.index,
     baseDelayMinutes: options.baseDelayMinutes,
     spacingSeconds: options.spacingSeconds,
-    seed: `${window.campaignId}:${lead.id}:${plan.variationKey}`,
+    seed: `${campaign.id || source}:${lead.id}:${plan.variationKey}`,
   });
 
   const leadRef = db.collection('leads').doc(lead.id);
@@ -398,16 +665,14 @@ async function scheduleLeadJob(db, lead, plan, window, options = {}) {
   const aiState = lead?.aiFollowup && typeof lead.aiFollowup === 'object' ? lead.aiFollowup : {};
   const nextAiState = {
     ...aiState,
-    lastCampaignId: window.campaignId,
-    lastCampaignSource: FOLLOWUP_SOURCE,
+    lastCampaignId: String(campaign.id || ''),
+    lastCampaignSource: source,
     lastCampaignStatus: 'scheduled',
     lastScheduledAt: now,
     lastScheduledFor: dueAt,
     lastVariationKey: plan.variationKey,
     lastContextKey: plan.contextKey,
     lastMessagePreview: buildMessagePreview(plan.message),
-    lastWindowStart: window.fromDate,
-    lastWindowEnd: window.toDate,
     nextAiTouchAt: dueAt,
   };
 
@@ -420,31 +685,41 @@ async function scheduleLeadJob(db, lead, plan, window, options = {}) {
       contenido: plan.message,
     },
     jobType: 'ai_followup',
-    source: FOLLOWUP_SOURCE,
+    source,
     idx: 0,
     retry: 0,
     createdAt: Timestamp.fromDate(now),
     campaign: {
-      id: window.campaignId,
-      cohort: 'last_week',
-      timezone: window.timezone,
-      fromDate: window.fromDate,
-      toDate: window.toDate,
+      id: String(campaign.id || ''),
+      cohort: String(campaign.cohort || ''),
+      timezone: String(campaign.timezone || ''),
+      fromDate: String(campaign.fromDate || ''),
+      toDate: String(campaign.toDate || ''),
       variationKey: plan.variationKey,
       contextKey: plan.contextKey,
     },
   });
 
-  await leadRef.set(
-    {
-      aiFollowup: nextAiState,
-    },
-    { merge: true }
-  );
+  await leadRef.set({ aiFollowup: nextAiState }, { merge: true });
 
   return {
     jobId: jobRef.id,
     dueAt,
+  };
+}
+
+function sanitizePlanItem(lead, evaluation, variant) {
+  return {
+    leadId: lead.id,
+    nombre: cleanText(lead?.nombre || ''),
+    telefono: cleanText(lead?.telefono || ''),
+    estado: cleanText(lead?.estado || ''),
+    etapa: cleanText(lead?.etapaNombre || lead?.etapa || ''),
+    createdAt: evaluation.createdMs ? new Date(evaluation.createdMs).toISOString() : '',
+    lastActivityAt: evaluation.lastActivityMs ? new Date(evaluation.lastActivityMs).toISOString() : '',
+    contextKey: variant.contextKey,
+    variationKey: variant.variationKey,
+    message: variant.message,
   };
 }
 
@@ -458,12 +733,13 @@ export async function runLastWeekLeadReactivation({
   minSilenceHours = DEFAULT_MIN_SILENCE_HOURS,
   baseDelayMinutes = DEFAULT_BASE_DELAY_MINUTES,
   spacingSeconds = DEFAULT_SPACING_SECONDS,
+  dbOverride = null,
 } = {}) {
   const window = fromDate || toDate
     ? getExplicitWindow({ fromDate, toDate, timezone: tz })
     : getPreviousCalendarWeekWindow({ now, timezone: tz });
 
-  const { db } = await import('../firebaseAdmin.js');
+  const db = await getDb(dbOverride);
   const loaded = await loadLeadsForWindow(db, window, { limit });
   const eligible = [];
   const scheduled = [];
@@ -491,27 +767,23 @@ export async function runLastWeekLeadReactivation({
       campaignId: window.campaignId,
       contextKey: evaluation.contextKey,
     });
-    const plan = {
-      leadId: lead.id,
-      nombre: cleanText(lead?.nombre || ''),
-      telefono: cleanText(lead?.telefono || ''),
-      estado: cleanText(lead?.estado || ''),
-      etapa: cleanText(lead?.etapaNombre || lead?.etapa || ''),
-      createdAt: evaluation.createdMs ? new Date(evaluation.createdMs).toISOString() : '',
-      lastActivityAt: evaluation.lastActivityMs ? new Date(evaluation.lastActivityMs).toISOString() : '',
-      contextKey: variant.contextKey,
-      variationKey: variant.variationKey,
-      message: variant.message,
-    };
-
+    const plan = sanitizePlanItem(lead, evaluation, variant);
     eligible.push(plan);
 
     if (commit) {
-      const result = await scheduleLeadJob(db, lead, plan, window, {
+      const result = await scheduleLeadJob(db, lead, plan, {
         now,
         index: scheduled.length,
         baseDelayMinutes,
         spacingSeconds,
+        source: LAST_WEEK_SOURCE,
+        campaign: {
+          id: window.campaignId,
+          cohort: 'last_week',
+          timezone: window.timezone,
+          fromDate: window.fromDate,
+          toDate: window.toDate,
+        },
       });
       scheduled.push({
         ...plan,
@@ -523,7 +795,7 @@ export async function runLastWeekLeadReactivation({
 
   return {
     commit: commit === true,
-    source: FOLLOWUP_SOURCE,
+    source: LAST_WEEK_SOURCE,
     window: {
       campaignId: window.campaignId,
       timezone: window.timezone,
@@ -549,4 +821,211 @@ export async function runLastWeekLeadReactivation({
     scheduled,
     skipped,
   };
+}
+
+export async function runAlwaysOnLeadReactivation({
+  commit = false,
+  limit = DEFAULT_LIMIT_PER_RUN,
+  minSilenceHours = DEFAULT_MIN_SILENCE_HOURS,
+  baseDelayMinutes = DEFAULT_BASE_DELAY_MINUTES,
+  spacingSeconds = DEFAULT_SPACING_SECONDS,
+  maxTouches = DEFAULT_MAX_TOUCHES,
+  cadenceHours = DEFAULT_CADENCE_HOURS,
+  timezone: tz = DEFAULT_TIMEZONE,
+  now = new Date(),
+  dbOverride = null,
+} = {}) {
+  const db = await getDb(dbOverride);
+  const loaded = await loadLeadsForAlwaysOn(db, { limit, minSilenceHours });
+  const eligible = [];
+  const scheduled = [];
+  const skipped = [];
+  const settings = normalizeSettingsInput({
+    enabled: true,
+    timezone: tz,
+    minSilenceHours,
+    baseDelayMinutes,
+    spacingSeconds,
+    maxTouches,
+    limitPerRun: limit,
+    cadenceHours,
+  }, createDefaultSettings());
+
+  const campaignId = `always-on-${dayjs(now).tz(settings.timezone).format('YYYYMMDDHHmm')}`;
+
+  for (const lead of loaded.leads) {
+    if (eligible.length >= settings.limitPerRun) {
+      skipped.push({
+        leadId: lead.id,
+        nombre: cleanText(lead?.nombre || ''),
+        telefono: cleanText(lead?.telefono || ''),
+        reason: 'limit_reached',
+      });
+      continue;
+    }
+
+    const evaluation = evaluateLeadForAlwaysOn(lead, {
+      settings,
+      now,
+    });
+
+    if (!evaluation.eligible) {
+      skipped.push({
+        leadId: lead.id,
+        nombre: cleanText(lead?.nombre || ''),
+        telefono: cleanText(lead?.telefono || ''),
+        reason: evaluation.reason,
+      });
+      continue;
+    }
+
+    const variant = buildLeadFollowupVariant(lead, {
+      campaignId,
+      contextKey: evaluation.contextKey,
+    });
+    const plan = sanitizePlanItem(lead, evaluation, variant);
+    eligible.push(plan);
+
+    if (commit) {
+      const result = await scheduleLeadJob(db, lead, plan, {
+        now,
+        index: scheduled.length,
+        baseDelayMinutes: settings.baseDelayMinutes,
+        spacingSeconds: settings.spacingSeconds,
+        source: ALWAYS_ON_SOURCE,
+        campaign: {
+          id: campaignId,
+          cohort: 'always_on',
+          timezone: settings.timezone,
+          fromDate: '',
+          toDate: '',
+        },
+      });
+      scheduled.push({
+        ...plan,
+        jobId: result.jobId,
+        dueAt: result.dueAt.toISOString(),
+      });
+    }
+  }
+
+  return {
+    commit: commit === true,
+    source: ALWAYS_ON_SOURCE,
+    window: {
+      campaignId,
+      timezone: settings.timezone,
+      fromDate: '',
+      toDate: '',
+      startIso: '',
+      endExclusiveIso: '',
+    },
+    query: {
+      mode: loaded.mode,
+      queryError: loaded.queryError || '',
+      loadedCount: loaded.leads.length,
+    },
+    summary: {
+      eligibleCount: eligible.length,
+      scheduledCount: scheduled.length,
+      skippedCount: skipped.length,
+      minSilenceHours: Number(settings.minSilenceHours),
+      baseDelayMinutes: Number(settings.baseDelayMinutes),
+      spacingSeconds: Number(settings.spacingSeconds),
+      maxTouches: Number(settings.maxTouches),
+      limitPerRun: Number(settings.limitPerRun),
+      cadenceHours: [...settings.cadenceHours],
+    },
+    eligible,
+    scheduled,
+    skipped,
+  };
+}
+
+async function persistAutomationStatus(db, settings, {
+  mode = '',
+  summary = null,
+  error = '',
+} = {}) {
+  const ref = db.collection(SETTINGS_COLLECTION).doc(SETTINGS_DOC_ID);
+  await ref.set({
+    ...settings,
+    status: {
+      lastRunAt: Timestamp.now(),
+      lastRunMode: String(mode || ''),
+      lastRunSummary: clone(summary),
+      lastError: String(error || ''),
+    },
+  }, { merge: true });
+}
+
+export async function runLeadReactivationAutomationTick({
+  force = false,
+  dbOverride = null,
+  now = new Date(),
+} = {}) {
+  const db = await getDb(dbOverride);
+  const lock = await acquireLock(db, LOCK_DOC_ID, LOCK_TTL_MS);
+  if (!lock.acquired) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: 'lock_active',
+    };
+  }
+
+  try {
+    const loaded = await loadSettingsDoc(db);
+    const settings = loaded.settings;
+    if (!settings.enabled && !force) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'disabled',
+        settings,
+      };
+    }
+
+    const result = await runAlwaysOnLeadReactivation({
+      commit: true,
+      limit: settings.limitPerRun,
+      minSilenceHours: settings.minSilenceHours,
+      baseDelayMinutes: settings.baseDelayMinutes,
+      spacingSeconds: settings.spacingSeconds,
+      maxTouches: settings.maxTouches,
+      cadenceHours: settings.cadenceHours,
+      timezone: settings.timezone,
+      now,
+      dbOverride: db,
+    });
+
+    await persistAutomationStatus(db, settings, {
+      mode: 'always_on_tick',
+      summary: result.summary,
+      error: '',
+    });
+
+    return {
+      ok: true,
+      skipped: false,
+      result,
+      settings,
+    };
+  } catch (error) {
+    const loaded = await loadSettingsDoc(db);
+    await persistAutomationStatus(db, loaded.settings, {
+      mode: 'always_on_tick',
+      summary: null,
+      error: String(error?.message || error || ''),
+    }).catch(() => {});
+
+    return {
+      ok: false,
+      skipped: false,
+      reason: 'error',
+      error: String(error?.message || error || ''),
+    };
+  } finally {
+    await releaseLock(lock.ref);
+  }
 }
