@@ -14,6 +14,7 @@ const DEFAULT_SPACING_SECONDS = Math.max(45, Number(process.env.AI_REACTIVATION_
 const DEFAULT_MAX_TOUCHES = Math.max(1, Number(process.env.AI_REACTIVATION_MAX_TOUCHES || 6));
 const DEFAULT_LIMIT_PER_RUN = Math.max(1, Number(process.env.AI_REACTIVATION_LIMIT_PER_RUN || 40));
 const DEFAULT_CADENCE_HOURS = [24, 72, 168];
+const DEFAULT_TARGET_STAGES = ['leads_nuevos', 'interesados_01', 'seguimiento'];
 const LAST_WEEK_SOURCE = 'last-week-reactivation';
 const ALWAYS_ON_SOURCE = 'always-on-reactivation';
 const SETTINGS_COLLECTION = 'automationSettings';
@@ -106,6 +107,32 @@ function normalizeCadenceHours(input) {
 
   if (normalized.length === 0) return [...DEFAULT_CADENCE_HOURS];
   return normalized.slice(0, 12);
+}
+
+function normalizeStageToken(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function normalizeTargetStages(input, fallback = DEFAULT_TARGET_STAGES) {
+  const chunks = Array.isArray(input)
+    ? input
+    : String(input || '')
+      .split(/[,\n;|]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const normalized = chunks
+    .map((item) => normalizeStageToken(item))
+    .filter(Boolean)
+    .slice(0, 20);
+
+  if (normalized.length === 0) return [...fallback];
+  return [...new Set(normalized)];
 }
 
 function clone(value = null) {
@@ -203,6 +230,37 @@ function serializeLead(docSnap) {
   };
 }
 
+function getLeadActivityMs(lead = {}) {
+  return Math.max(
+    toMillis(lead?.lastInboundAt),
+    toMillis(lead?.lastMessageAt),
+    toMillis(lead?.fecha_creacion)
+  );
+}
+
+function resolveLeadStageKey(lead = {}) {
+  const etapa = normalizeStageToken(lead?.etapa || lead?.etapaNombre || '');
+  if (etapa) return etapa;
+  return 'leads_nuevos';
+}
+
+function sortAlwaysOnCandidates(leads = [], targetStages = DEFAULT_TARGET_STAGES) {
+  const stageOrder = new Map();
+  normalizeTargetStages(targetStages).forEach((stage, index) => {
+    stageOrder.set(stage, index);
+  });
+  const defaultOrder = stageOrder.size + 1;
+
+  return [...leads].sort((a, b) => {
+    const aStage = resolveLeadStageKey(a);
+    const bStage = resolveLeadStageKey(b);
+    const aOrder = stageOrder.has(aStage) ? stageOrder.get(aStage) : defaultOrder;
+    const bOrder = stageOrder.has(bStage) ? stageOrder.get(bStage) : defaultOrder;
+    if (aOrder !== bOrder) return aOrder - bOrder;
+    return getLeadActivityMs(b) - getLeadActivityMs(a);
+  });
+}
+
 function buildMessagePreview(message = '') {
   return cleanText(message).slice(0, 220);
 }
@@ -217,6 +275,7 @@ function createDefaultSettings() {
     maxTouches: DEFAULT_MAX_TOUCHES,
     limitPerRun: DEFAULT_LIMIT_PER_RUN,
     cadenceHours: [...DEFAULT_CADENCE_HOURS],
+    targetStages: [...DEFAULT_TARGET_STAGES],
     updatedAt: null,
     updatedBy: '',
     status: {
@@ -243,6 +302,10 @@ function normalizeSettingsInput(input = {}, previous = null) {
     maxTouches: Math.max(1, Math.floor(asPositiveNumber(input.maxTouches, base.maxTouches, 1))),
     limitPerRun: Math.max(1, Math.floor(asPositiveNumber(input.limitPerRun, base.limitPerRun, 1))),
     cadenceHours: normalizeCadenceHours(input.cadenceHours !== undefined ? input.cadenceHours : base.cadenceHours),
+    targetStages: normalizeTargetStages(
+      input.targetStages !== undefined ? input.targetStages : base.targetStages,
+      DEFAULT_TARGET_STAGES
+    ),
     updatedAt: base.updatedAt || null,
     updatedBy: String(base.updatedBy || ''),
     status: {
@@ -321,6 +384,7 @@ export async function updateLeadReactivationSettings({
   maxTouches,
   limitPerRun,
   cadenceHours,
+  targetStages,
   updatedBy = '',
 } = {}, {
   dbOverride = null,
@@ -338,6 +402,7 @@ export async function updateLeadReactivationSettings({
       maxTouches,
       limitPerRun,
       cadenceHours,
+      targetStages,
     },
     loaded.settings
   );
@@ -455,11 +520,7 @@ function evaluateLeadBase(lead = {}, {
   minSilenceHours = DEFAULT_MIN_SILENCE_HOURS,
 } = {}) {
   const createdMs = toMillis(lead?.fecha_creacion);
-  const lastActivityMs = Math.max(
-    toMillis(lead?.lastInboundAt),
-    toMillis(lead?.lastMessageAt),
-    createdMs
-  );
+  const lastActivityMs = Math.max(getLeadActivityMs(lead), createdMs);
   const nowMs = toMillis(now) || Date.now();
   const minSilenceMs = Math.max(1, Number(minSilenceHours || DEFAULT_MIN_SILENCE_HOURS)) * 60 * 60 * 1000;
 
@@ -506,6 +567,12 @@ export function evaluateLeadForAlwaysOn(lead = {}, {
   settings = createDefaultSettings(),
   now = new Date(),
 } = {}) {
+  const stageKey = resolveLeadStageKey(lead);
+  const targetStages = normalizeTargetStages(settings?.targetStages, DEFAULT_TARGET_STAGES);
+  if (!targetStages.includes(stageKey)) {
+    return { eligible: false, reason: 'outside_target_stage', stageKey };
+  }
+
   const cadenceHours = normalizeCadenceHours(settings?.cadenceHours);
   const aiState = lead?.aiFollowup && typeof lead.aiFollowup === 'object' ? lead.aiFollowup : {};
   if (aiState?.enabled === false || aiState?.paused === true) {
@@ -535,6 +602,7 @@ export function evaluateLeadForAlwaysOn(lead = {}, {
   return {
     ...base,
     contextKey: detectLeadContext(lead),
+    stageKey,
     touchCount,
     requiredSilenceHours,
   };
@@ -582,27 +650,21 @@ async function loadLeadsForAlwaysOn(db, {
 } = {}) {
   const cutoffDate = new Date(Date.now() - (Math.max(12, Number(minSilenceHours || DEFAULT_MIN_SILENCE_HOURS)) * 60 * 60 * 1000));
   const collection = db.collection('leads');
-  const expandedLimit = Math.max(200, Math.min(1500, Math.max(1, Number(limit || DEFAULT_LIMIT_PER_RUN)) * 8));
+  const expandedLimit = Math.max(300, Math.min(5000, Math.max(1, Number(limit || DEFAULT_LIMIT_PER_RUN)) * 25));
 
   try {
     const snap = await collection
-      .orderBy('lastMessageAt', 'asc')
+      .where('lastMessageAt', '<=', cutoffDate)
+      .orderBy('lastMessageAt', 'desc')
       .limit(expandedLimit)
       .get();
 
     const rows = snap.docs
       .map(serializeLead)
-      .filter((lead) => {
-        const activityMs = Math.max(
-          toMillis(lead?.lastInboundAt),
-          toMillis(lead?.lastMessageAt),
-          toMillis(lead?.fecha_creacion)
-        );
-        return activityMs > 0 && activityMs <= cutoffDate.getTime();
-      });
+      .filter((lead) => getLeadActivityMs(lead) > 0 && getLeadActivityMs(lead) <= cutoffDate.getTime());
 
     return {
-      mode: 'order_by_last_message',
+      mode: 'last_message_lte_cutoff_desc',
       queryError: '',
       leads: rows,
     };
@@ -610,19 +672,8 @@ async function loadLeadsForAlwaysOn(db, {
     const scan = await collection.get();
     const rows = scan.docs
       .map(serializeLead)
-      .filter((lead) => {
-        const activityMs = Math.max(
-          toMillis(lead?.lastInboundAt),
-          toMillis(lead?.lastMessageAt),
-          toMillis(lead?.fecha_creacion)
-        );
-        return activityMs > 0 && activityMs <= cutoffDate.getTime();
-      })
-      .sort((a, b) => {
-        const aMs = Math.max(toMillis(a?.lastMessageAt), toMillis(a?.fecha_creacion));
-        const bMs = Math.max(toMillis(b?.lastMessageAt), toMillis(b?.fecha_creacion));
-        return aMs - bMs;
-      });
+      .filter((lead) => getLeadActivityMs(lead) > 0 && getLeadActivityMs(lead) <= cutoffDate.getTime())
+      .sort((a, b) => getLeadActivityMs(b) - getLeadActivityMs(a));
 
     return {
       mode: 'full_scan_fallback',
@@ -831,6 +882,7 @@ export async function runAlwaysOnLeadReactivation({
   spacingSeconds = DEFAULT_SPACING_SECONDS,
   maxTouches = DEFAULT_MAX_TOUCHES,
   cadenceHours = DEFAULT_CADENCE_HOURS,
+  targetStages = DEFAULT_TARGET_STAGES,
   timezone: tz = DEFAULT_TIMEZONE,
   now = new Date(),
   dbOverride = null,
@@ -849,11 +901,13 @@ export async function runAlwaysOnLeadReactivation({
     maxTouches,
     limitPerRun: limit,
     cadenceHours,
+    targetStages,
   }, createDefaultSettings());
 
   const campaignId = `always-on-${dayjs(now).tz(settings.timezone).format('YYYYMMDDHHmm')}`;
+  const candidateLeads = sortAlwaysOnCandidates(loaded.leads, settings.targetStages);
 
-  for (const lead of loaded.leads) {
+  for (const lead of candidateLeads) {
     if (eligible.length >= settings.limitPerRun) {
       skipped.push({
         leadId: lead.id,
@@ -935,6 +989,7 @@ export async function runAlwaysOnLeadReactivation({
       maxTouches: Number(settings.maxTouches),
       limitPerRun: Number(settings.limitPerRun),
       cadenceHours: [...settings.cadenceHours],
+      targetStages: [...settings.targetStages],
     },
     eligible,
     scheduled,
@@ -994,6 +1049,7 @@ export async function runLeadReactivationAutomationTick({
       spacingSeconds: settings.spacingSeconds,
       maxTouches: settings.maxTouches,
       cadenceHours: settings.cadenceHours,
+      targetStages: settings.targetStages,
       timezone: settings.timezone,
       now,
       dbOverride: db,

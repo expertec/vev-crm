@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildLeadFollowupVariant,
+  evaluateLeadForAlwaysOn,
   evaluateLeadForReactivation,
   getPreviousCalendarWeekWindow,
 } from '../services/leadReactivationService.js';
@@ -57,4 +58,57 @@ test('omite leads con mensajes no leidos', () => {
 
   assert.equal(result.eligible, false);
   assert.equal(result.reason, 'has_unread_messages');
+});
+
+test('always-on considera Leads nuevos cuando no hay etapa', () => {
+  const result = evaluateLeadForAlwaysOn(
+    {
+      id: 'lead-new',
+      nombre: 'Ana',
+      telefono: '5215559998877',
+      fecha_creacion: new Date('2026-05-20T12:00:00.000Z'),
+      lastMessageAt: new Date('2026-05-20T12:00:00.000Z'),
+      unreadCount: 0,
+      hasActiveSequences: false,
+    },
+    {
+      settings: {
+        targetStages: ['leads_nuevos'],
+        minSilenceHours: 24,
+        maxTouches: 6,
+        cadenceHours: [24, 72, 168],
+      },
+      now: new Date('2026-05-26T18:00:00.000Z'),
+    }
+  );
+
+  assert.equal(result.eligible, true);
+  assert.equal(result.stageKey, 'leads_nuevos');
+});
+
+test('always-on omite leads fuera de etapas objetivo', () => {
+  const result = evaluateLeadForAlwaysOn(
+    {
+      id: 'lead-stage-out',
+      nombre: 'Luis',
+      telefono: '5215559991122',
+      etapa: 'seguimiento',
+      fecha_creacion: new Date('2026-05-20T12:00:00.000Z'),
+      lastMessageAt: new Date('2026-05-20T12:00:00.000Z'),
+      unreadCount: 0,
+      hasActiveSequences: false,
+    },
+    {
+      settings: {
+        targetStages: ['leads_nuevos'],
+        minSilenceHours: 24,
+        maxTouches: 6,
+        cadenceHours: [24, 72, 168],
+      },
+      now: new Date('2026-05-26T18:00:00.000Z'),
+    }
+  );
+
+  assert.equal(result.eligible, false);
+  assert.equal(result.reason, 'outside_target_stage');
 });

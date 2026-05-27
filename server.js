@@ -2799,6 +2799,7 @@ app.post('/api/admin/lead-reactivation/settings', async (req, res) => {
     maxTouches,
     limitPerRun,
     cadenceHours,
+    targetStages,
   } = req.body || {};
 
   try {
@@ -2812,6 +2813,7 @@ app.post('/api/admin/lead-reactivation/settings', async (req, res) => {
         maxTouches,
         limitPerRun,
         cadenceHours,
+        targetStages,
         updatedBy: String(req.headers['x-user-email'] || req.headers['x-user-id'] || 'crm'),
       }
     );
@@ -2831,6 +2833,7 @@ app.post('/api/admin/lead-reactivation/always-on', async (req, res) => {
     spacingSeconds = 95,
     maxTouches = 6,
     cadenceHours = [24, 72, 168],
+    targetStages = ['leads_nuevos', 'interesados_01', 'seguimiento'],
     timezone = 'America/Monterrey',
   } = req.body || {};
 
@@ -2849,6 +2852,7 @@ app.post('/api/admin/lead-reactivation/always-on', async (req, res) => {
       spacingSeconds: Math.max(45, Number(spacingSeconds || 95) || 95),
       maxTouches: Math.max(1, Number(maxTouches || 6) || 6),
       cadenceHours,
+      targetStages,
       timezone: String(timezone || '').trim() || 'America/Monterrey',
     });
     return res.json({ success: true, ...result });
