@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc.js';
 import timezone from 'dayjs/plugin/timezone.js';
-import { Timestamp } from 'firebase-admin/firestore';
+import { Timestamp, FieldValue } from 'firebase-admin/firestore';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -15,10 +15,18 @@ const DEFAULT_MAX_TOUCHES = Math.max(1, Number(process.env.AI_REACTIVATION_MAX_T
 const DEFAULT_LIMIT_PER_RUN = Math.max(1, Number(process.env.AI_REACTIVATION_LIMIT_PER_RUN || 40));
 const DEFAULT_CADENCE_HOURS = [24, 72, 168];
 const DEFAULT_TARGET_STAGES = ['leads_nuevos', 'interesados_01', 'seguimiento'];
+// Anti-baneo: horario habil, tope diario por numero y warm-up (arranque gradual).
+const DEFAULT_SEND_WINDOW_START_HOUR = Math.min(23, Math.max(0, Math.floor(Number(process.env.AI_REACTIVATION_WINDOW_START ?? 9))));
+const DEFAULT_SEND_WINDOW_END_HOUR = Math.min(24, Math.max(1, Math.floor(Number(process.env.AI_REACTIVATION_WINDOW_END ?? 20))));
+const DEFAULT_DAILY_CAP = Math.max(1, Math.floor(Number(process.env.AI_REACTIVATION_DAILY_CAP || 60)));
+const DEFAULT_WARMUP_ENABLED = String(process.env.AI_REACTIVATION_WARMUP || 'on').trim().toLowerCase() !== 'off';
+const DEFAULT_WARMUP_START_CAP = Math.max(1, Math.floor(Number(process.env.AI_REACTIVATION_WARMUP_START_CAP || 20)));
+const DEFAULT_WARMUP_DAILY_INCREMENT = Math.max(0, Math.floor(Number(process.env.AI_REACTIVATION_WARMUP_INCREMENT || 10)));
 const LAST_WEEK_SOURCE = 'last-week-reactivation';
 const ALWAYS_ON_SOURCE = 'always-on-reactivation';
 const SETTINGS_COLLECTION = 'automationSettings';
 const SETTINGS_DOC_ID = 'leadReactivation24x7';
+const COUNTER_COLLECTION = 'automationCounters';
 const LOCK_COLLECTION = 'automationLocks';
 const LOCK_DOC_ID = 'leadReactivation24x7';
 const LOCK_TTL_MS = 8 * 60 * 1000;
@@ -363,6 +371,17 @@ function normalizePriorityMode(value) {
   return PRIORITY_MODES.has(safe) ? safe : 'newest';
 }
 
+function clampInt(value, fallback, min, max) {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function normalizeDateKey(value) {
+  const safe = String(value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(safe) ? safe : '';
+}
+
 function resolveLeadStageKey(lead = {}) {
   const etapa = normalizeStageToken(lead?.etapa || lead?.etapaNombre || '');
   if (etapa) return etapa;
@@ -419,6 +438,13 @@ function createDefaultSettings() {
     cadenceHours: [...DEFAULT_CADENCE_HOURS],
     targetStages: [...DEFAULT_TARGET_STAGES],
     priorityMode: 'newest',
+    sendWindowStartHour: DEFAULT_SEND_WINDOW_START_HOUR,
+    sendWindowEndHour: DEFAULT_SEND_WINDOW_END_HOUR,
+    dailyCap: DEFAULT_DAILY_CAP,
+    warmupEnabled: DEFAULT_WARMUP_ENABLED,
+    warmupStartCap: DEFAULT_WARMUP_START_CAP,
+    warmupDailyIncrement: DEFAULT_WARMUP_DAILY_INCREMENT,
+    warmupStartDate: '',
     updatedAt: null,
     updatedBy: '',
     status: {
@@ -450,6 +476,19 @@ function normalizeSettingsInput(input = {}, previous = null) {
       DEFAULT_TARGET_STAGES
     ),
     priorityMode: normalizePriorityMode(input.priorityMode !== undefined ? input.priorityMode : base.priorityMode),
+    sendWindowStartHour: clampInt(
+      input.sendWindowStartHour !== undefined ? input.sendWindowStartHour : base.sendWindowStartHour,
+      DEFAULT_SEND_WINDOW_START_HOUR, 0, 23
+    ),
+    sendWindowEndHour: clampInt(
+      input.sendWindowEndHour !== undefined ? input.sendWindowEndHour : base.sendWindowEndHour,
+      DEFAULT_SEND_WINDOW_END_HOUR, 1, 24
+    ),
+    dailyCap: Math.max(1, Math.floor(asPositiveNumber(input.dailyCap, base.dailyCap, 1))),
+    warmupEnabled: input.warmupEnabled === undefined ? Boolean(base.warmupEnabled) : Boolean(input.warmupEnabled),
+    warmupStartCap: Math.max(1, Math.floor(asPositiveNumber(input.warmupStartCap, base.warmupStartCap, 1))),
+    warmupDailyIncrement: Math.max(0, Math.floor(asPositiveNumber(input.warmupDailyIncrement, base.warmupDailyIncrement, 0))),
+    warmupStartDate: normalizeDateKey(input.warmupStartDate !== undefined ? input.warmupStartDate : base.warmupStartDate),
     updatedAt: base.updatedAt || null,
     updatedBy: String(base.updatedBy || ''),
     status: {
@@ -530,6 +569,13 @@ export async function updateLeadReactivationSettings({
   cadenceHours,
   targetStages,
   priorityMode,
+  sendWindowStartHour,
+  sendWindowEndHour,
+  dailyCap,
+  warmupEnabled,
+  warmupStartCap,
+  warmupDailyIncrement,
+  warmupStartDate,
   updatedBy = '',
 } = {}, {
   dbOverride = null,
@@ -549,6 +595,13 @@ export async function updateLeadReactivationSettings({
       cadenceHours,
       targetStages,
       priorityMode,
+      sendWindowStartHour,
+      sendWindowEndHour,
+      dailyCap,
+      warmupEnabled,
+      warmupStartCap,
+      warmupDailyIncrement,
+      warmupStartDate,
     },
     loaded.settings
   );
@@ -1184,6 +1237,62 @@ async function persistAutomationStatus(db, settings, {
   }, { merge: true });
 }
 
+// ----------------------------- Candado anti-baneo -----------------------------
+
+function dateKeyInTz(now, tz) {
+  return dayjs(now).tz(tz || DEFAULT_TIMEZONE).format('YYYY-MM-DD');
+}
+
+function localHourInTz(now, tz) {
+  return dayjs(now).tz(tz || DEFAULT_TIMEZONE).hour();
+}
+
+// Horario habil: solo enviar entre startHour (incl.) y endHour (excl.) en la tz del CRM.
+export function evaluateSendWindow(settings = {}, now = new Date()) {
+  let start = clampInt(settings?.sendWindowStartHour, DEFAULT_SEND_WINDOW_START_HOUR, 0, 23);
+  let end = clampInt(settings?.sendWindowEndHour, DEFAULT_SEND_WINDOW_END_HOUR, 1, 24);
+  if (end <= start) {
+    start = DEFAULT_SEND_WINDOW_START_HOUR;
+    end = DEFAULT_SEND_WINDOW_END_HOUR;
+  }
+  const hour = localHourInTz(now, settings?.timezone);
+  return { ok: hour >= start && hour < end, hour, start, end };
+}
+
+// Tope diario por numero, con warm-up (arranque gradual).
+export function computeEffectiveDailyCap(settings = {}, todayKey = '') {
+  const dailyCap = Math.max(1, Math.floor(asPositiveNumber(settings?.dailyCap, DEFAULT_DAILY_CAP, 1)));
+  if (!settings?.warmupEnabled) {
+    return { cap: dailyCap, dailyCap, warmupDay: 0, warmupActive: false };
+  }
+  const startCap = Math.max(1, Math.floor(asPositiveNumber(settings?.warmupStartCap, DEFAULT_WARMUP_START_CAP, 1)));
+  const increment = Math.max(0, Math.floor(asPositiveNumber(settings?.warmupDailyIncrement, DEFAULT_WARMUP_DAILY_INCREMENT, 0)));
+  const startDate = normalizeDateKey(settings?.warmupStartDate) || todayKey;
+  const daysSinceStart = Math.max(0, dayjs(todayKey).diff(dayjs(startDate), 'day'));
+  const warmupCap = startCap + (increment * daysSinceStart);
+  const cap = Math.min(dailyCap, warmupCap);
+  return { cap, dailyCap, warmupCap, warmupDay: daysSinceStart, warmupActive: cap < dailyCap };
+}
+
+function dailyCounterRef(db, dateKey) {
+  return db.collection(COUNTER_COLLECTION).doc(`${SETTINGS_DOC_ID}:${dateKey}`);
+}
+
+async function getDailySentCount(db, dateKey) {
+  const snap = await dailyCounterRef(db, dateKey).get();
+  return snap.exists ? Math.max(0, Number(snap.data()?.count || 0)) : 0;
+}
+
+async function incrementDailySentCount(db, dateKey, amount) {
+  const value = Math.floor(Number(amount) || 0);
+  if (value <= 0) return;
+  await dailyCounterRef(db, dateKey).set({
+    dateKey,
+    count: FieldValue.increment(value),
+    updatedAt: Timestamp.now(),
+  }, { merge: true });
+}
+
 export async function runLeadReactivationAutomationTick({
   force = false,
   dbOverride = null,
@@ -1201,7 +1310,7 @@ export async function runLeadReactivationAutomationTick({
 
   try {
     const loaded = await loadSettingsDoc(db);
-    const settings = loaded.settings;
+    let settings = loaded.settings;
     if (!settings.enabled && !force) {
       return {
         ok: true,
@@ -1211,9 +1320,56 @@ export async function runLeadReactivationAutomationTick({
       };
     }
 
+    // Warm-up: fijar la fecha de arranque la primera vez que corre habilitado.
+    const todayKey = dateKeyInTz(now, settings.timezone);
+    if (settings.warmupEnabled && !settings.warmupStartDate) {
+      await loaded.ref.set({ warmupStartDate: todayKey }, { merge: true }).catch(() => {});
+      settings = { ...settings, warmupStartDate: todayKey };
+    }
+
+    // Capa 1: horario habil.
+    const windowState = evaluateSendWindow(settings, now);
+    if (!windowState.ok && !force) {
+      await persistAutomationStatus(db, settings, {
+        mode: 'always_on_tick',
+        summary: { skippedReason: 'outside_send_window', ...windowState },
+        error: '',
+      });
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'outside_send_window',
+        window: windowState,
+        settings,
+      };
+    }
+
+    // Capa 2 + 3: tope diario por numero con warm-up.
+    const capInfo = computeEffectiveDailyCap(settings, todayKey);
+    const sentToday = await getDailySentCount(db, todayKey);
+    const remaining = Math.max(0, capInfo.cap - sentToday);
+    if (remaining <= 0 && !force) {
+      await persistAutomationStatus(db, settings, {
+        mode: 'always_on_tick',
+        summary: { skippedReason: 'daily_cap_reached', sentToday, cap: capInfo.cap, warmupDay: capInfo.warmupDay },
+        error: '',
+      });
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'daily_cap_reached',
+        cap: capInfo,
+        sentToday,
+        settings,
+      };
+    }
+
+    // Limite efectivo de esta corrida: el menor entre lo permitido por run y lo que queda del dia.
+    const runLimit = force ? settings.limitPerRun : Math.min(settings.limitPerRun, remaining);
+
     const result = await runAlwaysOnLeadReactivation({
       commit: true,
-      limit: settings.limitPerRun,
+      limit: runLimit,
       minSilenceHours: settings.minSilenceHours,
       baseDelayMinutes: settings.baseDelayMinutes,
       spacingSeconds: settings.spacingSeconds,
@@ -1226,9 +1382,27 @@ export async function runLeadReactivationAutomationTick({
       dbOverride: db,
     });
 
+    // Registrar lo realmente programado contra el tope diario.
+    const scheduledCount = Number(result?.summary?.scheduledCount || 0);
+    if (scheduledCount > 0) {
+      await incrementDailySentCount(db, todayKey, scheduledCount).catch(() => {});
+    }
+
     await persistAutomationStatus(db, settings, {
       mode: 'always_on_tick',
-      summary: result.summary,
+      summary: {
+        ...result.summary,
+        antiBan: {
+          window: windowState,
+          dailyCap: capInfo.cap,
+          dailyCapMax: capInfo.dailyCap,
+          warmupDay: capInfo.warmupDay,
+          warmupActive: capInfo.warmupActive,
+          sentTodayBefore: sentToday,
+          sentTodayAfter: sentToday + scheduledCount,
+          runLimit,
+        },
+      },
       error: '',
     });
 
@@ -1236,6 +1410,13 @@ export async function runLeadReactivationAutomationTick({
       ok: true,
       skipped: false,
       result,
+      antiBan: {
+        window: windowState,
+        cap: capInfo,
+        sentTodayBefore: sentToday,
+        sentTodayAfter: sentToday + scheduledCount,
+        runLimit,
+      },
       settings,
     };
   } catch (error) {

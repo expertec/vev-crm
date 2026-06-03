@@ -2802,6 +2802,13 @@ app.post('/api/admin/lead-reactivation/settings', async (req, res) => {
     cadenceHours,
     targetStages,
     priorityMode,
+    sendWindowStartHour,
+    sendWindowEndHour,
+    dailyCap,
+    warmupEnabled,
+    warmupStartCap,
+    warmupDailyIncrement,
+    warmupStartDate,
   } = req.body || {};
 
   try {
@@ -2817,6 +2824,13 @@ app.post('/api/admin/lead-reactivation/settings', async (req, res) => {
         cadenceHours,
         targetStages,
         priorityMode,
+        sendWindowStartHour,
+        sendWindowEndHour,
+        dailyCap,
+        warmupEnabled,
+        warmupStartCap,
+        warmupDailyIncrement,
+        warmupStartDate,
         updatedBy: String(req.headers['x-user-email'] || req.headers['x-user-id'] || 'crm'),
       }
     );
@@ -6889,7 +6903,12 @@ cron.schedule('*/10 * * * *', async () => {
   try {
     const result = await runLeadReactivationAutomationTick();
     if (result?.skipped) {
-      if (result?.reason === 'disabled') return;
+      // Silenciar motivos esperados/frecuentes para no llenar el log cada 10 min.
+      if (['disabled', 'outside_send_window', 'lock_active'].includes(result?.reason)) return;
+      if (result?.reason === 'daily_cap_reached') {
+        console.log(`[lead-reactivation:24x7] tope diario alcanzado (${result?.sentToday || 0}/${result?.cap?.cap || '?'})`);
+        return;
+      }
       console.log('[lead-reactivation:24x7] skip:', result?.reason || 'unknown');
       return;
     }
