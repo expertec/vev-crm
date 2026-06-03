@@ -94,6 +94,7 @@ import {
   runLeadReactivationAutomationTick,
   updateLeadReactivationSettings,
 } from './services/leadReactivationService.js';
+import { classifyLeadReply } from './services/hotLeadDetector.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
@@ -2820,6 +2821,50 @@ app.post('/api/admin/lead-reactivation/settings', async (req, res) => {
     return res.json({ success: true, settings });
   } catch (error) {
     console.error('[admin/lead-reactivation/settings:save] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// Prueba del detector de respuestas calientes: clasifica un texto o un lead real
+// (con su historial) sin crear tareas ni modificar el lead.
+app.post('/api/admin/hot-lead/classify', async (req, res) => {
+  const { leadId = '', text = '' } = req.body || {};
+  try {
+    let leadData = {};
+    let recentMessages = [];
+    let latestText = String(text || '').trim();
+
+    if (leadId) {
+      const ref = db.collection('leads').doc(String(leadId));
+      const snap = await ref.get();
+      if (!snap.exists) {
+        return res.status(404).json({ error: 'Lead no encontrado.' });
+      }
+      leadData = { id: snap.id, ...(snap.data() || {}) };
+      const msgsSnap = await ref
+        .collection('messages')
+        .orderBy('timestamp', 'desc')
+        .limit(12)
+        .get();
+      recentMessages = msgsSnap.docs
+        .map((d) => d.data() || {})
+        .reverse()
+        .map((m) => ({ sender: m.sender === 'lead' ? 'lead' : 'business', content: String(m.content || '').trim() }))
+        .filter((m) => m.content);
+      if (!latestText) {
+        const lastLead = [...recentMessages].reverse().find((m) => m.sender === 'lead');
+        latestText = lastLead?.content || '';
+      }
+    }
+
+    if (!latestText) {
+      return res.status(400).json({ error: 'Falta texto a clasificar (text o un lead con mensajes).' });
+    }
+
+    const classification = await classifyLeadReply({ lead: leadData, recentMessages, latestText });
+    return res.json({ success: true, latestText, classification });
+  } catch (error) {
+    console.error('[admin/hot-lead/classify] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });

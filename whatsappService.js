@@ -30,6 +30,7 @@ import {
   phoneFromJid
 } from './queue.js';
 import { detectMetaAdSignal } from './utils/metaAdDetector.js';
+import { handleInboundLeadReply } from './services/hotLeadDetector.js';
 
 
 let latestQR = null;
@@ -1705,6 +1706,20 @@ export async function connectToWhatsApp() {
           await leadRef.update(upd);
 
           console.log('[WA] Guardado mensaje →', leadId, { mediaType, hasText: !!content, hasMedia: !!mediaUrl });
+
+          // Detector de respuestas calientes (no bloquea el pipeline; nunca lanza)
+          if (mediaType === 'text' && content) {
+            handleInboundLeadReply({
+              leadRef,
+              leadId,
+              leadData: {
+                ...(existingLeadData || {}),
+                nombre: existingLeadData?.nombre || msg.pushName || '',
+                telefono: normNum,
+              },
+              latestText: content,
+            }).catch(() => {});
+          }
         } catch (err) {
           messageHandledOk = false;
           console.error('[WA] ❌ Error procesando mensaje:', err);
