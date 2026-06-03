@@ -23,43 +23,156 @@ const LOCK_COLLECTION = 'automationLocks';
 const LOCK_DOC_ID = 'leadReactivation24x7';
 const LOCK_TTL_MS = 8 * 60 * 1000;
 
-const OPENERS = [
-  'Hola {{nombre}}, te escribo para dar seguimiento a tu pagina web.',
-  'Hola {{nombre}}, regreso por aqui para retomar lo de tu pagina web.',
-  'Hola {{nombre}}, sigo pendiente contigo sobre la web de tu negocio.',
-  'Hola {{nombre}}, te mando un mensaje corto para retomar tu pagina web.',
+// Muestra YA generada (el lead lleno el form y tiene slug): reenvia el sitio.
+const SAMPLE_READY_VARIANTS = [
+  'Hola {{nombre}}, te reenvio tu muestra para que la veas con calma. Si te gusta, hoy mismo la dejamos lista: {{link}}',
+  '{{nombre}}, echale un ojo otra vez a tu muestra y me dices si avanzamos: {{link}}',
+  'Hola {{nombre}}, aqui esta de nuevo el enlace de tu muestra, cualquier ajuste lo vemos juntos: {{link}}',
 ];
 
-const GENERIC_LINES = [
-  'Todavia puedo ayudarte a dejarla lista de forma accesible y sin hacerte perder tiempo.',
-  'Si sigues interesado, aun te puedo apoyar para sacarla rapido y bien hecha.',
-  'La idea es ayudarte a avanzar sin complicarte el proceso.',
+// Form de muestra GRATIS enviado pero NO llenado: invita a completarlo (gancho real).
+const FORM_INVITE_VARIANTS = [
+  'Hola {{nombre}}, te habia mandado el formulario para hacerte tu muestra de pagina GRATIS y vi que aun no lo llenas. Son 2 minutos y con eso te la armo: {{link}}',
+  '{{nombre}}, para hacerte tu muestra gratis solo necesito que llenes este formulario corto, asi la dejo a la medida de tu negocio: {{link}}',
+  'Hola {{nombre}}, aun puedo hacerte tu muestra de pagina sin costo. Llena aqui tus datos y yo me encargo de todo lo demas: {{link}}',
 ];
 
-const SAMPLE_LINES = [
-  'Quede pendiente sobre la muestra que te comparti y queria saber si la retomamos.',
-  'Si la muestra que viste te gusto, puedo ayudarte a convertirla en tu pagina final.',
-  'Vi que ya llevabas avance con la muestra y queria saber si lo seguimos.',
+// Biblioteca de "angulos" de seguimiento. Cada toque (cada dia) usa un angulo
+// distinto para mantener al lead presente sin repetir el mismo texto: mejor
+// conversion y mucho menor riesgo de baneo. Se rota por numero de toque.
+// {{nombre}} = primer nombre | {{tema}} = lo que pidio | {{link}} = su muestra.
+const FOLLOWUP_ANGLES = [
+  {
+    key: 'reintro',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, te escribo de NegociosWeb. Quedamos pendientes con {{tema}} y se que entre tantos mensajes a veces se traspapela. Lo retomamos?',
+      'Hola {{nombre}}, no quiero que se te pase: te habia compartido {{tema}}. Sigo disponible para ayudarte a dejarlo listo cuando gustes.',
+      'Hola {{nombre}}, paso a recordarte lo de {{tema}}. Se que pediste info a varios, por eso te doy seguimiento para no dejarte colgado.',
+    ],
+  },
+  {
+    key: 'muestra',
+    requiresLink: true,
+    variants: SAMPLE_READY_VARIANTS,
+  },
+  {
+    key: 'beneficio',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, una pagina propia hace que tu negocio se vea mas serio y te lleguen clientes incluso mientras duermes. Te ayudo a tenerla?',
+      '{{nombre}}, tener presencia en linea es lo que hace que te elijan a ti y no al de junto. Aun te puedo apoyar para dejar la tuya lista.',
+    ],
+  },
+  {
+    key: 'prueba_social',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, esta semana dejamos lista la pagina de otro negocio como el tuyo y ya esta recibiendo mensajes. Me encantaria hacer lo mismo por ti.',
+      '{{nombre}}, varios clientes que al inicio dudaban hoy ya venden mas con su pagina. Te muestro como quedaria la tuya?',
+    ],
+  },
+  {
+    key: 'pregunta',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, para no insistir de mas: que te detiene? Es tema de precio, de tiempo o tienes alguna duda? Lo resolvemos rapido.',
+      '{{nombre}}, que te sirve mas: que te mande precio, ejemplos o que platiquemos por llamada? Tu dime y le seguimos.',
+    ],
+  },
+  {
+    key: 'oferta',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, este mes tengo un espacio para dejar tu proyecto listo con condiciones especiales. Lo aprovechamos?',
+      '{{nombre}}, si lo retomamos esta semana te puedo dar un mejor precio por iniciar ahora. Te paso los detalles?',
+    ],
+  },
+  {
+    key: 'escasez',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, voy cerrando los proyectos de este mes y queria apartarte un lugar antes de llenarme. Avanzamos?',
+      '{{nombre}}, me quedan pocos espacios para entregar este mes. Si quieres te aparto el tuyo y arrancamos.',
+    ],
+  },
+  {
+    key: 'breakup',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, no quiero llenarte de mensajes, asi que cierro el seguimiento por ahora. Si mas adelante retomas {{tema}}, aqui estoy para apoyarte.',
+      '{{nombre}}, te dejo de escribir por ahora para no molestar. Cuando quieras retomar {{tema}}, me mandas un mensaje y seguimos.',
+    ],
+  },
 ];
 
-const WEB_LINES = [
-  'Quede pendiente despues de la web que te comparti y queria saber si la retomamos.',
-  'Si la propuesta que viste te sigue interesando, todavia puedo ayudarte a dejarla lista.',
-  'Puedo ayudarte a ajustar la web que ya viste para que quede lista para vender.',
-];
+const FALLBACK_ANGLE_KEY = 'beneficio';
 
-const CTAS = [
-  'Si quieres, te envio opciones, ejemplos o precio por aqui.',
-  'Si aun te interesa, hoy mismo te paso lo que sigue.',
-  'Si te parece, te mando los siguientes pasos y te cotizo por aqui.',
-  'Si gustas, te envio por aqui una opcion clara para avanzar.',
-];
+function getSampleSiteBaseUrl() {
+  return String(
+    process.env.SAMPLE_SITE_BASE_URL
+      || process.env.SITE_PUBLIC_BASE_URL
+      || 'https://negociosweb.mx/site'
+  ).replace(/\/+$/, '');
+}
 
-const CLOSES = [
-  'Si por ahora lo quieres pausar, tambien dime y no te insisto.',
-  'Si ya no va por ahora, solo avisame y cierro seguimiento.',
-  'Si prefieres verlo despues, tambien te dejo de seguir por ahora sin problema.',
-];
+function resolveSampleSlug(lead = {}) {
+  const candidate = [
+    lead?.slug,
+    lead?.webSlug,
+    lead?.siteSlug,
+    lead?.briefWeb?.slug,
+    lead?.schema?.slug,
+  ].find((v) => String(v || '').trim());
+  return String(candidate || '').trim();
+}
+
+function buildSampleLink(lead = {}) {
+  const slug = resolveSampleSlug(lead);
+  if (!slug) return '';
+  return `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
+}
+
+function resolveTema(contextKey = 'generic') {
+  if (contextKey === 'web_sent') return 'tu pagina web';
+  if (contextKey === 'sample_sent') return 'tu muestra';
+  return 'la informacion que pediste';
+}
+
+function getSampleFormBaseUrl() {
+  return String(
+    process.env.SAMPLE_FORM_BASE_URL
+      || process.env.PUBLIC_SAMPLE_FORM_URL
+      || process.env.NEXT_PUBLIC_SITE_URL
+      || 'https://negociosweb.mx'
+  ).replace(/\/+$/, '');
+}
+
+function resolvePhoneDigits(lead = {}) {
+  const fromPhone = String(lead?.telefono || '').replace(/\D/g, '');
+  if (fromPhone.length >= 10) return fromPhone;
+  const jid = String(lead?.resolvedJid || lead?.jid || '');
+  const match = jid.match(/(\d{10,15})@/);
+  if (match) return match[1];
+  return fromPhone;
+}
+
+// Link al formulario de muestra GRATIS (lo que el lead debe llenar).
+function buildSampleFormLink(lead = {}) {
+  const digits = resolvePhoneDigits(lead);
+  if (!digits || digits.length < 10) return '';
+  return `${getSampleFormBaseUrl()}/muestra/${encodeURIComponent(digits)}`;
+}
+
+// El lead ya lleno el formulario de muestra?
+function hasLeadCompletedForm(lead = {}) {
+  const etapa = String(lead?.etapa || lead?.etapaNombre || '').toLowerCase();
+  if (etapa === 'form_submitted') return true;
+  const tags = Array.isArray(lead?.etiquetas)
+    ? lead.etiquetas.map((t) => String(t || '').toLowerCase())
+    : [];
+  return tags.includes('formok') || tags.includes('formulariocompletado');
+}
 
 function hashToInt(value = '') {
   const digest = crypto.createHash('sha256').update(String(value || '')).digest('hex').slice(0, 8);
@@ -80,10 +193,17 @@ function firstName(value = '') {
   return raw ? raw.split(' ')[0] : '';
 }
 
-function renderTemplate(template = '', lead = {}) {
-  const safeName = firstName(lead?.nombre || '') || '';
-  const text = String(template || '').replace(/\{\{nombre\}\}/g, safeName);
-  return cleanText(text.replace(/\s([,.!?;:])/g, '$1'));
+function renderTemplate(template = '', vars = {}) {
+  let text = String(template || '')
+    .replace(/\{\{nombre\}\}/g, vars.nombre || '')
+    .replace(/\{\{tema\}\}/g, vars.tema || '')
+    .replace(/\{\{link\}\}/g, vars.link || '');
+  // Cuando no hay nombre, evitar "Hola , ..." o ", ..." al inicio.
+  text = text.replace(/^Hola\s*,/i, 'Hola,');
+  text = text.replace(/^\s*,\s*/, '');
+  text = cleanText(text.replace(/\s([,.!?;:])/g, '$1'));
+  if (text) text = text.charAt(0).toUpperCase() + text.slice(1);
+  return text;
 }
 
 function asPositiveNumber(value, fallback = 0, min = 0) {
@@ -213,12 +333,6 @@ function detectLeadContext(lead = {}) {
   return 'generic';
 }
 
-function resolveMessagePool(contextKey = 'generic') {
-  if (contextKey === 'web_sent') return WEB_LINES;
-  if (contextKey === 'sample_sent') return SAMPLE_LINES;
-  return GENERIC_LINES;
-}
-
 function buildCampaignId(window) {
   return `last-week-${window.fromDate}_${window.toDate}`;
 }
@@ -238,25 +352,53 @@ function getLeadActivityMs(lead = {}) {
   );
 }
 
+function getLeadCreatedMs(lead = {}) {
+  return toMillis(lead?.fecha_creacion);
+}
+
+const PRIORITY_MODES = new Set(['newest', 'oldest', 'stage']);
+
+function normalizePriorityMode(value) {
+  const safe = String(value || '').trim().toLowerCase();
+  return PRIORITY_MODES.has(safe) ? safe : 'newest';
+}
+
 function resolveLeadStageKey(lead = {}) {
   const etapa = normalizeStageToken(lead?.etapa || lead?.etapaNombre || '');
   if (etapa) return etapa;
   return 'leads_nuevos';
 }
 
-function sortAlwaysOnCandidates(leads = [], targetStages = DEFAULT_TARGET_STAGES) {
+function sortAlwaysOnCandidates(leads = [], targetStages = DEFAULT_TARGET_STAGES, priorityMode = 'newest') {
+  const mode = normalizePriorityMode(priorityMode);
   const stageOrder = new Map();
   normalizeTargetStages(targetStages).forEach((stage, index) => {
     stageOrder.set(stage, index);
   });
   const defaultOrder = stageOrder.size + 1;
 
+  const stageRank = (lead) => {
+    const stage = resolveLeadStageKey(lead);
+    return stageOrder.has(stage) ? stageOrder.get(stage) : defaultOrder;
+  };
+
   return [...leads].sort((a, b) => {
-    const aStage = resolveLeadStageKey(a);
-    const bStage = resolveLeadStageKey(b);
-    const aOrder = stageOrder.has(aStage) ? stageOrder.get(aStage) : defaultOrder;
-    const bOrder = stageOrder.has(bStage) ? stageOrder.get(bStage) : defaultOrder;
-    if (aOrder !== bOrder) return aOrder - bOrder;
+    // Prioridad principal: lead mas nuevo (o mas viejo) por fecha de creacion.
+    if (mode === 'newest' || mode === 'oldest') {
+      const aCreated = getLeadCreatedMs(a);
+      const bCreated = getLeadCreatedMs(b);
+      if (aCreated !== bCreated) {
+        return mode === 'newest' ? bCreated - aCreated : aCreated - bCreated;
+      }
+      // Empate por fecha: respeta el orden del embudo, luego actividad reciente.
+      const stageDiff = stageRank(a) - stageRank(b);
+      if (stageDiff !== 0) return stageDiff;
+      return getLeadActivityMs(b) - getLeadActivityMs(a);
+    }
+
+    // mode === 'stage': comportamiento clasico (embudo primero).
+    const stageDiff = stageRank(a) - stageRank(b);
+    if (stageDiff !== 0) return stageDiff;
     return getLeadActivityMs(b) - getLeadActivityMs(a);
   });
 }
@@ -276,6 +418,7 @@ function createDefaultSettings() {
     limitPerRun: DEFAULT_LIMIT_PER_RUN,
     cadenceHours: [...DEFAULT_CADENCE_HOURS],
     targetStages: [...DEFAULT_TARGET_STAGES],
+    priorityMode: 'newest',
     updatedAt: null,
     updatedBy: '',
     status: {
@@ -306,6 +449,7 @@ function normalizeSettingsInput(input = {}, previous = null) {
       input.targetStages !== undefined ? input.targetStages : base.targetStages,
       DEFAULT_TARGET_STAGES
     ),
+    priorityMode: normalizePriorityMode(input.priorityMode !== undefined ? input.priorityMode : base.priorityMode),
     updatedAt: base.updatedAt || null,
     updatedBy: String(base.updatedBy || ''),
     status: {
@@ -385,6 +529,7 @@ export async function updateLeadReactivationSettings({
   limitPerRun,
   cadenceHours,
   targetStages,
+  priorityMode,
   updatedBy = '',
 } = {}, {
   dbOverride = null,
@@ -403,6 +548,7 @@ export async function updateLeadReactivationSettings({
       limitPerRun,
       cadenceHours,
       targetStages,
+      priorityMode,
     },
     loaded.settings
   );
@@ -480,37 +626,57 @@ export function getExplicitWindow({
 export function buildLeadFollowupVariant(lead = {}, {
   campaignId = '',
   contextKey = detectLeadContext(lead),
+  touchIndex = 0,
 } = {}) {
+  const nombre = firstName(lead?.nombre || '');
+  const safeTouch = Math.max(0, Math.floor(Number(touchIndex) || 0));
+  let angle = FOLLOWUP_ANGLES[safeTouch % FOLLOWUP_ANGLES.length];
+
+  // Resolver que "muestra" tiene el lead:
+  //  - slug presente  -> muestra YA generada, reenviamos el sitio.
+  //  - sin slug        -> el form de muestra GRATIS aun no se llena, reenviamos el form.
+  const slug = resolveSampleSlug(lead);
+  const sampleLink = slug ? buildSampleLink(lead) : '';
+  const formLink = slug ? '' : buildSampleFormLink(lead);
+  const link = sampleLink || formLink;
+
+  let tema;
+  if (slug || hasLeadCompletedForm(lead)) tema = resolveTema(contextKey);
+  else if (formLink) tema = 'tu muestra de pagina gratis';
+  else tema = resolveTema(contextKey);
+
+  // Seleccion de variantes. El angulo "muestra" es dinamico segun el link disponible.
+  let variants = angle.variants;
+  if (angle.key === 'muestra') {
+    if (sampleLink) {
+      variants = SAMPLE_READY_VARIANTS;
+    } else if (formLink) {
+      variants = FORM_INVITE_VARIANTS;
+    } else {
+      angle = FOLLOWUP_ANGLES.find((a) => a.key === FALLBACK_ANGLE_KEY) || FOLLOWUP_ANGLES[0];
+      variants = angle.variants;
+    }
+  } else if (angle.requiresLink && !link) {
+    angle = FOLLOWUP_ANGLES.find((a) => a.key === FALLBACK_ANGLE_KEY) || FOLLOWUP_ANGLES[0];
+    variants = angle.variants;
+  }
+
   const seedBase = [
     campaignId,
     lead?.id || '',
     lead?.telefono || '',
-    lead?.estado || '',
-    lead?.etapa || '',
     contextKey,
+    angle.key,
+    safeTouch,
   ].join('|');
 
-  const openerIndex = pickVariantIndex(`${seedBase}:open`, OPENERS.length);
-  const bodyPool = resolveMessagePool(contextKey);
-  const bodyIndex = pickVariantIndex(`${seedBase}:body`, bodyPool.length);
-  const ctaIndex = pickVariantIndex(`${seedBase}:cta`, CTAS.length);
-  const closeIndex = pickVariantIndex(`${seedBase}:close`, CLOSES.length);
-
-  const lines = [
-    renderTemplate(OPENERS[openerIndex], lead),
-    renderTemplate(bodyPool[bodyIndex], lead),
-    renderTemplate(CTAS[ctaIndex], lead),
-    renderTemplate(CLOSES[closeIndex], lead),
-  ].filter(Boolean);
-
-  let message = cleanText(lines.join(' '));
-  if (!firstName(lead?.nombre || '')) {
-    message = message.replace(/^Hola,\s*/i, 'Hola, ');
-  }
+  const variantIndex = pickVariantIndex(`${seedBase}:v`, variants.length);
+  const message = renderTemplate(variants[variantIndex], { nombre, tema, link });
 
   return {
     contextKey,
-    variationKey: `o${openerIndex}-b${bodyIndex}-c${ctaIndex}-x${closeIndex}`,
+    angleKey: angle.key,
+    variationKey: `${angle.key}-t${safeTouch}-v${variantIndex}`,
     message: message.slice(0, 520),
   };
 }
@@ -883,6 +1049,7 @@ export async function runAlwaysOnLeadReactivation({
   maxTouches = DEFAULT_MAX_TOUCHES,
   cadenceHours = DEFAULT_CADENCE_HOURS,
   targetStages = DEFAULT_TARGET_STAGES,
+  priorityMode = 'newest',
   timezone: tz = DEFAULT_TIMEZONE,
   now = new Date(),
   dbOverride = null,
@@ -902,10 +1069,11 @@ export async function runAlwaysOnLeadReactivation({
     limitPerRun: limit,
     cadenceHours,
     targetStages,
+    priorityMode,
   }, createDefaultSettings());
 
   const campaignId = `always-on-${dayjs(now).tz(settings.timezone).format('YYYYMMDDHHmm')}`;
-  const candidateLeads = sortAlwaysOnCandidates(loaded.leads, settings.targetStages);
+  const candidateLeads = sortAlwaysOnCandidates(loaded.leads, settings.targetStages, settings.priorityMode);
 
   for (const lead of candidateLeads) {
     if (eligible.length >= settings.limitPerRun) {
@@ -936,6 +1104,7 @@ export async function runAlwaysOnLeadReactivation({
     const variant = buildLeadFollowupVariant(lead, {
       campaignId,
       contextKey: evaluation.contextKey,
+      touchIndex: evaluation.touchCount,
     });
     const plan = sanitizePlanItem(lead, evaluation, variant);
     eligible.push(plan);
@@ -990,6 +1159,7 @@ export async function runAlwaysOnLeadReactivation({
       limitPerRun: Number(settings.limitPerRun),
       cadenceHours: [...settings.cadenceHours],
       targetStages: [...settings.targetStages],
+      priorityMode: settings.priorityMode,
     },
     eligible,
     scheduled,
@@ -1050,6 +1220,7 @@ export async function runLeadReactivationAutomationTick({
       maxTouches: settings.maxTouches,
       cadenceHours: settings.cadenceHours,
       targetStages: settings.targetStages,
+      priorityMode: settings.priorityMode,
       timezone: settings.timezone,
       now,
       dbOverride: db,
