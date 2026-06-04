@@ -124,7 +124,7 @@ function getSampleSiteBaseUrl() {
   ).replace(/\/+$/, '');
 }
 
-function resolveSampleSlug(lead = {}) {
+export function resolveSampleSlug(lead = {}) {
   const candidate = [
     lead?.slug,
     lead?.webSlug,
@@ -135,7 +135,7 @@ function resolveSampleSlug(lead = {}) {
   return String(candidate || '').trim();
 }
 
-function buildSampleLink(lead = {}) {
+export function buildSampleLink(lead = {}) {
   const slug = resolveSampleSlug(lead);
   if (!slug) return '';
   return `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
@@ -166,14 +166,14 @@ function resolvePhoneDigits(lead = {}) {
 }
 
 // Link al formulario de muestra GRATIS (lo que el lead debe llenar).
-function buildSampleFormLink(lead = {}) {
+export function buildSampleFormLink(lead = {}) {
   const digits = resolvePhoneDigits(lead);
   if (!digits || digits.length < 10) return '';
   return `${getSampleFormBaseUrl()}/muestra/${encodeURIComponent(digits)}`;
 }
 
 // El lead ya lleno el formulario de muestra?
-function hasLeadCompletedForm(lead = {}) {
+export function hasLeadCompletedForm(lead = {}) {
   const etapa = String(lead?.etapa || lead?.etapaNombre || '').toLowerCase();
   if (etapa === 'form_submitted') return true;
   const tags = Array.isArray(lead?.etiquetas)

@@ -95,6 +95,7 @@ import {
   updateLeadReactivationSettings,
 } from './services/leadReactivationService.js';
 import { classifyLeadReply } from './services/hotLeadDetector.js';
+import { listFollowupActions, buildFollowupMessage } from './services/followupActions.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
@@ -4593,6 +4594,80 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
   } catch (error) {
     console.error('Error enviando WhatsApp:', error);
     return res.status(500).json({ error: error.message });
+  }
+});
+
+// Acciones de seguimiento de un clic: lista de botones disponibles.
+app.get('/api/whatsapp/followup-actions', (_req, res) => {
+  try {
+    return res.json({ success: true, actions: listFollowupActions() });
+  } catch (error) {
+    console.error('[followup-actions:list] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// Genera (y opcionalmente envia) el mensaje de una accion de seguimiento.
+// preview=true -> solo devuelve el texto para revisar/editar antes de enviar.
+app.post('/api/whatsapp/followup-actions/send', async (req, res) => {
+  const { leadId, actionKey, preview = false, customMessage = '' } = req.body || {};
+  const safeLeadId = String(leadId || '').trim();
+  const safeActionKey = String(actionKey || '').trim();
+  if (!safeLeadId || !safeActionKey) {
+    return res.status(400).json({ error: 'Faltan leadId o actionKey.' });
+  }
+
+  const isPreview = preview === true || String(preview).toLowerCase() === 'true';
+
+  try {
+    const leadDoc = await db.collection('leads').doc(safeLeadId).get();
+    const leadData = leadDoc.exists ? { id: leadDoc.id, ...(leadDoc.data() || {}) } : { id: safeLeadId };
+
+    let message = String(customMessage || '').trim();
+    let built = null;
+    if (!message) {
+      built = buildFollowupMessage(safeActionKey, leadData);
+      message = built.message;
+    }
+
+    if (isPreview) {
+      return res.json({
+        success: true,
+        preview: true,
+        actionKey: safeActionKey,
+        message,
+        linkType: built?.linkType || null,
+      });
+    }
+
+    // Validacion de destino (igual que /send-message).
+    if (leadDoc.exists) {
+      const unsafeTargetError = getUnsafeLeadTargetError(safeLeadId, leadDoc.data() || {});
+      if (unsafeTargetError) {
+        return res.status(409).json({ error: unsafeTargetError });
+      }
+    } else {
+      const unsafeIdentifierError = getUnsafeIdentifierTargetError(safeLeadId);
+      if (unsafeIdentifierError) {
+        return res.status(409).json({ error: unsafeIdentifierError });
+      }
+    }
+
+    const result = await sendMessageToLead(safeLeadId, message, {});
+
+    // Deja rastro del seguimiento manual en el lead (para metricas/visibilidad).
+    await db.collection('leads').doc(safeLeadId).set({
+      lastManualFollowupAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastManualFollowupAction: safeActionKey,
+    }, { merge: true }).catch(() => {});
+
+    return res.json({ success: true, sent: true, actionKey: safeActionKey, message, result });
+  } catch (error) {
+    const status = error?.code === 'UNKNOWN_ACTION'
+      ? 400
+      : (error?.code === 'NO_LINK_AVAILABLE' ? 409 : 500);
+    console.error('[followup-actions/send] Error:', error);
+    return res.status(status).json({ error: error.message || String(error) });
   }
 });
 
