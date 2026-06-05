@@ -116,6 +116,24 @@ const FOLLOWUP_ANGLES = [
 
 const FALLBACK_ANGLE_KEY = 'beneficio';
 
+// Catalogo completo de los textos automatizados de reactivacion (para revision
+// de copy / informe BI). Devuelve cada angulo del seguimiento diario y las
+// variantes de muestra/formulario.
+export function getReactivationMessageCatalog() {
+  const angles = FOLLOWUP_ANGLES.map((a) => ({
+    key: a.key,
+    requiresLink: Boolean(a.requiresLink),
+    variants: a.key === 'muestra'
+      ? ['(dinamico: usa los textos de muestra/formulario de abajo)']
+      : (Array.isArray(a.variants) ? a.variants : []),
+  }));
+  return {
+    dailyAngles: angles,
+    sampleReadyVariants: [...SAMPLE_READY_VARIANTS],
+    formInviteVariants: [...FORM_INVITE_VARIANTS],
+  };
+}
+
 function getSampleSiteBaseUrl() {
   return String(
     process.env.SAMPLE_SITE_BASE_URL

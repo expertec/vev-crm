@@ -7,6 +7,9 @@
 // Diseno: una sola pasada sobre los leads, usando campos a nivel documento
 // (sin leer subcolecciones de mensajes) para que sea barato.
 //
+import { getReactivationMessageCatalog } from './leadReactivationService.js';
+import { getFollowupMessageCatalog } from './followupActions.js';
+
 const WON_STATUSES = new Set(['compro', 'cliente', 'ganado', 'closed_won', 'cerrado_ganado', 'pagado']);
 const LOST_STATUSES = new Set(['no_interesa', 'nointeresa', 'perdido', 'descartado', 'closed_lost']);
 
@@ -40,6 +43,15 @@ function toMillis(value) {
 function pct(n, d) {
   if (!d) return '—';
   return `${((100 * n) / d).toFixed(1)}%`;
+}
+
+// Minutos (offset desde el inicio de la secuencia) → texto legible.
+function formatDelay(min) {
+  const m = Number(min || 0);
+  if (m <= 0) return 'inmediato';
+  if (m < 60) return `${m} min`;
+  if (m < 1440) return `${(m / 60).toFixed(m % 60 ? 1 : 0)} h`;
+  return `${(m / 1440).toFixed(m % 1440 ? 1 : 0)} d`;
 }
 
 function tagSet(lead = {}) {
@@ -109,6 +121,10 @@ export async function generateBiReport({ dbOverride = null, now = new Date() } =
   const touchBuckets = new Map([['0', 0], ['1-2', 0], ['3-5', 0], ['6+', 0]]);
   const recencyBuckets = new Map([['< 24h', 0], ['1-3 dias', 0], ['3-7 dias', 0], ['7-30 dias', 0], ['> 30 dias', 0], ['sin actividad', 0]]);
   const sourceStats = new Map(); // source -> { total, replied, formCompleted, won }
+  const activeSeqByStage = new Map(); // stage -> Map(trigger -> count)
+  const intentDist = new Map();
+  const interestDist = new Map();
+  const responseSamples = []; // { text, interest, intent, automated, ms, estado, stage }
 
   let replied = 0;
   let neverContacted = 0;
@@ -204,6 +220,32 @@ export async function generateBiReport({ dbOverride = null, now = new Date() } =
     else if (sinceActivity < 7 * DAY) incr(recencyBuckets, '3-7 dias');
     else if (sinceActivity < 30 * DAY) incr(recencyBuckets, '7-30 dias');
     else incr(recencyBuckets, '> 30 dias');
+
+    // Secuencias activas en este lead, agrupadas por etapa.
+    const activeSeqs = Array.isArray(lead?.secuenciasActivas) ? lead.secuenciasActivas : [];
+    activeSeqs.forEach((sq) => {
+      if (!sq || sq.completed === true) return;
+      const trig = safeStr(sq.trigger);
+      if (!trig) return;
+      if (!activeSeqByStage.has(stage)) activeSeqByStage.set(stage, new Map());
+      incr(activeSeqByStage.get(stage), trig);
+    });
+
+    // Respuestas clasificadas (para muestra cualitativa + distribuciones).
+    const aiReply = lead?.aiReply;
+    if (aiReply && safeStr(aiReply.lastText)) {
+      incr(intentDist, lower(aiReply.intent) || 'other');
+      incr(interestDist, lower(aiReply.interestLevel) || 'cold');
+      responseSamples.push({
+        text: safeStr(aiReply.lastText).slice(0, 240),
+        interest: lower(aiReply.interestLevel) || 'cold',
+        intent: lower(aiReply.intent) || 'other',
+        automated: aiReply.automated === true,
+        ms: toMillis(aiReply.classifiedAt),
+        estado: status,
+        stage,
+      });
+    }
   });
 
   // Tareas (alertas del detector + manuales)
@@ -223,6 +265,31 @@ export async function generateBiReport({ dbOverride = null, now = new Date() } =
     /* tasks opcional */
   }
 
+  // Definiciones de secuencias (mensajes programados por trigger).
+  const sequenceDefs = [];
+  try {
+    const seqSnap = await db.collection('secuencias').get();
+    seqSnap.forEach((doc) => {
+      const d = doc.data() || {};
+      const steps = Array.isArray(d.messages) ? d.messages : [];
+      sequenceDefs.push({
+        trigger: safeStr(d.trigger) || doc.id,
+        active: d.active !== false,
+        steps: steps.map((m) => ({
+          delay: Number(m?.delay || 0),
+          type: safeStr(m?.type) || 'texto',
+          content: safeStr(m?.contenido || m?.texto || m?.caption || ''),
+        })),
+      });
+    });
+  } catch {
+    /* secuencias opcional */
+  }
+
+  // Muestra de respuestas: las 25 más recientes con clasificación.
+  responseSamples.sort((a, b) => b.ms - a.ms);
+  const responseSample = responseSamples.slice(0, 25);
+
   const data = {
     generatedAt: new Date(nowMs).toISOString(),
     totals,
@@ -237,6 +304,15 @@ export async function generateBiReport({ dbOverride = null, now = new Date() } =
     recencyBuckets: Object.fromEntries(recencyBuckets),
     byMonth: Object.fromEntries(mapToSortedRows(byMonth)),
     tasks: { total: taskStats.total, open: taskStats.open, bySource: Object.fromEntries(mapToSortedRows(taskStats.bySource)) },
+    sequences: sequenceDefs,
+    activeSeqByStage: Object.fromEntries(
+      [...activeSeqByStage.entries()].map(([st, m]) => [st, Object.fromEntries(mapToSortedRows(m))])
+    ),
+    responses: {
+      intent: Object.fromEntries(mapToSortedRows(intentDist)),
+      interest: Object.fromEntries(mapToSortedRows(interestDist)),
+      sample: responseSample,
+    },
   };
 
   // ----------------------------- Markdown -----------------------------
@@ -320,6 +396,96 @@ export async function generateBiReport({ dbOverride = null, now = new Date() } =
   ]));
   lines.push('');
 
+  lines.push('## 11. Secuencias automaticas activas por etapa');
+  lines.push('Cuantos leads tienen cada secuencia (trigger) corriendo, por etapa del embudo.');
+  const stageSeqRows = [];
+  for (const [stage, m] of [...activeSeqByStage.entries()]) {
+    for (const [trig, count] of mapToSortedRows(m)) {
+      stageSeqRows.push([stage, trig, String(count)]);
+    }
+  }
+  lines.push(stageSeqRows.length
+    ? renderTable(['Etapa', 'Secuencia (trigger)', 'Leads activos'], stageSeqRows)
+    : '_(Ningun lead con secuencia activa en este momento.)_');
+  lines.push('');
+
+  lines.push('## 12. Mensajes que YO configure en las secuencias (texto literal)');
+  lines.push('Revisar el copy y el timing de cada paso.');
+  lines.push('');
+  if (sequenceDefs.length === 0) {
+    lines.push('_(No se encontraron definiciones de secuencias.)_');
+  } else {
+    for (const seq of sequenceDefs) {
+      lines.push(`### Secuencia: \`${seq.trigger}\` ${seq.active ? '(activa)' : '(inactiva)'} — ${seq.steps.length} paso(s)`);
+      if (seq.steps.length === 0) {
+        lines.push('_(Sin pasos.)_');
+      } else {
+        seq.steps.forEach((st, i) => {
+          lines.push(`**Paso ${i + 1}** · envío: ${formatDelay(st.delay)} · tipo: ${st.type}`);
+          const body = (st.content || '(media/sin texto)').slice(0, 2000);
+          body.split('\n').forEach((ln) => lines.push(`> ${ln}`));
+          lines.push('');
+        });
+      }
+    }
+  }
+  lines.push('');
+
+  lines.push('## 13. Mensajes AUTOMATIZADOS del sistema (texto literal)');
+  lines.push('Plantillas que el CRM usa solo. El sistema rota/varia estas frases y rellena {{nombre}} y {{link}}.');
+  lines.push('');
+
+  let reactCatalog = null;
+  let buttonsCatalog = null;
+  try { reactCatalog = getReactivationMessageCatalog(); } catch { /* opcional */ }
+  try { buttonsCatalog = getFollowupMessageCatalog(); } catch { /* opcional */ }
+
+  if (reactCatalog) {
+    lines.push('### 13.1 Seguimiento diario de reactivación (un ángulo distinto por día)');
+    reactCatalog.dailyAngles.forEach((ang) => {
+      lines.push(`**Ángulo \`${ang.key}\`:**`);
+      ang.variants.forEach((v) => lines.push(`> ${v}`));
+      lines.push('');
+    });
+    lines.push('**Variantes cuando YA tiene muestra (reenvía el sitio):**');
+    reactCatalog.sampleReadyVariants.forEach((v) => lines.push(`> ${v}`));
+    lines.push('');
+    lines.push('**Variantes cuando NO llenó el formulario (invita a llenarlo):**');
+    reactCatalog.formInviteVariants.forEach((v) => lines.push(`> ${v}`));
+    lines.push('');
+  }
+
+  if (buttonsCatalog) {
+    lines.push('### 13.2 Botones de seguimiento manual (de un clic en el chat)');
+    buttonsCatalog.forEach((b) => {
+      lines.push(`**${b.label}** (\`${b.key}\`) — ${b.description}`);
+      const all = [...b.variants, ...b.sampleVariants, ...b.formVariants];
+      all.forEach((v) => lines.push(`> ${v}`));
+      lines.push('');
+    });
+  }
+
+  lines.push('## 14. Respuestas de los clientes');
+  lines.push(renderTable(['Nivel de interes', 'Respuestas'], mapToSortedRows(interestDist).map(([k, v]) => [k, String(v)])));
+  lines.push('');
+  lines.push('Intencion detectada:');
+  lines.push(renderTable(['Intencion', 'Respuestas'], mapToSortedRows(intentDist).map(([k, v]) => [k, String(v)])));
+  lines.push('');
+  lines.push('Muestra de respuestas recientes (texto real del cliente + clasificacion):');
+  if (responseSample.length === 0) {
+    lines.push('_(Aun no hay respuestas clasificadas.)_');
+  } else {
+    lines.push(renderTable(['Interes', 'Intencion', 'Bot?', 'Respuesta del cliente'],
+      responseSample.map((r) => [
+        r.interest,
+        r.intent,
+        r.automated ? 'si' : 'no',
+        r.text.replace(/\n/g, ' ').replace(/\|/g, '/'),
+      ])
+    ));
+  }
+  lines.push('');
+
   lines.push('---');
   lines.push('## Contexto para el analisis');
   lines.push('Negocio: agencia que vende paginas web, campanas de Meta Ads y software a la medida en Mexico.');
@@ -332,7 +498,8 @@ export async function generateBiReport({ dbOverride = null, now = new Date() } =
   lines.push('3. ¿Que segmentos de leads (por estado/etapa/recencia) debo priorizar esta semana?');
   lines.push('4. ¿La estrategia de seguimiento esta funcionando? ¿Que mensajes/acciones probar?');
   lines.push('5. ¿Que mejoras de PRODUCTO (oferta, muestra, formulario, precios) sugieres con estos numeros?');
-  lines.push('6. Dame un plan de accion concreto para las proximas 2 semanas.');
+  lines.push('6. Revisa TODO el copy (secciones 12 mis secuencias y 13 mensajes automatizados) frente a las RESPUESTAS reales (seccion 14): ¿que textos y timing cambiarias, palabra por palabra, y por que?');
+  lines.push('7. Dame un plan de accion concreto para las proximas 2 semanas.');
 
   return { data, markdown: lines.join('\n') };
 }

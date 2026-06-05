@@ -144,6 +144,18 @@ const ACTIONS = [
 
 const ACTION_MAP = new Map(ACTIONS.map((a) => [a.key, a]));
 
+// Catalogo completo de textos de los botones (para revision de copy / BI).
+export function getFollowupMessageCatalog() {
+  return ACTIONS.map((a) => ({
+    key: a.key,
+    label: a.label,
+    description: a.description,
+    variants: Array.isArray(a.variants) ? a.variants : [],
+    sampleVariants: Array.isArray(a.sampleVariants) ? a.sampleVariants : [],
+    formVariants: Array.isArray(a.formVariants) ? a.formVariants : [],
+  }));
+}
+
 // Metadata para pintar los botones en el frontend (sin textos internos).
 export function listFollowupActions() {
   return ACTIONS.map((a) => ({
