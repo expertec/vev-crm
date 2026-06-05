@@ -17,7 +17,9 @@ import { db } from '../firebaseAdmin.js';
 const { FieldValue } = admin.firestore;
 
 const HOT_TAG = 'RespuestaCaliente';
+const AUTO_TAG = 'RespuestaAutomatica';
 const TASK_SOURCE = 'ai_hot_reply';
+const AUTO_TASK_SOURCE = 'ai_auto_responder';
 const TASK_DEDUPE_HOURS = Math.max(1, Number(process.env.HOT_LEAD_TASK_DEDUPE_HOURS || 12));
 const AI_MODEL = String(process.env.HOT_LEAD_AI_MODEL || 'gpt-4o-mini').trim() || 'gpt-4o-mini';
 const AI_DISABLED = String(process.env.HOT_LEAD_AI || '').trim().toLowerCase() === 'off';
@@ -55,6 +57,27 @@ const VALID_INTENT = new Set([
 const STOP_RE = /\b(no me interesa|ya no me interesa|ya no|no gracias|no quiero|no, gracias|deja de|dejen de|deja(r)? de escribir|no insistas|elimina(r|me)?|dar de baja|darme de baja|stop)\b/;
 const HOT_RE = /(precio|costo|cuanto cuesta|cuanto vale|cuanto seria|cuanto es|cu[aá]nto|cotiza|cotizar|presupuesto|pagar|como pago|forma de pago|contratar|lo quiero|me interesa|estoy interesad|quiero (la|el|una|empezar|avanzar|contratar)|agendar|agenda|cita|llamada|comprar|factura|anticipo|deposito|transferencia|como empiezo|empezar|cuando podemos|listo para)/;
 const WARM_RE = /(info|informacion|informaci[oó]n|ejemplo|ejemplos|muestra|portafolio|me puedes mandar|mandame|envia|env[ií]ame|ver|dudas|pregunta|me interesa saber|que incluye|como funciona)/;
+
+// Frases tipicas de bots / asistentes automaticos / contestadoras.
+const AUTO_REPLY_RE = new RegExp([
+  'mensaje automatico', 'respuesta automatica', 'es un mensaje automatico',
+  'asistente virtual', 'soy (el|un|una|tu) asistente', 'asistente de ', 'soy (una|la) ia',
+  'inteligencia artificial', 'soy un bot', 'bot de ',
+  'gracias por (contactar|comunicarte|escribir|tu mensaje|tu interes)',
+  'hemos recibido tu mensaje', 'tu mensaje (ha sido|fue) recibido', 'recibimos tu mensaje',
+  'en breve (te|un) ', 'a la brevedad', 'uno de nuestros (asesores|agentes|representantes|ejecutivos)',
+  'te atenderemos', 'te contactaremos', 'en cuanto (estemos|un asesor|un agente)',
+  'horario de atencion', 'fuera de (nuestro )?horario', 'nuestro horario es',
+  'para (una )?mejor atencion', 'marca la opcion', 'responde con el numero',
+  'escribe el numero', 'selecciona una opcion', 'menu principal',
+  'este numero no (recibe|atiende)', 'no se atienden llamadas',
+].join('|'));
+
+function detectAutomatedReplyByKeyword(text = '') {
+  const t = normalizeForMatch(text);
+  if (!t) return false;
+  return AUTO_REPLY_RE.test(t);
+}
 
 function keywordClassify(text = '') {
   const t = normalizeForMatch(text);
@@ -134,6 +157,7 @@ function coerceClassification(parsed = {}) {
     hot,
     interestLevel,
     intent,
+    automated: parsed.automated === true,
     summary: cleanText(parsed.summary || '', 240),
     suggestedReply: cleanText(parsed.suggestedReply || '', 600),
     source: 'ai',
@@ -157,8 +181,9 @@ async function aiClassify({ lead = {}, recentMessages = [], latestText = '' }) {
     'Eres un asistente comercial para una agencia que vende paginas web, campanas de Meta Ads y software a la medida en Mexico.',
     'Clasificas la intencion comercial de la ULTIMA respuesta del cliente por WhatsApp.',
     'Responde SOLO con JSON valido, sin texto extra, con estas claves:',
-    '{"interestLevel":"hot|warm|cold|lost","intent":"wants_price|wants_examples|ready_to_buy|needs_time|not_now|no_interest|question|other","hot":true|false,"summary":"resumen corto en espanol","suggestedReply":"un solo mensaje breve y natural en espanol de Mexico, sin emojis excesivos, sin links inventados, listo para enviar"}',
+    '{"interestLevel":"hot|warm|cold|lost","intent":"wants_price|wants_examples|ready_to_buy|needs_time|not_now|no_interest|question|other","hot":true|false,"automated":true|false,"summary":"resumen corto en espanol","suggestedReply":"un solo mensaje breve y natural en espanol de Mexico, sin emojis excesivos, sin links inventados, listo para enviar"}',
     'hot=true solo si el cliente muestra intencion real de avanzar, comprar, pedir precio o agendar.',
+    'automated=true si la respuesta parece de un bot, asistente automatico o contestadora (texto generico, "gracias por contactarnos", "un asesor te atendera", menus, horarios), NO de una persona escribiendo en el momento.',
     'Si el cliente pide no continuar, interestLevel="lost" e intent="no_interest".',
   ].join('\n');
 
@@ -191,15 +216,21 @@ async function aiClassify({ lead = {}, recentMessages = [], latestText = '' }) {
 
 export async function classifyLeadReply({ lead = {}, recentMessages = [], latestText = '' } = {}) {
   const text = cleanText(latestText, 1000);
+  const keywordAuto = detectAutomatedReplyByKeyword(text);
+
   const fallback = keywordClassify(text);
+  fallback.automated = keywordAuto;
+
   const ai = await aiClassify({ lead, recentMessages, latestText: text });
   if (!ai) return fallback;
 
+  const automated = ai.automated === true || keywordAuto;
+
   // La IA manda, pero si el fallback detecto un STOP explicito lo respetamos.
   if (fallback.interestLevel === 'lost' && ai.interestLevel !== 'lost') {
-    return { ...ai, interestLevel: 'lost', intent: 'no_interest', hot: false };
+    return { ...ai, automated, interestLevel: 'lost', intent: 'no_interest', hot: false };
   }
-  return ai;
+  return { ...ai, automated };
 }
 
 // ----------------------------- Lectura de mensajes recientes -----------------------------
@@ -238,13 +269,13 @@ function intentLabel(intent = '') {
   return map[intent] || 'respondio';
 }
 
-async function hasRecentOpenTask(leadId) {
+async function hasRecentOpenTask(leadId, source = TASK_SOURCE) {
   try {
     const cutoff = new Date(Date.now() - TASK_DEDUPE_HOURS * 60 * 60 * 1000);
     const snap = await db
       .collection('tasks')
       .where('leadId', '==', String(leadId))
-      .where('source', '==', TASK_SOURCE)
+      .where('source', '==', source)
       .limit(10)
       .get();
     return snap.docs.some((d) => {
@@ -301,6 +332,46 @@ async function createHotLeadTask({ leadId, lead, classification }) {
   return { created: true };
 }
 
+// Tarea de alerta cuando un bot/IA contesta por el lead (el cliente quiza no ve los mensajes).
+async function createAutoResponderTask({ leadId, lead, sample }) {
+  if (await hasRecentOpenTask(leadId, AUTO_TASK_SOURCE)) {
+    return { created: false, reason: 'dedupe' };
+  }
+
+  const nombre = cleanText(lead?.nombre || '', 120) || 'Lead';
+  const assignedTo = String(lead?.assignedTo || process.env.HOT_LEAD_DEFAULT_ASSIGNEE || '').trim();
+  const description = [
+    'Este numero respondio con lo que parece un bot / asistente automatico.',
+    'Riesgo: el cliente real podria NO estar viendo tus mensajes.',
+    'Sugerencia: intenta llamarle, mandar nota de voz, o pedir hablar con la persona encargada.',
+    sample ? `Respuesta recibida: "${cleanText(sample, 240)}"` : '',
+  ].filter(Boolean).join('\n');
+
+  await db.collection('tasks').add({
+    title: cleanText(`🤖 ${nombre}: parece bot/IA contestando — contactar directo`, 180),
+    description: cleanText(description, 2000),
+    status: 'pendiente',
+    dueDate: '',
+    assignedTo,
+    assignedToName: assignedTo ? '' : 'Sin asignar',
+    createdBy: 'system',
+    createdByName: 'Detector IA',
+    leadId: String(leadId),
+    leadName: nombre,
+    leadPhone: cleanText(lead?.telefono || '', 60),
+    source: AUTO_TASK_SOURCE,
+    catalogItemId: '',
+    catalogItemName: '',
+    serviceId: '',
+    templateId: '',
+    active: true,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  return { created: true };
+}
+
 // ----------------------------- Orquestador (entry point) -----------------------------
 
 /**
@@ -317,11 +388,14 @@ export async function handleInboundLeadReply({ leadRef, leadId, leadData = {}, l
     const recentMessages = await loadRecentMessages(ref, 12);
     const classification = await classifyLeadReply({ lead: leadData, recentMessages, latestText: text });
 
+    const isAutomated = classification.automated === true;
+
     const leadPatch = {
       aiReply: {
-        hot: Boolean(classification.hot),
+        hot: Boolean(classification.hot) && !isAutomated,
         interestLevel: classification.interestLevel,
         intent: classification.intent,
+        automated: isAutomated,
         summary: classification.summary || '',
         suggestedReply: classification.suggestedReply || '',
         source: classification.source,
@@ -332,7 +406,19 @@ export async function handleInboundLeadReply({ leadRef, leadId, leadData = {}, l
     };
 
     let taskResult = { created: false };
-    if (classification.hot) {
+    let autoTaskResult = { created: false };
+
+    if (isAutomated) {
+      // El que contesta es un bot/IA: NO es cliente real, NO marcar caliente.
+      // Avisar al usuario para que contacte por otro canal.
+      leadPatch.etiquetas = FieldValue.arrayUnion(AUTO_TAG);
+      leadPatch.autoResponder = {
+        detected: true,
+        sample: cleanText(text, 300),
+        lastDetectedAt: FieldValue.serverTimestamp(),
+      };
+      autoTaskResult = await createAutoResponderTask({ leadId, lead: leadData, sample: text });
+    } else if (classification.hot) {
       leadPatch.etiquetas = FieldValue.arrayUnion(HOT_TAG);
       // Pausar SOLO el agente de reactivacion 24/7 para no pisar el cierre humano.
       leadPatch['aiFollowup.paused'] = true;
@@ -344,7 +430,9 @@ export async function handleInboundLeadReply({ leadRef, leadId, leadData = {}, l
     return {
       ok: true,
       classification,
+      automated: isAutomated,
       taskCreated: taskResult.created === true,
+      autoResponderTaskCreated: autoTaskResult.created === true,
     };
   } catch (error) {
     console.warn('[hot-lead] handleInboundLeadReply error:', error?.message || error);

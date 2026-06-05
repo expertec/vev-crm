@@ -757,6 +757,7 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
 
       const leadPatch = {
         lastMessageAt: FieldValue.serverTimestamp(),
+        lastOutboundAt: FieldValue.serverTimestamp(),
       };
       const jobType = String(job?.jobType || '').toLowerCase();
       if (jobType === 'ai_followup') {

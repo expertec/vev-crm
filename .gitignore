@@ -8,3 +8,9 @@
 # local model/binary artifacts
 *.gguf
 llamafile-*
+
+# credenciales locales (NUNCA subir) y reportes generados
+serviceAccountKey*.json
+*serviceAccount*.json
+*-adminsdk-*.json
+bi-report.md

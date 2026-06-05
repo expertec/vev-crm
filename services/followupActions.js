@@ -105,6 +105,18 @@ const ACTIONS = [
     ],
   },
   {
+    key: 'hablar_encargado',
+    label: 'Pedir hablar con encargado',
+    emoji: '🙋',
+    description: 'Util cuando contesta un bot o recepcion: pide llegar a la persona que decide.',
+    requiresLink: null,
+    variants: [
+      'Hola, buen dia. Me gustaria platicar con la persona encargada de la pagina web o la publicidad del negocio. Tengo una propuesta concreta que les puede servir. Con quien tengo el gusto?',
+      'Que tal, me podrian comunicar con el dueno o el encargado de marketing? Es sobre una propuesta para atraer mas clientes al negocio. Gracias.',
+      'Hola, disculpa, esto lo atiende un asistente? Me interesa hablar directo con la persona que toma las decisiones del negocio para mostrarle una propuesta. Como puedo contactarla?',
+    ],
+  },
+  {
     key: 'agendar_llamada',
     label: 'Proponer llamada',
     emoji: '📞',

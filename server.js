@@ -96,6 +96,7 @@ import {
 } from './services/leadReactivationService.js';
 import { classifyLeadReply } from './services/hotLeadDetector.js';
 import { listFollowupActions, buildFollowupMessage } from './services/followupActions.js';
+import { generateBiReport } from './services/biReport.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
@@ -2838,6 +2839,23 @@ app.post('/api/admin/lead-reactivation/settings', async (req, res) => {
     return res.json({ success: true, settings });
   } catch (error) {
     console.error('[admin/lead-reactivation/settings:save] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// Informe de Business Intelligence para pegar en Claude.
+// ?format=md devuelve Markdown como texto plano (facil de copiar en el navegador).
+app.get('/api/admin/bi-report', async (req, res) => {
+  try {
+    const { data, markdown } = await generateBiReport();
+    const format = String(req.query?.format || '').toLowerCase();
+    if (format === 'md' || format === 'markdown' || format === 'text') {
+      res.set('Content-Type', 'text/plain; charset=utf-8');
+      return res.send(markdown);
+    }
+    return res.json({ success: true, data, markdown });
+  } catch (error) {
+    console.error('[admin/bi-report] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });

@@ -2001,6 +2001,7 @@ export async function sendMessageToLead(phoneOrJid, messageContent, options = {}
     await canonicalRef.set(
       {
         ...buildLeadLastMessagePatch(outMsg),
+        lastOutboundAt: now(),
         ...(num ? { telefono: num } : {}),
         ...(jidToPersist ? { jid: jidToPersist } : {}),
         ...(isUserJid(jidToPersist) && (!isSuspiciousPseudoPhoneJid(jidToPersist) || allowUnsafeTarget)
@@ -2108,6 +2109,7 @@ export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
     await canonicalRef.set(
       {
         ...buildLeadLastMessagePatch(outMsg),
+        lastOutboundAt: now(),
         ...(num ? { telefono: num } : {}),
         ...(jidToPersist ? { jid: jidToPersist } : {}),
         ...(isUserJid(jidToPersist) && (!isSuspiciousPseudoPhoneJid(jidToPersist) || allowUnsafeTarget)
@@ -2266,6 +2268,7 @@ export async function sendMediaUrlToLead(phoneOrJid, {
     await canonicalRef.set(
       {
         ...buildLeadLastMessagePatch(outMsg),
+        lastOutboundAt: now(),
         ...(num ? { telefono: num } : {}),
         ...(jidToPersist ? { jid: jidToPersist } : {}),
         ...(isUserJid(jidToPersist) && (!isSuspiciousPseudoPhoneJid(jidToPersist) || allowUnsafeTarget)
