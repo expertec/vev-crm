@@ -1707,18 +1707,58 @@ export async function connectToWhatsApp() {
 
           console.log('[WA] Guardado mensaje →', leadId, { mediaType, hasText: !!content, hasMedia: !!mediaUrl });
 
-          // Detector de respuestas calientes (no bloquea el pipeline; nunca lanza)
+          // Detector de respuestas: clasifica, y según el resultado actúa
+          // (no bloquea el pipeline; nunca lanza)
           if (mediaType === 'text' && content) {
-            handleInboundLeadReply({
-              leadRef,
-              leadId,
-              leadData: {
-                ...(existingLeadData || {}),
-                nombre: existingLeadData?.nombre || msg.pushName || '',
-                telefono: normNum,
-              },
-              latestText: content,
-            }).catch(() => {});
+            const leadDataForAi = {
+              ...(existingLeadData || {}),
+              nombre: existingLeadData?.nombre || msg.pushName || '',
+              telefono: normNum,
+            };
+            handleInboundLeadReply({ leadRef, leadId, leadData: leadDataForAi, latestText: content })
+              .then(async (result) => {
+                if (!result?.ok) return;
+
+                // C: respuesta de compra → detener secuencias de marketing para que el humano cierre.
+                if (result.classification?.hot && !result.automated) {
+                  await cancelAllSequences(leadId).catch(() => {});
+                }
+
+                // D: lead listo para comprar → avisar al dueño al instante (dedupe ~4h).
+                if (result.classification?.intent === 'ready_to_buy' && !result.automated) {
+                  const lastAlertMs = leadDataForAi?.ownerAlertAt?.toMillis?.() || 0;
+                  if (Date.now() - lastAlertMs > 4 * 60 * 60 * 1000) {
+                    const nombreAlerta = String(leadDataForAi?.nombre || '').trim() || 'Lead';
+                    const telAlerta = String(normNum || leadDataForAi?.telefono || '').trim();
+                    const avisado = await notifyOwner(
+                      `🔥 LEAD CALIENTE listo para comprar\n${nombreAlerta} (${telAlerta})\nDijo: "${String(content).slice(0, 160)}"\nEntra al chat y mándale los datos de pago para cerrar.`
+                    );
+                    if (avisado) {
+                      await leadRef.set({ ownerAlertAt: now() }, { merge: true }).catch(() => {});
+                    }
+                  }
+                }
+
+                // A: intención positiva → enviar el formulario de muestra automáticamente.
+                if (result.autoFormLink?.message) {
+                  try {
+                    await sendMessageToLead(leadId, result.autoFormLink.message, {});
+                    await leadRef.set(
+                      {
+                        formLinkSentAt: now(),
+                        formLinkSentUrl: String(result.autoFormLink.url || ''),
+                        autoFormLinkSent: true,
+                        etiquetas: FieldValue.arrayUnion('FormLinkSent'),
+                      },
+                      { merge: true }
+                    ).catch(() => {});
+                    console.log(`[auto-form-link] enviado a ${leadId}`);
+                  } catch (err) {
+                    console.warn('[auto-form-link] no se pudo enviar:', err?.message || err);
+                  }
+                }
+              })
+              .catch(() => {});
           }
         } catch (err) {
           messageHandledOk = false;
@@ -1928,6 +1968,20 @@ async function syncAliasLeadToCanonical({
   }
 
   await aliasRef.set(patch, { merge: true });
+}
+
+// Avisa al dueño por WhatsApp (a su propio número, definido en OWNER_WHATSAPP).
+async function notifyOwner(text) {
+  const raw = String(process.env.OWNER_WHATSAPP || process.env.OWNER_PHONE || '').replace(/\D/g, '');
+  if (raw.length < 10 || !whatsappSock) return false;
+  const jid = `${raw}@s.whatsapp.net`;
+  try {
+    await whatsappSock.sendMessage(jid, { text: String(text || '').slice(0, 900), linkPreview: false });
+    return true;
+  } catch (err) {
+    console.warn('[notifyOwner] no se pudo avisar al dueño:', err?.message || err);
+    return false;
+  }
 }
 
 export async function sendMessageToLead(phoneOrJid, messageContent, options = {}) {

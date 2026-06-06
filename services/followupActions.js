@@ -37,6 +37,20 @@ function pickRandom(list = []) {
   return list[Math.floor(Math.random() * list.length)];
 }
 
+// Datos de transferencia bancaria desde PAYMENT_BANK_DETAILS.
+// Permite separar líneas con "|" o con "\n" literal en la variable de entorno.
+function getBankDetails() {
+  const raw = String(process.env.PAYMENT_BANK_DETAILS || '').trim();
+  if (!raw) return '';
+  return raw.replace(/\\n/g, '\n').replace(/\s*\|\s*/g, '\n').trim();
+}
+
+function buildBankPaymentMessage(lead = {}, details = '') {
+  const nombre = firstName(lead?.nombre || '');
+  const saludo = nombre ? `Hola ${nombre}, ` : 'Hola, ';
+  return `${saludo}con gusto. Estos son los datos para tu pago por transferencia:\n\n${details}\n\nEn cuanto la hagas, mandame el comprobante por aqui y activo tu pagina. Gracias!`;
+}
+
 // Catalogo de acciones. requiresLink: 'sample_or_form' (dinamico) | 'form' | null.
 const ACTIONS = [
   {
@@ -63,9 +77,9 @@ const ACTIONS = [
     description: 'Recuerda al cliente que tiene una prueba/demo gratis disponible.',
     requiresLink: null,
     variants: [
-      'Hola {{nombre}}, te recuerdo que tu prueba gratis sigue disponible. Es la forma mas facil de que veas como te funcionaria sin compromiso. La activamos?',
-      '{{nombre}}, no quiero que pierdas tu prueba gratis. En unos minutos te la dejo lista para que la veas funcionando. Te late?',
-      'Hola {{nombre}}, sigues a tiempo de aprovechar tu prueba sin costo. Asi pruebas antes de decidir. Quieres que te la prepare?',
+      'Hola {{nombre}}, te recuerdo que tu prueba gratis sigue disponible. Te la dejo lista para que veas como te funcionaria, sin compromiso.',
+      '{{nombre}}, no quiero que pierdas tu prueba gratis. Te la estoy preparando para que la veas funcionando hoy mismo.',
+      'Hola {{nombre}}, sigues a tiempo de tu prueba sin costo. Te la dejo lista y te paso el acceso por aqui.',
     ],
   },
   {
@@ -99,10 +113,19 @@ const ACTIONS = [
     description: 'Empuja con una oferta/condicion especial por avanzar ahora.',
     requiresLink: null,
     variants: [
-      'Hola {{nombre}}, este mes tengo una condicion especial para dejar tu proyecto listo. Si lo retomamos esta semana lo aprovechas. Te paso los detalles?',
-      '{{nombre}}, por iniciar ahora te puedo dar un mejor precio. Te interesa que te mande la propuesta?',
-      'Hola {{nombre}}, tengo una promo activa para arrancar este mes y me acorde de ti. Quieres que te cuente como queda?',
+      'Hola {{nombre}}, este mes tengo una condicion especial para dejar tu proyecto listo. Si arrancamos esta semana la aprovechas. Te aparto el lugar.',
+      '{{nombre}}, por iniciar ahora te dejo un mejor precio. Te paso la propuesta para que la veas y la dejamos lista.',
+      'Hola {{nombre}}, tengo una promo activa para arrancar este mes y me acorde de ti. Te la dejo lista esta semana con el mejor precio.',
     ],
+  },
+  {
+    key: 'enviar_datos_pago',
+    label: 'Enviar datos de pago',
+    emoji: '💳',
+    description: 'Manda los datos de transferencia bancaria configurados (requiere PAYMENT_BANK_DETAILS).',
+    requiresLink: 'bank',
+    // El mensaje se arma aparte (preservando saltos de línea de los datos).
+    variants: [],
   },
   {
     key: 'hablar_encargado',
@@ -183,6 +206,22 @@ export function buildFollowupMessage(actionKey = '', lead = {}) {
   let linkType = null;
   let link = '';
   let variants = action.variants || [];
+
+  // Datos de pago por transferencia: se arma aparte para preservar saltos de línea.
+  if (action.requiresLink === 'bank') {
+    const details = getBankDetails();
+    if (!details) {
+      const error = new Error('No hay datos de pago configurados. Define la variable PAYMENT_BANK_DETAILS en el servidor.');
+      error.code = 'NO_LINK_AVAILABLE';
+      throw error;
+    }
+    return {
+      actionKey: action.key,
+      label: action.label,
+      linkType: 'bank',
+      message: buildBankPaymentMessage(lead, details).slice(0, 900),
+    };
+  }
 
   if (action.requiresLink === 'sample_or_form') {
     const slug = resolveSampleSlug(lead);

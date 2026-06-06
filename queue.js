@@ -530,6 +530,22 @@ async function deliverPayload(leadId, payload) {
   if (!leadSnap.exists) throw new Error(`Lead no existe: ${leadId}`);
 
   const lead = { id: leadSnap.id, ...leadSnap.data() };
+
+  // Paso "disparar secuencia": no envía mensaje, encadena otra secuencia.
+  // Permite, p.ej., que WebEnviada arranque CierrePost al terminar.
+  const stepTypeRaw = normType(payload?.type || '');
+  if (stepTypeRaw === 'secuencia' || stepTypeRaw === 'trigger' || stepTypeRaw === 'disparar_secuencia') {
+    const targetTrigger = String(payload?.contenido || payload?.trigger || '').trim();
+    if (targetTrigger) {
+      await scheduleSequenceForLead(leadId, targetTrigger, new Date(), { allowReschedule: true });
+      await persistSystemMessage(leadId, `[sequence-chain] disparada secuencia '${targetTrigger}'`);
+      console.log(`[SEQ] chain → lead=${leadId} dispara '${targetTrigger}'`);
+    } else {
+      console.warn(`[SEQ] chain sin trigger destino en lead=${leadId}`);
+    }
+    return;
+  }
+
   const { jid, phone } = resolveLeadJidAndPhone(lead);
   if (!jid) throw new Error(`Lead sin JID ni teléfono: ${leadId}`);
 

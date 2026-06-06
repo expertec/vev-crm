@@ -68,7 +68,7 @@ const FOLLOWUP_ANGLES = [
     key: 'beneficio',
     requiresLink: false,
     variants: [
-      'Hola {{nombre}}, una pagina propia hace que tu negocio se vea mas serio y te lleguen clientes incluso mientras duermes. Te ayudo a tenerla?',
+      'Hola {{nombre}}, una pagina propia hace que tu negocio se vea mas serio y te lleguen clientes incluso mientras duermes. Te ayudo a dejar la tuya lista.',
       '{{nombre}}, tener presencia en linea es lo que hace que te elijan a ti y no al de junto. Aun te puedo apoyar para dejar la tuya lista.',
     ],
   },
@@ -77,7 +77,7 @@ const FOLLOWUP_ANGLES = [
     requiresLink: false,
     variants: [
       'Hola {{nombre}}, esta semana dejamos lista la pagina de otro negocio como el tuyo y ya esta recibiendo mensajes. Me encantaria hacer lo mismo por ti.',
-      '{{nombre}}, varios clientes que al inicio dudaban hoy ya venden mas con su pagina. Te muestro como quedaria la tuya?',
+      '{{nombre}}, varios clientes que al inicio dudaban hoy ya venden mas con su pagina. La tuya puede quedar igual; te la dejo lista esta semana.',
     ],
   },
   {
@@ -93,7 +93,7 @@ const FOLLOWUP_ANGLES = [
     requiresLink: false,
     variants: [
       'Hola {{nombre}}, este mes tengo un espacio para dejar tu proyecto listo con condiciones especiales. Lo aprovechamos?',
-      '{{nombre}}, si lo retomamos esta semana te puedo dar un mejor precio por iniciar ahora. Te paso los detalles?',
+      '{{nombre}}, si arrancamos esta semana te dejo un mejor precio por iniciar ahora. Te aparto el lugar.',
     ],
   },
   {

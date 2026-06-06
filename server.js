@@ -6184,6 +6184,25 @@ app.post('/api/web/after-form', async (req, res) => {
       { merge: true }
     );
 
+    // F: disparar seguimiento por WhatsApp para leads de formulario Web
+    // (antes estos leads quedaban sin canal de seguimiento → 0% conversión).
+    try {
+      if (typeof scheduleSequenceForLead === 'function' && leadPhoneDigits && leadPhoneDigits.length >= 10) {
+        const webTrigger = String(process.env.WEB_FORM_TRIGGER || '').trim() || 'WebEnviada';
+        await scheduleSequenceForLead(finalLeadId, webTrigger, new Date(), {
+          source: 'web_form',
+          allowReschedule: false,
+        });
+        await leadRef.set(
+          { webFollowupTrigger: webTrigger, webFollowupAt: new Date() },
+          { merge: true }
+        ).catch(() => {});
+        console.log(`[after-form] seguimiento '${webTrigger}' programado para lead Web ${finalLeadId}`);
+      }
+    } catch (seqErr) {
+      console.warn('[after-form] no se pudo programar seguimiento Web:', seqErr?.message || seqErr);
+    }
+
     let uploadedLogoURL = null;
     let uploadedPhotos = [];
     try {

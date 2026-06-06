@@ -13,8 +13,43 @@
 //
 import admin from 'firebase-admin';
 import { db } from '../firebaseAdmin.js';
+import { buildSampleFormLink, hasLeadCompletedForm } from './leadReactivationService.js';
 
 const { FieldValue } = admin.firestore;
+
+const AUTO_FORM_DISABLED = String(process.env.AUTO_FORM_LINK || '').trim().toLowerCase() === 'off';
+const POSITIVE_INTENTS = new Set(['wants_examples', 'wants_price', 'ready_to_buy', 'question']);
+
+function leadAlreadyGotFormLink(lead = {}) {
+  const tags = Array.isArray(lead?.etiquetas) ? lead.etiquetas.map((t) => normalizeForMatch(t)) : [];
+  return tags.includes('formlinksent') || Boolean(lead?.formLinkSentAt);
+}
+
+function buildFormLinkMessage(lead = {}, url = '') {
+  const nombre = firstName(lead?.nombre || '');
+  const saludo = nombre ? `Hola ${nombre}, ` : 'Hola, ';
+  return `${saludo}para armarte tu muestra de pagina GRATIS solo llena este formulario corto (toma 2 min) y yo te la preparo y te la mando por aqui: ${url}`;
+}
+
+// Decide si conviene mandar el formulario de muestra automaticamente.
+function decideAutoFormLink(lead = {}, classification = {}) {
+  if (AUTO_FORM_DISABLED) return null;
+  if (classification.automated === true) return null;
+  if (classification.interestLevel === 'lost' || classification.intent === 'no_interest') return null;
+
+  const positive = POSITIVE_INTENTS.has(classification.intent)
+    || classification.interestLevel === 'hot'
+    || classification.interestLevel === 'warm';
+  if (!positive) return null;
+
+  if (hasLeadCompletedForm(lead)) return null;
+  if (leadAlreadyGotFormLink(lead)) return null;
+
+  const url = buildSampleFormLink(lead);
+  if (!url) return null;
+
+  return { url, message: buildFormLinkMessage(lead, url) };
+}
 
 const HOT_TAG = 'RespuestaCaliente';
 const AUTO_TAG = 'RespuestaAutomatica';
@@ -425,6 +460,10 @@ export async function handleInboundLeadReply({ leadRef, leadId, leadData = {}, l
       taskResult = await createHotLeadTask({ leadId, lead: leadData, classification });
     }
 
+    // A: ¿conviene mandar el formulario de muestra automaticamente?
+    // (No para bots; el envio real y el tag los hace whatsappService.)
+    const autoFormLink = isAutomated ? null : decideAutoFormLink(leadData, classification);
+
     await ref.set(leadPatch, { merge: true });
 
     return {
@@ -433,6 +472,7 @@ export async function handleInboundLeadReply({ leadRef, leadId, leadData = {}, l
       automated: isAutomated,
       taskCreated: taskResult.created === true,
       autoResponderTaskCreated: autoTaskResult.created === true,
+      autoFormLink,
     };
   } catch (error) {
     console.warn('[hot-lead] handleInboundLeadReply error:', error?.message || error);
