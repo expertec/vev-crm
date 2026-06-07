@@ -5794,22 +5794,48 @@ app.get('/api/web/sample-access/:phone', async (req, res) => {
     }
 
     const leadData = leadSnap.data() || {};
-    const sampleFlow = (leadData.sampleFlow && typeof leadData.sampleFlow === 'object')
+    let sampleFlow = (leadData.sampleFlow && typeof leadData.sampleFlow === 'object')
       ? leadData.sampleFlow
       : {};
 
-    if (sampleFlow.enabled !== true) {
-      return res.status(403).json({ error: 'Este número no tiene muestra habilitada.' });
-    }
-
-    const sampleExpiresAt = (() => {
-      const value = sampleFlow.expiresAt;
+    const parseSampleExpiry = (value) => {
       if (!value) return null;
       if (value instanceof Date) return value;
       if (typeof value?.toDate === 'function') return value.toDate();
       const parsed = new Date(value);
       return Number.isFinite(parsed.getTime()) ? parsed : null;
-    })();
+    };
+
+    // Auto-habilitar para un lead REAL si no está habilitada o ya expiró, así
+    // cualquier enlace que enviemos (secuencias, auto-formulario, reactivación)
+    // funciona cuando el cliente lo abre. Apagable con SAMPLE_AUTO_ENABLE=off.
+    const autoEnable = String(process.env.SAMPLE_AUTO_ENABLE || '').trim().toLowerCase() !== 'off';
+    const currentExpiry = parseSampleExpiry(sampleFlow.expiresAt);
+    const isExpired = Boolean(currentExpiry && currentExpiry.getTime() <= Date.now());
+    if (autoEnable && (sampleFlow.enabled !== true || isExpired)) {
+      const nowDate = new Date();
+      const windowDays = Math.max(1, Number(process.env.SAMPLE_WINDOW_DAYS || 14));
+      const newExpiry = new Date(nowDate.getTime() + windowDays * 24 * 60 * 60 * 1000);
+      const nextSampleFlow = {
+        ...sampleFlow,
+        enabled: true,
+        phone: phoneDigits,
+        expiresAt: newExpiry,
+        autoEnabledAt: nowDate,
+        source: sampleFlow.source || 'auto_access',
+      };
+      await leadCtx.leadRef.set({ sampleFlow: nextSampleFlow }, { merge: true }).catch((e) => {
+        console.warn('[web/sample-access] no se pudo auto-habilitar:', e?.message || e);
+      });
+      sampleFlow = nextSampleFlow;
+      console.log(`[web/sample-access] muestra auto-habilitada para ${leadCtx.leadId} (${phoneDigits})`);
+    }
+
+    if (sampleFlow.enabled !== true) {
+      return res.status(403).json({ error: 'Este número no tiene muestra habilitada.' });
+    }
+
+    const sampleExpiresAt = parseSampleExpiry(sampleFlow.expiresAt);
     if (sampleExpiresAt && sampleExpiresAt.getTime() <= Date.now()) {
       return res.status(403).json({ error: 'La muestra expiró. Solicita un nuevo enlace.' });
     }
