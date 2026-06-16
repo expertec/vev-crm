@@ -148,6 +148,16 @@ function decodeJwtUnsafe(token) {
   }
 }
 
+function decodeLegacyToken(token) {
+  try {
+    const decoded = Buffer.from(String(token || ''), 'base64').toString('utf8');
+    const payload = JSON.parse(decoded);
+    return payload && typeof payload === 'object' ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
 function verifyJwt(token, { allowExpired = false } = {}) {
   const secret = getClientJwtSecret();
   if (!secret) {
@@ -184,6 +194,16 @@ function verifyJwt(token, { allowExpired = false } = {}) {
   }
 
   return { valid: true, payload };
+}
+
+function decodeLegacyToken(token) {
+  try {
+    const decoded = Buffer.from(String(token || ''), 'base64').toString('utf8');
+    const payload = JSON.parse(decoded);
+    return payload && typeof payload === 'object' ? payload : null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeAudience(aud) {
@@ -306,20 +326,28 @@ function apiKeyMatchesConfig(incomingApiKey, configData = {}) {
 async function validateTenantHeaders(req, res, { requiredScope = CLIENT_REALM } = {}) {
   const negocioId = String(req.get('x-negocio-id') || '').trim();
   const apiKey = String(req.get('x-negocio-api-key') || '').trim();
+  const bearer = readBearerToken(req);
+  const bearerVerification = verifyJwt(bearer, { allowExpired: false });
+  const bearerPayload = bearerVerification.valid ? (bearerVerification.payload || {}) : decodeLegacyToken(bearer);
+  const bearerNegocioId = String(bearerPayload?.negocioId || bearerPayload?.sub || '').trim();
+  const resolvedNegocioId = negocioId || bearerNegocioId;
+  const hasAuthenticatedBearer =
+    Boolean(bearerVerification.valid && isClientePortalClaims(bearerVerification.payload)) ||
+    Boolean(bearerPayload && bearerNegocioId);
 
-  if (!negocioId || !apiKey) {
+  if (!resolvedNegocioId) {
     return {
       ok: false,
       response: jsonError(
         res,
         401,
         'MISSING_TENANT_HEADERS',
-        'Faltan headers x-negocio-id o x-negocio-api-key.'
+        'Falta el negocio activo del cliente.'
       ),
     };
   }
 
-  const configRecord = await readNegocioApiConfig(negocioId);
+  const configRecord = await readNegocioApiConfig(resolvedNegocioId);
   if (!configRecord) {
     return {
       ok: false,
@@ -336,7 +364,19 @@ async function validateTenantHeaders(req, res, { requiredScope = CLIENT_REALM } 
     };
   }
 
-  if (!apiKeyMatchesConfig(apiKey, configData)) {
+  if (!apiKey && !hasAuthenticatedBearer) {
+    return {
+      ok: false,
+      response: jsonError(
+        res,
+        401,
+        'MISSING_TENANT_HEADERS',
+        'Faltan headers x-negocio-id o x-negocio-api-key.'
+      ),
+    };
+  }
+
+  if (apiKey && !apiKeyMatchesConfig(apiKey, configData)) {
     return {
       ok: false,
       response: jsonError(res, 401, 'INVALID_API_KEY', 'API key de negocio inválida.'),
@@ -358,7 +398,7 @@ async function validateTenantHeaders(req, res, { requiredScope = CLIENT_REALM } 
   return {
     ok: true,
     tenant: {
-      negocioId,
+      negocioId: resolvedNegocioId,
       config: configData,
       sourceCollection: configRecord.sourceCollection,
     },
@@ -599,17 +639,28 @@ function verifyClienteBearerToken(req, res, expectedNegocioId) {
   }
 
   const verification = verifyJwt(token);
-  if (!verification.valid) {
-    return {
-      ok: false,
-      response: jsonError(res, 401, 'UNAUTHORIZED', 'Token inválido o expirado.', {
-        reason: verification.reason,
-      }),
-    };
-  }
+  let payload = verification.valid ? (verification.payload || {}) : null;
 
-  const payload = verification.payload || {};
-  if (!isClientePortalClaims(payload)) {
+  if (!payload) {
+    payload = decodeLegacyToken(token);
+    if (!payload) {
+      return {
+        ok: false,
+        response: jsonError(res, 401, 'UNAUTHORIZED', 'Token inválido o expirado.', {
+          reason: verification.reason,
+        }),
+      };
+    }
+
+    const legacyTimestamp = Number(payload.timestamp || 0);
+    const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    if (!legacyTimestamp || legacyTimestamp < thirtyDaysAgo) {
+      return {
+        ok: false,
+        response: jsonError(res, 401, 'UNAUTHORIZED', 'Sesión expirada.'),
+      };
+    }
+  } else if (!isClientePortalClaims(payload)) {
     return {
       ok: false,
       response: jsonError(res, 403, 'FORBIDDEN', 'Token no autorizado para cliente_portal.'),

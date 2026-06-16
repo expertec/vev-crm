@@ -1,7 +1,192 @@
 // clienteAuthRoutes.js - Sistema de autenticación para clientes con soporte de suscripciones
 
+import crypto from 'crypto';
 import { db } from './firebaseAdmin.js';
 import { normalizarTelefono } from './pinUtils.js';
+
+const CLIENT_REALM = 'cliente_portal';
+const CLIENT_ROLE = 'cliente';
+const JWT_ALG = 'HS256';
+const DEFAULT_TOKEN_TTL_SECONDS = 60 * 60 * 12; // 12h
+
+function toLowerSafe(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function base64UrlEncode(input) {
+  const buffer = Buffer.isBuffer(input) ? input : Buffer.from(String(input));
+  return buffer
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+}
+
+function base64UrlDecode(input) {
+  const normalized = String(input || '')
+    .replace(/-/g, '+')
+    .replace(/_/g, '/');
+  const pad = '='.repeat((4 - (normalized.length % 4)) % 4);
+  return Buffer.from(normalized + pad, 'base64');
+}
+
+function timingSafeEqualString(a, b) {
+  const left = Buffer.from(String(a || ''));
+  const right = Buffer.from(String(b || ''));
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
+function getClientJwtSecret() {
+  const candidates = [
+    process.env.CLIENT_PORTAL_JWT_SECRET,
+    process.env.SESSION_SECRET,
+    process.env.JWT_SECRET,
+    process.env.APP_JWT_SECRET,
+    process.env.INTERNAL_API_SECRET,
+    process.env.INTERNAL_API_KEY,
+  ];
+
+  const found = candidates.find((value) => String(value || '').trim());
+  if (found) return String(found).trim();
+
+  if (toLowerSafe(process.env.NODE_ENV || 'development') !== 'production') {
+    return String(
+      process.env.CLIENT_PORTAL_DEV_JWT_SECRET ||
+      process.env.DEV_SESSION_SECRET ||
+      'dev_local_cliente_portal_secret_change_me'
+    ).trim();
+  }
+
+  return '';
+}
+
+function getClientTokenTtlSeconds() {
+  const raw = Number(process.env.CLIENT_PORTAL_TOKEN_TTL_SECONDS || 0);
+  if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  return DEFAULT_TOKEN_TTL_SECONDS;
+}
+
+function signJwt(payload, { expiresInSeconds = DEFAULT_TOKEN_TTL_SECONDS } = {}) {
+  const secret = getClientJwtSecret();
+  if (!secret) {
+    throw new Error('CLIENT_PORTAL_JWT_SECRET/SESSION_SECRET no configurado.');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const exp = now + Math.max(60, Number(expiresInSeconds) || DEFAULT_TOKEN_TTL_SECONDS);
+  const fullPayload = {
+    ...payload,
+    iat: now,
+    exp,
+  };
+
+  const headerEncoded = base64UrlEncode(JSON.stringify({ alg: JWT_ALG, typ: 'JWT' }));
+  const payloadEncoded = base64UrlEncode(JSON.stringify(fullPayload));
+  const content = `${headerEncoded}.${payloadEncoded}`;
+  const signature = crypto.createHmac('sha256', secret).update(content).digest();
+  const signatureEncoded = base64UrlEncode(signature);
+
+  return {
+    token: `${content}.${signatureEncoded}`,
+    expiresInSeconds: exp - now,
+    exp,
+    iat: now,
+  };
+}
+
+function verifyJwt(token) {
+  const secret = getClientJwtSecret();
+  if (!secret) {
+    return { valid: false, reason: 'missing_secret' };
+  }
+
+  const parts = String(token || '').trim().split('.');
+  if (parts.length !== 3) {
+    return { valid: false, reason: 'invalid_format' };
+  }
+
+  const [headerEncoded, payloadEncoded, signatureEncoded] = parts;
+  const content = `${headerEncoded}.${payloadEncoded}`;
+  const expectedSignature = base64UrlEncode(
+    crypto.createHmac('sha256', secret).update(content).digest()
+  );
+
+  if (!timingSafeEqualString(expectedSignature, signatureEncoded)) {
+    return { valid: false, reason: 'bad_signature' };
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(base64UrlDecode(payloadEncoded).toString('utf8'));
+  } catch {
+    return { valid: false, reason: 'invalid_payload' };
+  }
+
+  const exp = Number(payload?.exp || 0);
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(exp) || exp <= now) {
+    return { valid: false, reason: 'expired', payload };
+  }
+
+  return { valid: true, payload };
+}
+
+function normalizeAudience(aud) {
+  if (Array.isArray(aud)) {
+    return aud.map((entry) => toLowerSafe(entry)).filter(Boolean);
+  }
+
+  const value = toLowerSafe(aud);
+  return value ? [value] : [];
+}
+
+function normalizeRoles(payload) {
+  const role = toLowerSafe(payload?.role);
+  const roles = Array.isArray(payload?.roles)
+    ? payload.roles.map((entry) => toLowerSafe(entry)).filter(Boolean)
+    : [];
+
+  return role ? [role, ...roles] : roles;
+}
+
+function isClientePortalClaims(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+
+  const realm = toLowerSafe(payload.realm);
+  const aud = normalizeAudience(payload.aud);
+  const roles = normalizeRoles(payload);
+
+  return (
+    realm === CLIENT_REALM ||
+    aud.includes(CLIENT_REALM) ||
+    roles.includes(CLIENT_ROLE)
+  );
+}
+
+function buildClienteSessionPayload({ negocioId, phone, accessType }) {
+  return {
+    iss: 'vevcrm',
+    sub: String(negocioId || '').trim(),
+    aud: CLIENT_REALM,
+    role: CLIENT_ROLE,
+    realm: CLIENT_REALM,
+    negocioId: String(negocioId || '').trim(),
+    phone: String(phone || '').trim(),
+    accessType: String(accessType || '').trim() || 'manual',
+    sid: crypto.randomUUID(),
+  };
+}
+
+function decodeLegacyToken(token) {
+  try {
+    const decoded = Buffer.from(String(token || ''), 'base64').toString('utf-8');
+    const payload = JSON.parse(decoded);
+    return payload && typeof payload === 'object' ? payload : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * POST /api/cliente/login
@@ -167,14 +352,24 @@ export async function loginCliente(req, res) {
     // ✅ Login exitoso
     console.log(`✅ Login exitoso - Negocio: ${negocioId} (${negocioData.companyInfo}) - Acceso por: ${accessReason}`);
 
-    // Generar token de sesión
+    // Generar token compatible con el portal cliente y mantener el token legado
     const tokenData = {
       negocioId,
       phone: phoneDigits,
       timestamp: Date.now(),
       accessType: accessReason
     };
-    const token = Buffer.from(JSON.stringify(tokenData)).toString('base64');
+    const legacyToken = Buffer.from(JSON.stringify(tokenData)).toString('base64');
+    const session = signJwt(
+      buildClienteSessionPayload({
+        negocioId,
+        phone: phoneDigits,
+        accessType: accessReason,
+      }),
+      {
+        expiresInSeconds: getClientTokenTtlSeconds(),
+      }
+    );
 
     // Actualizar última fecha de acceso
     await negocioDoc.ref.update({
@@ -217,7 +412,11 @@ export async function loginCliente(req, res) {
         planRenewalDate: negocioData.planRenewalDate?.toDate?.() || null,
         planExpiresAt: negocioData.planExpiresAt?.toDate?.() || null,
         ...subscriptionInfo,
-        token
+        token: session.token,
+        sessionToken: session.token,
+        legacyToken,
+        legacySessionToken: legacyToken,
+        tokenFormat: 'jwt'
       }
     });
 
@@ -248,19 +447,27 @@ export async function verificarSesion(req, res) {
       });
     }
 
-    // Decodificar token
-    let tokenData;
-    try {
-      const decoded = Buffer.from(token, 'base64').toString('utf-8');
-      tokenData = JSON.parse(decoded);
-    } catch {
-      return res.status(401).json({
-        success: false,
-        error: 'Token inválido'
-      });
-    }
+    let tokenData = null;
+    let negocioId = '';
+    let timestamp = 0;
 
-    const { negocioId, timestamp } = tokenData;
+    const jwtVerification = verifyJwt(token);
+    if (jwtVerification.valid && isClientePortalClaims(jwtVerification.payload)) {
+      tokenData = jwtVerification.payload || {};
+      negocioId = String(tokenData.negocioId || tokenData.sub || '').trim();
+      timestamp = Number(tokenData.iat || 0) * 1000;
+    } else {
+      tokenData = decodeLegacyToken(token);
+      if (!tokenData) {
+        return res.status(401).json({
+          success: false,
+          error: 'Token inválido'
+        });
+      }
+
+      negocioId = String(tokenData.negocioId || '').trim();
+      timestamp = Number(tokenData.timestamp || 0);
+    }
 
     // Verificar que el token no tenga más de 30 días
     const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
