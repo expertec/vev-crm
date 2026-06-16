@@ -196,16 +196,6 @@ function verifyJwt(token, { allowExpired = false } = {}) {
   return { valid: true, payload };
 }
 
-function decodeLegacyToken(token) {
-  try {
-    const decoded = Buffer.from(String(token || ''), 'base64').toString('utf8');
-    const payload = JSON.parse(decoded);
-    return payload && typeof payload === 'object' ? payload : null;
-  } catch {
-    return null;
-  }
-}
-
 function normalizeAudience(aud) {
   if (Array.isArray(aud)) {
     return aud.map((entry) => toLowerSafe(entry)).filter(Boolean);
