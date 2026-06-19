@@ -1000,6 +1000,75 @@ export function rejectClienteTokenOnAdminRoutes(req, res, next) {
 
 const META_ADS_INTEGRATION_COLLECTION = 'integraciones';
 const META_ADS_INTEGRATION_DOC = 'metaAds';
+const META_TOKEN_ENC_PREFIX = 'enc:v1:';
+
+/*
+ * Cifrado en reposo del accessToken de Meta (AES-256-GCM).
+ *
+ * Las reglas de Firestore de este proyecto son permisivas (catch-all
+ * `{document=**}`), así que NO confiamos en ellas para proteger el token:
+ * lo ciframos con una llave que vive solo en el servidor (META_TOKEN_ENC_KEY).
+ * Aunque alguien lea el documento, solo ve texto cifrado inútil.
+ *
+ * Formato almacenado: "enc:v1:<iv_b64>:<authTag_b64>:<ciphertext_b64>"
+ *
+ * Si META_TOKEN_ENC_KEY no está configurada, se guarda en texto plano con un
+ * warning (para no romper el flujo en el primer deploy). En cuanto definas la
+ * llave, los tokens nuevos quedan cifrados. La lectura detecta ambos formatos.
+ */
+function getMetaTokenEncKey() {
+  const secret = String(process.env.META_TOKEN_ENC_KEY || '').trim();
+  if (!secret) return null;
+  // Derivamos 32 bytes con SHA-256 para aceptar cualquier passphrase.
+  return crypto.createHash('sha256').update(secret).digest();
+}
+
+function encryptMetaToken(plaintext) {
+  const value = String(plaintext || '');
+  if (!value) return '';
+
+  const key = getMetaTokenEncKey();
+  if (!key) {
+    console.warn('[meta ads] META_TOKEN_ENC_KEY no configurada: el accessToken se guarda SIN cifrar.');
+    return value;
+  }
+
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+
+  return `${META_TOKEN_ENC_PREFIX}${iv.toString('base64')}:${authTag.toString('base64')}:${encrypted.toString('base64')}`;
+}
+
+function decryptMetaToken(stored) {
+  const value = String(stored || '');
+  if (!value) return '';
+  if (!value.startsWith(META_TOKEN_ENC_PREFIX)) {
+    // Token en texto plano (compatibilidad con datos previos al cifrado).
+    return value;
+  }
+
+  const key = getMetaTokenEncKey();
+  if (!key) {
+    console.error('[meta ads] Token cifrado pero falta META_TOKEN_ENC_KEY para descifrarlo.');
+    return '';
+  }
+
+  try {
+    const [ivB64, tagB64, dataB64] = value.slice(META_TOKEN_ENC_PREFIX.length).split(':');
+    const iv = Buffer.from(ivB64, 'base64');
+    const authTag = Buffer.from(tagB64, 'base64');
+    const data = Buffer.from(dataB64, 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(authTag);
+    const decrypted = Buffer.concat([decipher.update(data), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch (error) {
+    console.error('[meta ads] No se pudo descifrar el accessToken (¿llave incorrecta?):', error?.message);
+    return '';
+  }
+}
 
 function getMetaAdsIntegrationRef(negocioId) {
   return db
@@ -1043,7 +1112,7 @@ function buildMetaAdsResponse(negocioId, data = {}) {
     metaUserId: String(source.metaUserId || '').trim(),
     selectedAdAccountId: String(source.selectedAdAccountId || '').trim(),
     adAccounts: Array.isArray(source.adAccounts) ? source.adAccounts : [],
-    accessToken: String(source.accessToken || '').trim(),
+    accessToken: decryptMetaToken(source.accessToken),
     tokenExpiresAt: source.tokenExpiresAt || '',
     connectedAt: source.connectedAt || '',
     updatedAt: source.updatedAt || '',
@@ -1088,6 +1157,11 @@ export async function putClienteMetaAdsIntegration(req, res) {
 
     const rawPatch = req.body?.patch !== undefined ? req.body.patch : req.body;
     const patch = sanitizeMetaAdsPatch(rawPatch);
+
+    // Ciframos el accessToken en reposo (si viene en el patch).
+    if (Object.prototype.hasOwnProperty.call(patch, 'accessToken')) {
+      patch.accessToken = encryptMetaToken(patch.accessToken);
+    }
 
     const ref = getMetaAdsIntegrationRef(negocioId);
     const toWrite = {
