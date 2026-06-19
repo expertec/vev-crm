@@ -72,10 +72,12 @@ import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
 import { loginCliente, verificarSesion, logoutCliente } from './clienteAuthRoutes.js';
 import {
   createClienteStorageUploadUrl,
+  getClienteMetaAdsIntegration,
   getClienteNegocioById,
   loginClientePortalAuth,
   logoutClientePortalAuth,
   meClientePortalAuth,
+  putClienteMetaAdsIntegration,
   refreshClientePortalAuth,
   rejectClienteTokenOnAdminRoutes,
 } from './clientePortalAuthRoutes.js';
@@ -2649,6 +2651,9 @@ app.post('/api/cliente/auth/refresh', refreshClientePortalAuth);
 app.post('/api/cliente/auth/logout', logoutClientePortalAuth);
 app.get('/api/cliente/negocios/:negocioId', getClienteNegocioById);
 app.post('/api/cliente/storage/upload-url', createClienteStorageUploadUrl);
+// Integración Meta Ads (lectura de campañas desde el panel del cliente)
+app.get('/api/cliente/integrations/meta-ads', getClienteMetaAdsIntegration);
+app.put('/api/cliente/integrations/meta-ads', putClienteMetaAdsIntegration);
 
 // ============== 🆕 APPS AVANZADAS + HOTEL PREMIUM ==============
 app.use('/api', createAdvancedAppsRouter());

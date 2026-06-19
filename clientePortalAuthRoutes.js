@@ -983,3 +983,132 @@ export function rejectClienteTokenOnAdminRoutes(req, res, next) {
     return next();
   }
 }
+
+/* =========================================================================
+ * Integración Meta Ads (lectura de campañas desde el panel del cliente)
+ *
+ * El token de acceso de Meta se guarda aquí, server-side, en:
+ *   Negocios/{negocioId}/integraciones/metaAds
+ *
+ * IMPORTANTE (seguridad):
+ *  - El accessToken NUNCA debe ser legible por el cliente desde Firestore.
+ *    Asegúrate de que las reglas de seguridad de Firestore DENIEGUEN el acceso
+ *    del cliente a la subcolección `integraciones`. El BFF (Next.js) lee este
+ *    documento server-to-server y solo expone al navegador campos saneados
+ *    (sin accessToken).
+ * ========================================================================= */
+
+const META_ADS_INTEGRATION_COLLECTION = 'integraciones';
+const META_ADS_INTEGRATION_DOC = 'metaAds';
+
+function getMetaAdsIntegrationRef(negocioId) {
+  return db
+    .collection('Negocios')
+    .doc(String(negocioId || '').trim())
+    .collection(META_ADS_INTEGRATION_COLLECTION)
+    .doc(META_ADS_INTEGRATION_DOC);
+}
+
+// Campos permitidos en el documento de integración. Cualquier otro campo del
+// body se ignora para evitar escrituras arbitrarias en Firestore.
+const META_ADS_ALLOWED_FIELDS = new Set([
+  'connected',
+  'metaUserId',
+  'selectedAdAccountId',
+  'adAccounts',
+  'accessToken',
+  'tokenExpiresAt',
+  'connectedAt',
+  'status',
+  'lastError',
+  'permissions',
+]);
+
+function sanitizeMetaAdsPatch(patch = {}) {
+  const source = patch && typeof patch === 'object' ? patch : {};
+  const clean = {};
+  for (const key of Object.keys(source)) {
+    if (META_ADS_ALLOWED_FIELDS.has(key) && source[key] !== undefined) {
+      clean[key] = source[key];
+    }
+  }
+  return clean;
+}
+
+function buildMetaAdsResponse(negocioId, data = {}) {
+  const source = data && typeof data === 'object' ? data : {};
+  return {
+    businessId: String(negocioId || '').trim(),
+    connected: Boolean(source.connected),
+    metaUserId: String(source.metaUserId || '').trim(),
+    selectedAdAccountId: String(source.selectedAdAccountId || '').trim(),
+    adAccounts: Array.isArray(source.adAccounts) ? source.adAccounts : [],
+    accessToken: String(source.accessToken || '').trim(),
+    tokenExpiresAt: source.tokenExpiresAt || '',
+    connectedAt: source.connectedAt || '',
+    updatedAt: source.updatedAt || '',
+    status: String(source.status || 'not_connected').trim(),
+    lastError: String(source.lastError || '').trim(),
+    permissions: source.permissions && typeof source.permissions === 'object' ? source.permissions : {},
+  };
+}
+
+export async function getClienteMetaAdsIntegration(req, res) {
+  try {
+    const tenantCheck = await validateTenantHeaders(req, res, { requiredScope: CLIENT_REALM });
+    if (!tenantCheck.ok) return tenantCheck.response;
+
+    const { negocioId } = tenantCheck.tenant;
+    const tokenCheck = verifyClienteBearerToken(req, res, negocioId);
+    if (!tokenCheck.ok) return tokenCheck.response;
+
+    const snap = await getMetaAdsIntegrationRef(negocioId).get();
+    const data = snap.exists ? snap.data() : {};
+
+    return res.json({
+      success: true,
+      data: {
+        integration: buildMetaAdsResponse(negocioId, data),
+      },
+    });
+  } catch (error) {
+    console.error('[cliente meta-ads get] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo leer la integración de Meta Ads.', error?.message || null);
+  }
+}
+
+export async function putClienteMetaAdsIntegration(req, res) {
+  try {
+    const tenantCheck = await validateTenantHeaders(req, res, { requiredScope: CLIENT_REALM });
+    if (!tenantCheck.ok) return tenantCheck.response;
+
+    const { negocioId } = tenantCheck.tenant;
+    const tokenCheck = verifyClienteBearerToken(req, res, negocioId);
+    if (!tokenCheck.ok) return tokenCheck.response;
+
+    const rawPatch = req.body?.patch !== undefined ? req.body.patch : req.body;
+    const patch = sanitizeMetaAdsPatch(rawPatch);
+
+    const ref = getMetaAdsIntegrationRef(negocioId);
+    const toWrite = {
+      ...patch,
+      updatedAt: new Date().toISOString(),
+      updatedAtServer: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    await ref.set(toWrite, { merge: true });
+
+    const snap = await ref.get();
+    const data = snap.exists ? snap.data() : toWrite;
+
+    return res.json({
+      success: true,
+      data: {
+        integration: buildMetaAdsResponse(negocioId, data),
+      },
+    });
+  } catch (error) {
+    console.error('[cliente meta-ads put] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo guardar la integración de Meta Ads.', error?.message || null);
+  }
+}
