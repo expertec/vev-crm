@@ -386,6 +386,9 @@ export async function loginCliente(req, res) {
         companyInfo: negocioData.companyInfo || 'Mi Negocio',
         slug: negocioData.slug || '',
         plan: negocioData.plan,
+        // Add-ons activables desde SuperAdmin (ej. { marketing: true }).
+        // El panel del cliente lo usa para mostrar/ocultar módulos como Marketing.
+        addons: negocioData.addons || {},
         templateId: negocioData.templateId || 'info',
         logoURL: negocioData.logoURL || '',
         contactEmail: negocioData.contactEmail || '',
@@ -550,6 +553,9 @@ export async function verificarSesion(req, res) {
         companyInfo: negocioData.companyInfo || 'Mi Negocio',
         slug: negocioData.slug || '',
         plan: negocioData.plan,
+        // Add-ons activables desde SuperAdmin (ej. { marketing: true }).
+        // El panel del cliente lo usa para mostrar/ocultar módulos como Marketing.
+        addons: negocioData.addons || {},
         templateId: negocioData.templateId || 'info',
         logoURL: negocioData.logoURL || '',
         contactEmail: negocioData.contactEmail || '',
