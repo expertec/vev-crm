@@ -71,16 +71,21 @@ import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
 // ================ 🆕 AUTENTICACIÓN DE CLIENTE ================
 import { loginCliente, verificarSesion, logoutCliente } from './clienteAuthRoutes.js';
 import {
+  connectClienteWhatsApp,
   createClienteStorageUploadUrl,
   getClienteMetaAdsIntegration,
   getClienteNegocioById,
+  getClienteWhatsAppStatus,
   loginClientePortalAuth,
+  logoutClienteWhatsApp,
   logoutClientePortalAuth,
   meClientePortalAuth,
   putClienteMetaAdsIntegration,
   refreshClientePortalAuth,
   rejectClienteTokenOnAdminRoutes,
+  sendClienteWhatsApp,
 } from './clientePortalAuthRoutes.js';
+import { restoreAllSessions as restoreWhatsAppSessions } from './whatsappSessionManager.js';
 import {
   createAdvancedAppsRouter,
   createHotelAppRouter,
@@ -2654,6 +2659,11 @@ app.post('/api/cliente/storage/upload-url', createClienteStorageUploadUrl);
 // Integración Meta Ads (lectura de campañas desde el panel del cliente)
 app.get('/api/cliente/integrations/meta-ads', getClienteMetaAdsIntegration);
 app.put('/api/cliente/integrations/meta-ads', putClienteMetaAdsIntegration);
+// WhatsApp CRM multi-tenant (cada negocio conecta su propio dispositivo)
+app.get('/api/cliente/whatsapp/status', getClienteWhatsAppStatus);
+app.post('/api/cliente/whatsapp/connect', connectClienteWhatsApp);
+app.post('/api/cliente/whatsapp/logout', logoutClienteWhatsApp);
+app.post('/api/cliente/whatsapp/send', sendClienteWhatsApp);
 
 // ============== 🆕 APPS AVANZADAS + HOTEL PREMIUM ==============
 app.use('/api', createAdvancedAppsRouter());
@@ -6868,6 +6878,10 @@ app.listen(port, () => {
       'Error al conectar WhatsApp en startup:',
       err
     )
+  );
+  // WhatsApp CRM multi-tenant: restaura las sesiones por negocio guardadas en disco.
+  restoreWhatsAppSessions().catch((err) =>
+    console.error('Error restaurando sesiones WhatsApp multi-tenant:', err)
   );
 });
 

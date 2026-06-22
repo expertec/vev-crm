@@ -1,5 +1,26 @@
 import crypto from 'crypto';
+import QRCode from 'qrcode';
 import { admin, db } from './firebaseAdmin.js';
+import {
+  connectSession as waConnectSession,
+  getSessionState as waGetSessionState,
+  logoutSession as waLogoutSession,
+  sendText as waSendText,
+} from './whatsappSessionManager.js';
+
+// Genera el QR de WhatsApp como imagen (data URL) server-side, para que el QR de
+// login NUNCA salga a un tercero (es una credencial; un externo podría secuestrarlo).
+async function buildWhatsAppStatePayload(negocioId) {
+  const state = waGetSessionState(negocioId);
+  if (state.qr) {
+    try {
+      state.qrImage = await QRCode.toDataURL(state.qr, { margin: 1, width: 320 });
+    } catch (_e) {
+      state.qrImage = null;
+    }
+  }
+  return state;
+}
 
 const CLIENT_REALM = 'cliente_portal';
 const CLIENT_ROLE = 'cliente';
@@ -1184,5 +1205,78 @@ export async function putClienteMetaAdsIntegration(req, res) {
   } catch (error) {
     console.error('[cliente meta-ads put] Error:', error);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo guardar la integración de Meta Ads.', error?.message || null);
+  }
+}
+
+/* =========================================================================
+ * WhatsApp CRM multi-tenant: cada negocio conecta su propio dispositivo.
+ * El negocioId SIEMPRE sale de la sesión autenticada (no del body), para que
+ * un negocio no pueda operar la sesión de otro.
+ * ========================================================================= */
+
+// Auth común del portal cliente. Devuelve { ok, negocioId } o ya respondió error.
+async function requireClientePortal(req, res) {
+  const tenantCheck = await validateTenantHeaders(req, res, { requiredScope: CLIENT_REALM });
+  if (!tenantCheck.ok) return { ok: false };
+  const { negocioId } = tenantCheck.tenant;
+  const tokenCheck = verifyClienteBearerToken(req, res, negocioId);
+  if (!tokenCheck.ok) return { ok: false };
+  return { ok: true, negocioId };
+}
+
+export async function getClienteWhatsAppStatus(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    return res.json({ success: true, data: await buildWhatsAppStatePayload(auth.negocioId) });
+  } catch (error) {
+    console.error('[cliente whatsapp status] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo leer el estado de WhatsApp.', error?.message || null);
+  }
+}
+
+export async function connectClienteWhatsApp(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    // Inicia/restaura la sesión. El QR aparece en el estado tras unos instantes;
+    // el panel hace polling a /status para mostrarlo.
+    await waConnectSession(auth.negocioId);
+    return res.json({ success: true, data: await buildWhatsAppStatePayload(auth.negocioId) });
+  } catch (error) {
+    console.error('[cliente whatsapp connect] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo iniciar la sesión de WhatsApp.', error?.message || null);
+  }
+}
+
+export async function logoutClienteWhatsApp(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    const state = await waLogoutSession(auth.negocioId);
+    return res.json({ success: true, data: state });
+  } catch (error) {
+    console.error('[cliente whatsapp logout] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo cerrar la sesión de WhatsApp.', error?.message || null);
+  }
+}
+
+export async function sendClienteWhatsApp(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    const phone = String(req.body?.phone || '').trim();
+    const text = String(req.body?.text || '');
+    if (!phone || !text) {
+      return jsonError(res, 400, 'VALIDATION_ERROR', 'phone y text son obligatorios.');
+    }
+    const result = await waSendText(auth.negocioId, phone, text);
+    return res.json({ success: true, data: { id: result?.key?.id || null } });
+  } catch (error) {
+    if (error?.code === 'WA_NOT_CONNECTED') {
+      return jsonError(res, 409, 'WA_NOT_CONNECTED', error.message);
+    }
+    console.error('[cliente whatsapp send] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo enviar el mensaje de WhatsApp.', error?.message || null);
   }
 }
