@@ -49,6 +49,23 @@ function phoneFromJid(jid) {
   return String(jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
 }
 
+// WhatsApp ahora entrega muchos mensajes con direccionamiento LID (@lid), donde
+// el remoteJid NO es el teléfono real. El número real viene en remoteJidAlt /
+// senderPn / participantAlt. Esto resuelve el JID de número de teléfono (PN)
+// para poder GUARDAR y, sobre todo, ENVIAR correctamente.
+function resolvePnJid(msg) {
+  const key = msg?.key || {};
+  const candidates = [key.remoteJidAlt, key.remoteJid, key.senderPn, key.participantAlt, key.participant];
+  for (const c of candidates) {
+    const j = String(c || '').trim();
+    if (j.endsWith('@s.whatsapp.net')) {
+      return j.replace(/:\d+@/, '@'); // quita sufijo de dispositivo (ej. :12@)
+    }
+  }
+  // Sin PN disponible (caso LID puro): devolvemos el remoteJid tal cual (best effort).
+  return String(key.remoteJid || '').trim();
+}
+
 function isProcessableJid(jid) {
   const j = String(jid || '');
   if (!j) return false;
@@ -203,16 +220,23 @@ export async function handleInbound(negocioId, payload) {
 
   for (const msg of list) {
     try {
-      const jid = msg?.key?.remoteJid || '';
-      if (!isProcessableJid(jid)) continue;
+      const remoteJid = msg?.key?.remoteJid || '';
+      // El filtro de grupos/status/newsletter va sobre el remoteJid original.
+      if (!isProcessableJid(remoteJid)) continue;
 
       const fromMe = Boolean(msg?.key?.fromMe);
       const messageId = msg?.key?.id;
       if (!messageId) continue;
 
-      const { text, type: contentType } = extractContent(msg.message);
+      // Resolvemos el JID de número real (maneja LID).
+      const jid = resolvePnJid(msg);
       const contactId = phoneFromJid(jid);
       if (!contactId) continue;
+      if (!jid.endsWith('@s.whatsapp.net')) {
+        console.warn(`[WA-CRM] negocio=${negocioId} sin número real (LID puro): ${jid} — el envío podría fallar`);
+      }
+
+      const { text, type: contentType } = extractContent(msg.message);
 
       const { isNew } = await persistMessage(negocioId, {
         jid,
