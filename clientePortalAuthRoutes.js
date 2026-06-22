@@ -7,6 +7,19 @@ import {
   logoutSession as waLogoutSession,
   sendText as waSendText,
 } from './whatsappSessionManager.js';
+import {
+  recordOutboundMessage as waRecordOutbound,
+  listConversations as waListConversations,
+  listMessages as waListMessages,
+  markConversationRead as waMarkRead,
+  invalidateConfigCache as waInvalidateConfigCache,
+  updateLeadStage as waUpdateLeadStage,
+  getDashboardMetrics as waGetMetrics,
+} from './whatsappCrm.js';
+import {
+  getWhatsAppConfig as waGetConfig,
+  saveWhatsAppConfig as waSaveConfig,
+} from './whatsappConfig.js';
 
 // Genera el QR de WhatsApp como imagen (data URL) server-side, para que el QR de
 // login NUNCA salga a un tercero (es una credencial; un externo podría secuestrarlo).
@@ -1271,6 +1284,8 @@ export async function sendClienteWhatsApp(req, res) {
       return jsonError(res, 400, 'VALIDATION_ERROR', 'phone y text son obligatorios.');
     }
     const result = await waSendText(auth.negocioId, phone, text);
+    // Registra el saliente en la conversación (no bloqueante).
+    waRecordOutbound(auth.negocioId, phone, text, result).catch(() => {});
     return res.json({ success: true, data: { id: result?.key?.id || null } });
   } catch (error) {
     if (error?.code === 'WA_NOT_CONNECTED') {
@@ -1278,5 +1293,100 @@ export async function sendClienteWhatsApp(req, res) {
     }
     console.error('[cliente whatsapp send] Error:', error);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo enviar el mensaje de WhatsApp.', error?.message || null);
+  }
+}
+
+export async function getClienteWhatsAppConversations(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    const limit = Number(req.query?.limit) || 50;
+    const conversations = await waListConversations(auth.negocioId, { limit });
+    return res.json({ success: true, data: { conversations } });
+  } catch (error) {
+    console.error('[cliente whatsapp conversations] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudieron leer las conversaciones.', error?.message || null);
+  }
+}
+
+export async function getClienteWhatsAppMessages(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    const contactId = String(req.query?.contactId || '').trim();
+    if (!contactId) return jsonError(res, 400, 'VALIDATION_ERROR', 'contactId es obligatorio.');
+    const limit = Number(req.query?.limit) || 100;
+    const messages = await waListMessages(auth.negocioId, contactId, { limit });
+    return res.json({ success: true, data: { contactId, messages } });
+  } catch (error) {
+    console.error('[cliente whatsapp messages] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudieron leer los mensajes.', error?.message || null);
+  }
+}
+
+export async function markClienteWhatsAppRead(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    const contactId = String(req.body?.contactId || '').trim();
+    if (!contactId) return jsonError(res, 400, 'VALIDATION_ERROR', 'contactId es obligatorio.');
+    await waMarkRead(auth.negocioId, contactId);
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('[cliente whatsapp read] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo marcar como leído.', error?.message || null);
+  }
+}
+
+export async function updateClienteWhatsAppLeadStage(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    const contactId = String(req.body?.contactId || '').trim();
+    const stage = String(req.body?.stage || '').trim();
+    if (!contactId || !stage) return jsonError(res, 400, 'VALIDATION_ERROR', 'contactId y stage son obligatorios.');
+    await waUpdateLeadStage(auth.negocioId, contactId, stage);
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('[cliente whatsapp lead-stage] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo cambiar la etapa.', error?.message || null);
+  }
+}
+
+export async function getClienteWhatsAppMetrics(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    const metrics = await waGetMetrics(auth.negocioId);
+    return res.json({ success: true, data: { metrics } });
+  } catch (error) {
+    console.error('[cliente whatsapp metrics] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudieron leer las métricas.', error?.message || null);
+  }
+}
+
+export async function getClienteWhatsAppConfig(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    const config = await waGetConfig(auth.negocioId);
+    return res.json({ success: true, data: { config } });
+  } catch (error) {
+    console.error('[cliente whatsapp config get] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo leer la configuración.', error?.message || null);
+  }
+}
+
+export async function putClienteWhatsAppConfig(req, res) {
+  try {
+    const auth = await requireClientePortal(req, res);
+    if (!auth.ok) return undefined;
+    const patch = req.body?.config !== undefined ? req.body.config : req.body;
+    const config = await waSaveConfig(auth.negocioId, patch);
+    waInvalidateConfigCache(auth.negocioId);
+    return res.json({ success: true, data: { config } });
+  } catch (error) {
+    console.error('[cliente whatsapp config put] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo guardar la configuración.', error?.message || null);
   }
 }

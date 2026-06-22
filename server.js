@@ -75,17 +75,28 @@ import {
   createClienteStorageUploadUrl,
   getClienteMetaAdsIntegration,
   getClienteNegocioById,
+  getClienteWhatsAppConfig,
+  getClienteWhatsAppConversations,
+  getClienteWhatsAppMessages,
+  getClienteWhatsAppMetrics,
   getClienteWhatsAppStatus,
   loginClientePortalAuth,
   logoutClienteWhatsApp,
   logoutClientePortalAuth,
+  markClienteWhatsAppRead,
   meClientePortalAuth,
   putClienteMetaAdsIntegration,
+  putClienteWhatsAppConfig,
   refreshClientePortalAuth,
   rejectClienteTokenOnAdminRoutes,
   sendClienteWhatsApp,
+  updateClienteWhatsAppLeadStage,
 } from './clientePortalAuthRoutes.js';
-import { restoreAllSessions as restoreWhatsAppSessions } from './whatsappSessionManager.js';
+import {
+  restoreAllSessions as restoreWhatsAppSessions,
+  setInboundHandler as setWhatsAppInboundHandler,
+} from './whatsappSessionManager.js';
+import { handleInbound as handleWhatsAppInbound } from './whatsappCrm.js';
 import {
   createAdvancedAppsRouter,
   createHotelAppRouter,
@@ -2664,6 +2675,13 @@ app.get('/api/cliente/whatsapp/status', getClienteWhatsAppStatus);
 app.post('/api/cliente/whatsapp/connect', connectClienteWhatsApp);
 app.post('/api/cliente/whatsapp/logout', logoutClienteWhatsApp);
 app.post('/api/cliente/whatsapp/send', sendClienteWhatsApp);
+app.get('/api/cliente/whatsapp/conversations', getClienteWhatsAppConversations);
+app.get('/api/cliente/whatsapp/messages', getClienteWhatsAppMessages);
+app.post('/api/cliente/whatsapp/read', markClienteWhatsAppRead);
+app.get('/api/cliente/whatsapp/config', getClienteWhatsAppConfig);
+app.put('/api/cliente/whatsapp/config', putClienteWhatsAppConfig);
+app.get('/api/cliente/whatsapp/metrics', getClienteWhatsAppMetrics);
+app.post('/api/cliente/whatsapp/lead-stage', updateClienteWhatsAppLeadStage);
 
 // ============== 🆕 APPS AVANZADAS + HOTEL PREMIUM ==============
 app.use('/api', createAdvancedAppsRouter());
@@ -6879,7 +6897,9 @@ app.listen(port, () => {
       err
     )
   );
-  // WhatsApp CRM multi-tenant: restaura las sesiones por negocio guardadas en disco.
+  // WhatsApp CRM multi-tenant: conecta el pipeline de inbound (leads por negocio)
+  // y restaura las sesiones por negocio guardadas en disco.
+  setWhatsAppInboundHandler(handleWhatsAppInbound);
   restoreWhatsAppSessions().catch((err) =>
     console.error('Error restaurando sesiones WhatsApp multi-tenant:', err)
   );
