@@ -6322,14 +6322,28 @@ app.post('/api/web/after-form', async (req, res) => {
     let negocioDocId = negocioId;
     let finalSlug = summary.slug || '';
     if (!negocioDocId) {
-      const existSnap = await db
-        .collection('Negocios')
-        .where('leadPhone', '==', leadPhoneDigits)
-        .limit(1)
-        .get();
+      // Dedup robusto: el negocio existente puede tener el teléfono guardado en
+      // formato nacional (10 díg.) o con lada (52/521), y en leadPhone o
+      // contactWhatsapp. Probamos todas las variantes en ambos campos para no
+      // crear duplicados cuando el formato del número no coincide exactamente.
+      const phoneCandidates = expandPhoneCandidates(leadPhoneDigits);
+      let exist = null;
+      for (const field of ['leadPhone', 'contactWhatsapp']) {
+        for (const candidate of phoneCandidates) {
+          const snap = await db
+            .collection('Negocios')
+            .where(field, '==', candidate)
+            .limit(1)
+            .get();
+          if (!snap.empty) {
+            exist = snap.docs[0];
+            break;
+          }
+        }
+        if (exist) break;
+      }
 
-      if (!existSnap.empty) {
-        const exist = existSnap.docs[0];
+      if (exist) {
         const existData = exist.data() || {};
         return res.status(409).json({
           error:
@@ -6717,13 +6731,25 @@ app.post('/api/web/sample-create', async (req, res) => {
     const leadPhoneDigits =
       e164.replace('+', '');
 
-    const existSnap = await db
-      .collection('Negocios')
-      .where('leadPhone', '==', leadPhoneDigits)
-      .limit(1)
-      .get();
-    if (!existSnap.empty) {
-      const exist = existSnap.docs[0];
+    // Dedup robusto por variantes de teléfono (nacional/con lada) en ambos
+    // campos, para no crear duplicados si el formato no coincide exactamente.
+    const phoneCandidates = expandPhoneCandidates(leadPhoneDigits);
+    let exist = null;
+    for (const field of ['leadPhone', 'contactWhatsapp']) {
+      for (const candidate of phoneCandidates) {
+        const snap = await db
+          .collection('Negocios')
+          .where(field, '==', candidate)
+          .limit(1)
+          .get();
+        if (!snap.empty) {
+          exist = snap.docs[0];
+          break;
+        }
+      }
+      if (exist) break;
+    }
+    if (exist) {
       const existData = exist.data() || {};
       return res.status(409).json({
         error:
