@@ -32,11 +32,39 @@ export function generarMensajeCredenciales({ companyName, pin, phone, plan, logi
   const planNames = {
     basic: 'Básico',
     pro: 'Pro',
-    premium: 'Premium'
+    premium: 'Premium',
+    ventas: 'Ventas'
   };
 
   const planName = planNames[plan] || plan;
   const phoneFormatted = phone.replace(/\D/g, '');
+
+  // Clientes de plan Ventas no llevan sitio web editable: el mensaje se enfoca
+  // en el acceso a la plataforma para ver campañas y herramientas.
+  if (String(plan || '').toLowerCase() === 'ventas') {
+    return `🎉 ¡Hola ${companyName}!
+
+✅ Tu acceso a la plataforma de Negocios Web está listo.
+
+🔐 *Tus credenciales de acceso:*
+📱 Teléfono: ${phoneFormatted}
+🔑 PIN: *${pin}*
+
+🌐 Accede a tu plataforma aquí:
+${loginUrl}
+
+📝 *¿Qué puedes hacer?*
+• Ver tus campañas publicadas (Facebook, Instagram, Stories y Reels)
+• Acceder a tus herramientas de crecimiento
+• Gestionar tu presencia digital desde un solo lugar
+
+💡 *Importante:*
+- Guarda tu PIN en un lugar seguro
+- No lo compartas con nadie
+- Si tienes dudas, contáctanos
+
+¡Bienvenido a Negocios Web! 🚀`;
+  }
 
   return `🎉 ¡Hola ${companyName}!
 
