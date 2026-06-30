@@ -741,7 +741,7 @@ async function sendLeadTextMessage({ leadId = '', phoneDigits = '', content = ''
 
 function isPaidPlan(plan = '') {
   const key = String(plan || '').trim().toLowerCase();
-  return ['basic', 'pro', 'premium'].includes(key);
+  return ['basic', 'pro', 'premium', 'ventas'].includes(key);
 }
 
 function parseDateInputToTimestamp(value, fieldLabel = 'fecha') {
@@ -3110,8 +3110,8 @@ app.post('/api/crm/lead-business/activate-plan', async (req, res) => {
   } = req.body || {};
 
   const safePlan = String(plan || '').trim().toLowerCase();
-  if (!safePlan || !['basic', 'pro', 'premium'].includes(safePlan)) {
-    return res.status(400).json({ error: 'Plan inválido. Usa: basic, pro o premium.' });
+  if (!safePlan || !['basic', 'pro', 'premium', 'ventas'].includes(safePlan)) {
+    return res.status(400).json({ error: 'Plan inválido. Usa: basic, pro, premium o ventas.' });
   }
 
   if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {

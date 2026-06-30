@@ -947,7 +947,7 @@ export async function getSubscriptionStatus(req, res) {
     // Plan manual (transferencia)
     if (
       !subscriptionInfo.canAccess &&
-      ['basic', 'basico', 'pro', 'premium'].includes(
+      ['basic', 'basico', 'pro', 'premium', 'ventas'].includes(
         String(data.plan || '').toLowerCase()
       )
     ) {

@@ -293,7 +293,7 @@ export async function loginCliente(req, res) {
     // 3. Verificar plan manual (transferencia / pago único)
     if (!hasAccess) {
       const plan = negocioData.plan;
-      const planesActivos = ['basic', 'basico', 'pro', 'premium'];
+      const planesActivos = ['basic', 'basico', 'pro', 'premium', 'ventas'];
       
       if (plan && planesActivos.includes(String(plan).toLowerCase())) {
         // Verificar fecha de renovación
@@ -517,7 +517,7 @@ export async function verificarSesion(req, res) {
     // Plan manual / pago único activo
     if (!hasAccess) {
       const plan = negocioData.plan;
-      const planesActivos = ['basic', 'basico', 'pro', 'premium'];
+      const planesActivos = ['basic', 'basico', 'pro', 'premium', 'ventas'];
       if (plan && planesActivos.includes(String(plan).toLowerCase())) {
         const renewalDate =
           negocioData.planRenewalDate?.toMillis() ||

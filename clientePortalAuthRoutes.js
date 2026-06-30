@@ -559,7 +559,7 @@ function evaluateNegocioAccess(negocioData = {}) {
 
   if (!hasAccess) {
     const plan = String(negocioData.plan || '').toLowerCase();
-    const paidPlans = ['basic', 'basico', 'pro', 'premium', 'enterprise', 'especial'];
+    const paidPlans = ['basic', 'basico', 'pro', 'premium', 'enterprise', 'especial', 'ventas'];
 
     if (paidPlans.includes(plan)) {
       const renewalDateMillis =

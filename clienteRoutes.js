@@ -91,7 +91,7 @@ export async function loginCliente(req, res) {
 
     // Verificar que tenga un plan activo (no free)
     const plan = negocioData.plan;
-    const planesActivos = ['basic', 'pro', 'premium'];
+    const planesActivos = ['basic', 'pro', 'premium', 'ventas'];
     
     if (!plan || !planesActivos.includes(String(plan).toLowerCase())) {
       console.log(`⚠️ Negocio ${negocioId} no tiene plan activo`);
@@ -214,7 +214,7 @@ export async function verificarSesion(req, res) {
 
     // Verificar que siga teniendo plan activo
     const plan = negocioData.plan;
-    const planesActivos = ['basic', 'pro', 'premium'];
+    const planesActivos = ['basic', 'pro', 'premium', 'ventas'];
     
     if (!plan || !planesActivos.includes(String(plan).toLowerCase())) {
       return res.status(403).json({

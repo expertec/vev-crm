@@ -33,10 +33,10 @@ export async function activarPlan(req, res) {
       });
     }
 
-    if (!plan || !['basic', 'pro', 'premium'].includes(plan)) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Plan inválido. Debe ser: basic, pro o premium' 
+    if (!plan || !['basic', 'pro', 'premium', 'ventas'].includes(plan)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Plan inválido. Debe ser: basic, pro, premium o ventas'
       });
     }
 
@@ -60,6 +60,7 @@ export async function activarPlan(req, res) {
     let planDurationDays = 30;
     if (plan === 'premium') planDurationDays = 365;
     if (plan === 'basic') planDurationDays = 365;
+    if (plan === 'ventas') planDurationDays = 365;
 
     const startDate = new Date();
     const renewalDate = dayjs(startDate).add(planDurationDays, 'day').toDate();
