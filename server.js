@@ -6190,6 +6190,55 @@ app.post('/api/web/sample-submit', async (req, res) => {
   }
 });
 
+// brief-notify: avisa al dueño por WhatsApp cuando un cliente termina un brief.
+// No crea leads ni negocios; solo manda el mensaje al número indicado (o al OWNER_WHATSAPP).
+app.post('/api/brief/notify', async (req, res) => {
+  try {
+    const {
+      briefName = '',
+      clientName = '',
+      phone = '',
+      briefText = '',
+      notifyPhone = '',
+    } = req.body || {};
+
+    // Prioriza el número configurado en el panel; si no viene, usa el del dueño.
+    const targetRaw = String(
+      notifyPhone || process.env.OWNER_WHATSAPP || process.env.OWNER_PHONE || ''
+    ).replace(/\D/g, '');
+
+    if (targetRaw.length < 10) {
+      return res
+        .status(400)
+        .json({ error: 'No hay número de destino (notifyPhone u OWNER_WHATSAPP).' });
+    }
+
+    const sock = getWhatsAppSock();
+    if (!sock) {
+      return res.status(503).json({ error: 'WhatsApp no está conectado.' });
+    }
+
+    const clientPhoneDigits = String(phone || '').replace(/\D/g, '');
+    const lines = [
+      '📝 *Nuevo brief completado*',
+      briefName ? `Tipo: ${briefName}` : '',
+      clientName ? `Cliente: ${clientName}` : '',
+      clientPhoneDigits ? `WhatsApp: ${clientPhoneDigits}` : '',
+      '',
+      String(briefText || '').trim(),
+    ].filter((line) => line !== null && line !== undefined);
+
+    const text = lines.join('\n').slice(0, 3500);
+    const jid = `${targetRaw}@s.whatsapp.net`;
+
+    await sock.sendMessage(jid, { text, linkPreview: false }, { timeoutMs: 60_000 });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[brief-notify] error:', err?.message || err);
+    return res.status(500).json({ error: 'No se pudo enviar la alerta de brief.' });
+  }
+});
+
 // after-form (web)
 app.post('/api/web/after-form', async (req, res) => {
   try {
