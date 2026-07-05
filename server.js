@@ -76,6 +76,7 @@ import {
   listCuentaNegocios,
   switchNegocio,
   createNegocioLink,
+  adminAddNegocio,
   verifyAddNegocioToken,
   linkNegocioToCuenta,
 } from './clienteAuthRoutes.js';
@@ -2749,6 +2750,9 @@ app.post('/api/whatsapp/send-direct', async (req, res) => {
 });
 
 app.use('/api/admin', rejectClienteTokenOnAdminRoutes);
+
+// SuperAdmin: agrega un negocio nuevo a la cuenta de un cliente y activa su plan.
+app.post('/api/admin/account/add-negocio', adminAddNegocio);
 
 app.post('/api/admin/custom-domain', async (req, res) => {
   const {
@@ -6263,12 +6267,16 @@ app.post('/api/web/after-form', async (req, res) => {
     // cuenta y autoriza crear un negocio NUEVO con el mismo WhatsApp (salta el
     // dedup 409). El negocio nuevo queda "sin plan" (requiere pagar).
     let accountPhone = '';
+    let targetNegocioId = '';
     if (addToken) {
       const addCheck = verifyAddNegocioToken(addToken);
       if (!addCheck.valid) {
         return res.status(401).json({ error: 'Enlace de alta inválido o expirado.' });
       }
       accountPhone = addCheck.phone;
+      // Si el token trae negocioId, el negocio ya existe (lo creó SuperAdmin con
+      // su plan): el brief solo RELLENA su info para que la IA genere la web.
+      targetNegocioId = addCheck.negocioId || '';
     }
 
     if (!leadId && !leadPhone && !accountPhone)
@@ -6395,7 +6403,7 @@ app.post('/api/web/after-form', async (req, res) => {
       }
     }
 
-    let negocioDocId = negocioId;
+    let negocioDocId = negocioId || targetNegocioId;
     let finalSlug = summary.slug || '';
     if (!negocioDocId) {
       // Dedup robusto: el negocio existente puede tener el teléfono guardado en
@@ -6500,6 +6508,39 @@ app.post('/api/web/after-form', async (req, res) => {
           console.error('[after-form] no se pudo ligar el negocio a la cuenta:', linkErr?.message || linkErr);
         }
       }
+    } else if (targetNegocioId) {
+      // Alta desde SuperAdmin: el negocio ya existe con su plan. Rellenamos su
+      // info con el brief y lo marcamos 'Sin procesar' para que la IA genere la
+      // web (generateSiteSchemas procesa los negocios con ese status).
+      const targetRef = db.collection('Negocios').doc(negocioDocId);
+      const targetSnap = await targetRef.get();
+      if (targetSnap.exists) {
+        const targetData = targetSnap.data() || {};
+        const fill = {
+          companyInfo: summary.companyName || summary.name || targetData.companyInfo || '',
+          businessStory: summary.description || summary.businessStory || targetData.businessStory || '',
+          templateId: String(summary.templateId || targetData.templateId || 'info').toLowerCase(),
+          primaryColor: summary.primaryColor || targetData.primaryColor || null,
+          palette:
+            summary.palette ||
+            (summary.primaryColor ? [summary.primaryColor] : (targetData.palette || [])),
+          keyItems: summary.keyItems || targetData.keyItems || [],
+          contactWhatsapp: summary.contactWhatsapp || targetData.contactWhatsapp || '',
+          contactEmail: summary.contactEmail || targetData.contactEmail || '',
+          socialFacebook: summary.socialFacebook || targetData.socialFacebook || '',
+          socialInstagram: summary.socialInstagram || targetData.socialInstagram || '',
+          logoURL: uploadedLogoURL || summary.logoURL || targetData.logoURL || '',
+          photoURLs:
+            uploadedPhotos && uploadedPhotos.length
+              ? uploadedPhotos
+              : (summary.photoURLs || targetData.photoURLs || []),
+          status: 'Sin procesar',
+          updatedAt: new Date(),
+        };
+        if (!targetData.slug && summary.slug) fill.slug = summary.slug;
+        await targetRef.update(fill);
+        finalSlug = targetData.slug || summary.slug || '';
+      }
     }
 
     const giroBase = (() => {
@@ -6592,6 +6633,9 @@ app.post('/api/web/after-form', async (req, res) => {
       ok: true,
       negocioId: negocioDocId,
       slug: finalSlug,
+      // Alta self-service del cliente (sin plan) => debe pagar. Alta desde
+      // SuperAdmin (targetNegocioId) ya viene con plan activo => no.
+      needsPayment: !!accountPhone && !targetNegocioId,
     });
   } catch (e) {
     console.error(

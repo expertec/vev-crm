@@ -216,6 +216,28 @@ function uniqueStrings(values = []) {
   return [...new Set(values.map((v) => String(v || '').trim()).filter(Boolean))];
 }
 
+function slugifyBasic(value) {
+  const base = String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return base || 'negocio';
+}
+
+async function ensureUniqueSlugLocal(baseSlug) {
+  const root = slugifyBasic(baseSlug);
+  let slug = root;
+  for (let i = 0; i < 20; i += 1) {
+    const snap = await db.collection('Negocios').where('slug', '==', slug).limit(1).get();
+    if (snap.empty) return slug;
+    slug = `${root}-${Math.floor(1000 + Math.random() * 9000)}`;
+  }
+  return `${root}-${Date.now().toString(36)}`;
+}
+
 // Evalúa el acceso de un negocio (trial / suscripción / plan manual). Misma
 // lógica que usaba loginCliente, extraída para reutilizarla en la lista de
 // negocios de la cuenta y en el switch.
@@ -411,9 +433,13 @@ function requireClienteBearer(req, res) {
   return { phone, negocioId: String(payload.negocioId || payload.sub || '').trim(), payload };
 }
 
-// Token de un solo propósito para dar de alta un negocio nuevo desde una cuenta
-// autenticada. Lo consume /api/web/after-form para saltar el dedup por teléfono.
-export function createAddNegocioToken(phoneDigits) {
+// Token de un solo propósito para dar de alta / rellenar un negocio desde una
+// cuenta. Lo consume /api/web/after-form.
+//  - Sin negocioId  → alta self-service del cliente: crea negocio nuevo (salta
+//    el dedup por teléfono) y queda sin plan (requiere pagar).
+//  - Con negocioId  → el negocio ya existe (lo creó SuperAdmin con su plan): el
+//    brief solo RELLENA su información para que la IA genere la web.
+export function createAddNegocioToken(phoneDigits, negocioId = '') {
   return signJwt(
     {
       iss: 'vevcrm',
@@ -421,6 +447,7 @@ export function createAddNegocioToken(phoneDigits) {
       role: CLIENT_ROLE,
       scope: ADD_NEGOCIO_SCOPE,
       accountPhone: normalizarTelefono(phoneDigits),
+      negocioId: String(negocioId || '').trim(),
       sid: crypto.randomUUID(),
     },
     { expiresInSeconds: ADD_NEGOCIO_TOKEN_TTL_SECONDS }
@@ -434,7 +461,7 @@ export function verifyAddNegocioToken(token) {
   if (String(payload.scope || '') !== ADD_NEGOCIO_SCOPE) return { valid: false };
   const phone = normalizarTelefono(payload.accountPhone || '');
   if (!phone) return { valid: false };
-  return { valid: true, phone };
+  return { valid: true, phone, negocioId: String(payload.negocioId || '').trim() };
 }
 
 // Liga un negocio recién creado a la cuenta (array de negocioIds) y devuelve el
@@ -981,6 +1008,104 @@ export async function createNegocioLink(req, res) {
     });
   } catch (error) {
     console.error('❌ Error generando enlace de alta:', error);
+    return res.status(500).json({ success: false, error: 'Error interno del servidor' });
+  }
+}
+
+/**
+ * POST /api/admin/account/add-negocio
+ * SuperAdmin: agrega un negocio NUEVO a la cuenta de un cliente existente y le
+ * activa el plan al momento. Respeta el PIN único de la cuenta (no genera PIN
+ * nuevo). Devuelve un enlace de brief para que el cliente genere la web con IA
+ * (rellena este mismo negocio, sin cobrarle otra vez).
+ *
+ * Body: { phone, companyInfo, templateId?, email?, plan, planDurationDays?, slug? }
+ */
+export async function adminAddNegocio(req, res) {
+  try {
+    const phone = normalizarTelefono(req.body?.phone || '');
+    const companyInfo = String(req.body?.companyInfo || '').trim();
+    const templateId = (String(req.body?.templateId || 'info').trim().toLowerCase()) || 'info';
+    const email = String(req.body?.email || '').trim();
+    const plan = String(req.body?.plan || '').trim().toLowerCase();
+    const requestedSlug = String(req.body?.slug || '').trim().toLowerCase();
+
+    if (!phone) return res.status(400).json({ success: false, error: 'Falta el teléfono del cliente.' });
+    if (!companyInfo) return res.status(400).json({ success: false, error: 'Falta el nombre del negocio.' });
+    if (!['basic', 'pro', 'premium', 'ventas'].includes(plan)) {
+      return res.status(400).json({ success: false, error: 'Plan inválido. Debe ser basic, pro, premium o ventas.' });
+    }
+
+    // La cuenta debe existir (es un cliente existente con al menos un negocio).
+    const cuenta = await loadOrProvisionCuenta(phone);
+    if (!cuenta) {
+      return res.status(404).json({ success: false, error: 'No existe una cuenta con ese teléfono.' });
+    }
+    const accountPin = /^\d{4}$/.test(String(cuenta.pin || '')) ? String(cuenta.pin).trim() : '';
+
+    const slug = await ensureUniqueSlugLocal(requestedSlug || companyInfo);
+
+    // Vigencia del plan (mismos defaults que activarPlan: pro=30d, resto=365d).
+    const durationDays =
+      Number(req.body?.planDurationDays) > 0
+        ? Math.floor(Number(req.body.planDurationDays))
+        : (plan === 'pro' ? 30 : 365);
+    const startDate = new Date();
+    const renewalDate = new Date(startDate.getTime() + durationDays * 24 * 60 * 60 * 1000);
+
+    // Crea el negocio NUEVO (siempre nuevo, sin dedup por teléfono).
+    // status 'Informacion pendiente' para NO disparar aún la generación de la web
+    // (espera a que el cliente llene el brief). El plan queda ACTIVO por los
+    // campos de vigencia (el acceso no depende del status). PIN = PIN de la cuenta.
+    const newNegocio = {
+      leadId: `${phone}@s.whatsapp.net`,
+      leadPhone: phone,
+      accountPhone: phone,
+      companyInfo,
+      businessSector: '',
+      templateId,
+      status: 'Informacion pendiente',
+      plan,
+      planStartDate: admin.firestore.Timestamp.fromDate(startDate),
+      planRenewalDate: admin.firestore.Timestamp.fromDate(renewalDate),
+      planDurationDays: durationDays,
+      planActivatedAt: admin.firestore.Timestamp.now(),
+      slug,
+      keyItems: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...(accountPin ? { pin: accountPin } : {}),
+      ...(email ? { contactEmail: email } : {}),
+    };
+
+    const ref = await db.collection('Negocios').add(newNegocio);
+    await linkNegocioToCuenta(phone, ref.id);
+
+    // Enlace de brief que RELLENA este negocio (token con negocioId).
+    const token = createAddNegocioToken(phone, ref.id);
+    const base = String(
+      process.env.CLIENT_WEB_BRIEF_URL ||
+      process.env.WEB_FORM_URL ||
+      'https://negociosweb.mx/webgratis-v2'
+    ).trim().replace(/\/+$/, '');
+    const sep = base.includes('?') ? '&' : '?';
+    const briefUrl = `${base}${sep}add=${encodeURIComponent(token)}&wa=${encodeURIComponent(phone)}`;
+
+    console.log(`✅ SuperAdmin agregó negocio ${ref.id} (${companyInfo}) a la cuenta ${phone} con plan ${plan}`);
+
+    return res.json({
+      success: true,
+      data: {
+        negocioId: ref.id,
+        slug,
+        plan,
+        pin: accountPin || null,
+        briefUrl,
+        expiresInSeconds: ADD_NEGOCIO_TOKEN_TTL_SECONDS,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Error agregando negocio desde SuperAdmin:', error);
     return res.status(500).json({ success: false, error: 'Error interno del servidor' });
   }
 }
