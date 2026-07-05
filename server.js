@@ -69,7 +69,16 @@ import {
 import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
 
 // ================ 🆕 AUTENTICACIÓN DE CLIENTE ================
-import { loginCliente, verificarSesion, logoutCliente } from './clienteAuthRoutes.js';
+import {
+  loginCliente,
+  verificarSesion,
+  logoutCliente,
+  listCuentaNegocios,
+  switchNegocio,
+  createNegocioLink,
+  verifyAddNegocioToken,
+  linkNegocioToCuenta,
+} from './clienteAuthRoutes.js';
 import {
   connectClienteWhatsApp,
   createClienteStorageUploadUrl,
@@ -2659,6 +2668,11 @@ app.use('/api/stripe-onetime', stripeOneTimeRoutes);
 app.post('/api/cliente/login', loginCliente);
 app.post('/api/cliente/verificar-sesion', verificarSesion);
 app.post('/api/cliente/logout', logoutCliente);
+
+// Cuenta multinegocio: listar / cambiar de negocio / generar enlace de alta.
+app.get('/api/cliente/account/negocios', listCuentaNegocios);
+app.post('/api/cliente/account/switch', switchNegocio);
+app.post('/api/cliente/account/create-web-link', createNegocioLink);
 
 // ============== 🆕 RUTAS CLIENTE PORTAL (EMAIL/PASSWORD + REALM) ==============
 app.post('/api/cliente/auth/login', loginClientePortalAuth);
@@ -6242,9 +6256,22 @@ app.post('/api/brief/notify', async (req, res) => {
 // after-form (web)
 app.post('/api/web/after-form', async (req, res) => {
   try {
-    const { leadId, leadPhone, summary, negocioId } =
+    const { leadId, leadPhone, summary, negocioId, addToken } =
       req.body || {};
-    if (!leadId && !leadPhone)
+
+    // Alta desde una cuenta multinegocio: el token lleva el teléfono de la
+    // cuenta y autoriza crear un negocio NUEVO con el mismo WhatsApp (salta el
+    // dedup 409). El negocio nuevo queda "sin plan" (requiere pagar).
+    let accountPhone = '';
+    if (addToken) {
+      const addCheck = verifyAddNegocioToken(addToken);
+      if (!addCheck.valid) {
+        return res.status(401).json({ error: 'Enlace de alta inválido o expirado.' });
+      }
+      accountPhone = addCheck.phone;
+    }
+
+    if (!leadId && !leadPhone && !accountPhone)
       return res
         .status(400)
         .json({ error: 'Faltan leadId o leadPhone' });
@@ -6254,7 +6281,7 @@ app.post('/api/web/after-form', async (req, res) => {
         .json({ error: 'Falta summary' });
 
     const e164 = toE164(
-      leadPhone || (leadId || '').split('@')[0]
+      accountPhone || leadPhone || (leadId || '').split('@')[0]
     );
     const finalLeadId =
       leadId || e164ToLeadId(e164);
@@ -6375,34 +6402,40 @@ app.post('/api/web/after-form', async (req, res) => {
       // formato nacional (10 díg.) o con lada (52/521), y en leadPhone o
       // contactWhatsapp. Probamos todas las variantes en ambos campos para no
       // crear duplicados cuando el formato del número no coincide exactamente.
-      const phoneCandidates = expandPhoneCandidates(leadPhoneDigits);
-      let exist = null;
-      for (const field of ['leadPhone', 'contactWhatsapp']) {
-        for (const candidate of phoneCandidates) {
-          const snap = await db
-            .collection('Negocios')
-            .where(field, '==', candidate)
-            .limit(1)
-            .get();
-          if (!snap.empty) {
-            exist = snap.docs[0];
-            break;
+      //
+      // EXCEPCIÓN: en el alta desde una cuenta multinegocio (addToken válido) el
+      // cliente SÍ quiere otro negocio con el mismo número, así que saltamos el
+      // dedup y creamos uno nuevo ligado a la cuenta.
+      if (!accountPhone) {
+        const phoneCandidates = expandPhoneCandidates(leadPhoneDigits);
+        let exist = null;
+        for (const field of ['leadPhone', 'contactWhatsapp']) {
+          for (const candidate of phoneCandidates) {
+            const snap = await db
+              .collection('Negocios')
+              .where(field, '==', candidate)
+              .limit(1)
+              .get();
+            if (!snap.empty) {
+              exist = snap.docs[0];
+              break;
+            }
           }
+          if (exist) break;
         }
-        if (exist) break;
-      }
 
-      if (exist) {
-        const existData = exist.data() || {};
-        return res.status(409).json({
-          error:
-            'Ya existe un negocio con ese WhatsApp.',
-          negocioId: exist.id,
-          slug:
-            existData.slug ||
-            existData?.schema?.slug ||
-            '',
-        });
+        if (exist) {
+          const existData = exist.data() || {};
+          return res.status(409).json({
+            error:
+              'Ya existe un negocio con ese WhatsApp.',
+            negocioId: exist.id,
+            slug:
+              existData.slug ||
+              existData?.schema?.slug ||
+              '',
+          });
+        }
       }
 
       const ref = await db
@@ -6410,6 +6443,8 @@ app.post('/api/web/after-form', async (req, res) => {
         .add({
           leadId: finalLeadId,
           leadPhone: leadPhoneDigits,
+          // Marca de cuenta: agrupa varios negocios bajo el mismo WhatsApp.
+          ...(accountPhone ? { accountPhone } : {}),
           status: 'Sin procesar',
           companyInfo:
             summary.companyName ||
@@ -6451,6 +6486,20 @@ app.post('/api/web/after-form', async (req, res) => {
         });
       negocioDocId = ref.id;
       finalSlug = summary.slug || '';
+
+      // Liga el negocio nuevo a la cuenta y le asigna el PIN de la cuenta para
+      // que el cliente entre con el mismo teléfono+PIN. Queda sin plan activo
+      // (requiere pagar) hasta que active un plan desde el panel.
+      if (accountPhone) {
+        try {
+          const accountPin = await linkNegocioToCuenta(accountPhone, ref.id);
+          if (/^\d{4}$/.test(String(accountPin || ''))) {
+            await ref.update({ pin: String(accountPin).trim() });
+          }
+        } catch (linkErr) {
+          console.error('[after-form] no se pudo ligar el negocio a la cuenta:', linkErr?.message || linkErr);
+        }
+      }
     }
 
     const giroBase = (() => {
