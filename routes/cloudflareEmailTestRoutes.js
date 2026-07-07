@@ -326,22 +326,26 @@ export function createCloudflareEmailTestRouter({ logger = console } = {}) {
   // - apply:true → habilita Email Routing + añade/asegura MX+SPF de recepción.
   // - removeConflictingRootMx:true → además elimina los MX de la raíz que NO son de Cloudflare
   //   (ej. mail.negociosweb.mx) que interceptan el correo entrante.
-  router.post('/cloudflare-routing-fix', async (req, res) => {
+  const handleRoutingFix = async (req, res) => {
     const requiredSecret = String(process.env.CLOUDFLARE_EMAIL_TEST_SECRET || '').trim();
-    if (requiredSecret && String(req.header('x-test-secret') || '').trim() !== requiredSecret) {
+    const providedSecret =
+      String(req.header('x-test-secret') || req.query?.secret || '').trim();
+    if (requiredSecret && providedSecret !== requiredSecret) {
       return res.status(401).json({
         success: false,
         code: 'CF_EMAIL_TEST_UNAUTHORIZED',
-        error: 'Falta o no coincide el header x-test-secret.',
+        error: 'Falta o no coincide el secret (header x-test-secret o ?secret=).',
       });
     }
 
+    // Acepta parámetros por query (navegador / GET) o por body (POST).
+    const src = { ...(req.query || {}), ...(req.body || {}) };
     const token = String(process.env.CLOUDFLARE_API_TOKEN || '').trim();
     const accountIdEnv = resolveAccountId();
-    const domain = String(req.body?.domain || '').trim().toLowerCase();
-    const apply = req.body?.apply === true || req.body?.apply === 'true';
+    const domain = String(src.domain || '').trim().toLowerCase();
+    const apply = src.apply === true || src.apply === 'true';
     const removeConflictingRootMx =
-      req.body?.removeConflictingRootMx === true || req.body?.removeConflictingRootMx === 'true';
+      src.removeConflictingRootMx === true || src.removeConflictingRootMx === 'true';
 
     if (!token) {
       return res.status(500).json({
@@ -484,7 +488,13 @@ export function createCloudflareEmailTestRouter({ logger = console } = {}) {
         ? '✅ Recepción lista: Email Routing habilitado y MX raíz apuntando a Cloudflare.'
         : 'Aún no queda listo: revisa actions/warnings y el MX raíz (puede tardar unos minutos en propagar).',
     });
-  });
+  };
+
+  // Mismo handler por GET (navegador) y POST. En el navegador:
+  //   .../cloudflare-routing-fix?domain=negociosweb.mx                      (dry-run)
+  //   .../cloudflare-routing-fix?domain=negociosweb.mx&apply=true&removeConflictingRootMx=true
+  router.get('/cloudflare-routing-fix', handleRoutingFix);
+  router.post('/cloudflare-routing-fix', handleRoutingFix);
 
   return router;
 }
