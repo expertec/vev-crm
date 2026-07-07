@@ -99,5 +99,22 @@ export function createCorporateEmailRouter({
     controller.sendAmazonSesEmail
   );
 
+  // Rutas "de cara al cliente" (envío directo desde la plataforma).
+  // Internamente usan Amazon SES; el frontend consume estos paths neutrales.
+  router.post(
+    '/empresas/:empresaId/correos-corporativos/enviar',
+    controller.sendAmazonSesEmail
+  );
+
+  router.get(
+    '/empresas/:empresaId/correos-corporativos/mensajes',
+    controller.listCorporateEmailMessages
+  );
+
+  router.get(
+    '/empresas/:empresaId/correos-corporativos/sending-status',
+    controller.getSendingStatus
+  );
+
   return router;
 }

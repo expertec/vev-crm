@@ -36,6 +36,7 @@ export class FirestoreCorporateEmailRepository {
     planSubcollectionName = 'corporateEmailPlans',
     planDocId = 'current',
     planRequestSubcollectionName = 'corporateEmailPlanRequests',
+    messageSubcollectionName = 'corporateEmailMessages',
   } = {}) {
     this.db = dbClient;
     this.companiesCollection = companiesCollection;
@@ -48,6 +49,9 @@ export class FirestoreCorporateEmailRepository {
     this.planRequestSubcollectionName =
       cleanId(planRequestSubcollectionName || 'corporateEmailPlanRequests', 120)
       || 'corporateEmailPlanRequests';
+    this.messageSubcollectionName =
+      cleanId(messageSubcollectionName || 'corporateEmailMessages', 120)
+      || 'corporateEmailMessages';
   }
 
   getCompanyRef(empresaId) {
@@ -82,6 +86,14 @@ export class FirestoreCorporateEmailRepository {
     return this.getCompanyRef(safeEmpresaId)
       .collection(this.senderProfileSubcollectionName)
       .doc(this.senderProfileDocId);
+  }
+
+  getMessageRef(empresaId, messageId) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeMessageId = cleanId(messageId, 180);
+    return this.getCompanyRef(safeEmpresaId)
+      .collection(this.messageSubcollectionName)
+      .doc(safeMessageId);
   }
 
   getPlanRef(empresaId) {
@@ -341,6 +353,64 @@ export class FirestoreCorporateEmailRepository {
 
     const updated = await this.getCorporateEmailSenderProfile(safeEmpresaId);
     return updated;
+  }
+
+  async getCorporateEmailMessageById(empresaId, messageId) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeMessageId = cleanId(messageId, 180);
+    if (!safeEmpresaId || !safeMessageId) return null;
+    const snap = await this.getMessageRef(safeEmpresaId, safeMessageId).get();
+    if (!snap.exists) return null;
+    return {
+      id: snap.id,
+      ...(snap.data() || {}),
+    };
+  }
+
+  async createCorporateEmailMessage({
+    empresaId,
+    messageId,
+    payload = {},
+  }) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeMessageId = cleanId(messageId, 180);
+    if (!safeEmpresaId || !safeMessageId) {
+      throw repositoryError('empresaId y messageId son requeridos', 'INVALID_INPUT');
+    }
+
+    const messageRef = this.getMessageRef(safeEmpresaId, safeMessageId);
+    const now = Timestamp.now();
+    await messageRef.set(
+      {
+        ...payload,
+        empresaId: safeEmpresaId,
+        createdAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return this.getCorporateEmailMessageById(safeEmpresaId, safeMessageId);
+  }
+
+  async listCorporateEmailMessagesByCompany(empresaId, { limit = 50 } = {}) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    if (!safeEmpresaId) return [];
+
+    const safeLimit = Number.isFinite(Number(limit))
+      ? Math.max(1, Math.min(200, Math.floor(Number(limit))))
+      : 50;
+
+    const snap = await this.getCompanyRef(safeEmpresaId)
+      .collection(this.messageSubcollectionName)
+      .orderBy('createdAt', 'desc')
+      .limit(safeLimit)
+      .get();
+
+    return snap.docs.map((doc) => ({
+      id: doc.id,
+      ...(doc.data() || {}),
+    }));
   }
 
   async getCorporateEmailPlan(empresaId) {

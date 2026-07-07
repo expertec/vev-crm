@@ -22,6 +22,7 @@ function resolveSafeMessage(error) {
     || code === 'CLOUDFLARE_NOT_CONFIGURED'
     || code === 'CLOUDFLARE_ZONE_NOT_FOUND'
     || code === 'CLOUDFLARE_ACCOUNT_NOT_FOUND'
+    || code === 'ALIAS_NOT_FOUND'
     || code.startsWith('CLOUDFLARE_')
     || code.startsWith('SES_');
 
@@ -427,6 +428,7 @@ export function createCorporateEmailController({
       try {
         const empresaId = cleanString(req.params?.empresaId || '', 140);
         const domain = cleanString(req.body?.domain || req.body?.dominio || '', 200);
+        const fromAlias = cleanString(req.body?.fromAlias || req.body?.from || '', 280);
         const fromEmail = cleanString(req.body?.fromEmail || req.body?.correoOrigen || '', 280);
         const replyToEmail = cleanString(
           req.body?.replyToEmail || req.body?.correoRespuesta || '',
@@ -436,17 +438,29 @@ export function createCorporateEmailController({
         const cc = req.body?.cc || req.body?.ccEmails || '';
         const bcc = req.body?.bcc || req.body?.bccEmails || '';
         const subject = cleanString(req.body?.subject || req.body?.asunto || '', 220);
-        const text = cleanString(req.body?.text || req.body?.texto || '', 40000);
-        const html = String(req.body?.html || req.body?.htmlBody || '').trim().slice(0, 200000);
+        const text = cleanString(
+          req.body?.text || req.body?.texto || req.body?.bodyText || '',
+          40000
+        );
+        const html = String(
+          req.body?.html || req.body?.htmlBody || req.body?.bodyHtml || ''
+        )
+          .trim()
+          .slice(0, 200000);
         const configurationSetName = cleanString(
           req.body?.configurationSetName || req.body?.sesConfigurationSet || '',
           120
+        );
+        const createdBy = cleanString(
+          req.body?.createdBy || req.user?.email || req.user?.uid || '',
+          200
         );
         const tags = Array.isArray(req.body?.tags) ? req.body.tags : [];
 
         const result = await service.sendAmazonSesEmail({
           empresaId,
           domain,
+          fromAlias,
           fromEmail,
           replyToEmail,
           to,
@@ -456,15 +470,60 @@ export function createCorporateEmailController({
           text,
           html,
           configurationSetName,
+          createdBy,
           tags,
         });
 
         return res.status(202).json({
           success: true,
           result,
+          message: result?.message || null,
         });
       } catch (error) {
         logger.error('[corporate-emails] ses send error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    listCorporateEmailMessages: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const limit = Number.parseInt(
+          cleanString(req.query?.limit || req.query?.maxItems || '', 10),
+          10
+        );
+
+        const messages = await service.listCorporateEmailMessages({
+          empresaId,
+          limit: Number.isFinite(limit) ? limit : 50,
+        });
+
+        return res.status(200).json({
+          success: true,
+          messages,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] list messages error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    getSendingStatus: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const domain = cleanString(req.query?.domain || req.query?.dominio || '', 200);
+
+        const sending = await service.getSendingStatus({
+          empresaId,
+          domain,
+        });
+
+        return res.status(200).json({
+          success: true,
+          sending,
+        });
+      } catch (error) {
+        logger.error('[corporate-emails] sending status error:', error?.message || error);
         return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
       }
     },

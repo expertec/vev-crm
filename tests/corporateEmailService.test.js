@@ -27,6 +27,7 @@ class InMemoryCorporateEmailRepository {
     this.senderProfilesByCompany = new Map();
     this.plansByCompany = new Map();
     this.planRequestsByCompany = new Map();
+    this.messagesByCompany = new Map();
 
     for (const [empresaId, records] of Object.entries(corporateEmails)) {
       const byId = new Map();
@@ -80,6 +81,39 @@ class InMemoryCorporateEmailRepository {
       this.planRequestsByCompany.set(empresaId, new Map());
     }
     return this.planRequestsByCompany.get(empresaId);
+  }
+
+  getMessageBucket(empresaId) {
+    if (!this.messagesByCompany.has(empresaId)) {
+      this.messagesByCompany.set(empresaId, new Map());
+    }
+    return this.messagesByCompany.get(empresaId);
+  }
+
+  async createCorporateEmailMessage({
+    empresaId,
+    messageId,
+    payload = {},
+  }) {
+    const bucket = this.getMessageBucket(empresaId);
+    const now = new Date().toISOString();
+    const next = {
+      id: messageId,
+      empresaId,
+      ...structuredClone(payload),
+      createdAt: now,
+      updatedAt: now,
+    };
+    bucket.set(messageId, next);
+    return structuredClone(next);
+  }
+
+  async listCorporateEmailMessagesByCompany(empresaId, { limit = 50 } = {}) {
+    const bucket = this.getMessageBucket(empresaId);
+    const rows = Array.from(bucket.values())
+      .map((item) => structuredClone(item))
+      .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    return rows.slice(0, Math.max(1, Math.min(200, Number(limit) || 50)));
   }
 
   async getCompanyById(empresaId) {
@@ -1372,4 +1406,123 @@ test('consulta estado de provision y reporta ready cuando DNS+SES estan completo
   assert.equal(status.ses.identityVerified, true);
   assert.equal(status.dns.spf.includesAmazonSes, true);
   assert.equal(status.dns.dkim.every((item) => item.matches), true);
+});
+
+test('envia con fromAlias validado y guarda el mensaje en el historial', async () => {
+  const aliasId = buildCorporateEmailRecordId({ alias: 'ventas', domain: 'cliente.com' });
+  const { service, sesClient } = createService({
+    companies: {
+      msg1: { dominio: 'cliente.com' },
+    },
+    corporateEmails: {
+      msg1: [
+        {
+          id: aliasId,
+          alias: 'ventas',
+          email: 'ventas@cliente.com',
+          domain: 'cliente.com',
+          status: 'active',
+        },
+      ],
+    },
+    senderProfiles: {
+      msg1: {
+        id: 'amazonSes',
+        empresaId: 'msg1',
+        provider: 'amazon_ses',
+        enabled: true,
+        domain: 'cliente.com',
+        identityVerified: true,
+      },
+    },
+  });
+  sesClient.setIdentity('cliente.com', { exists: true, verified: true });
+
+  const sent = await service.sendAmazonSesEmail({
+    empresaId: 'msg1',
+    fromAlias: 'ventas@cliente.com',
+    to: ['destino@gmail.com'],
+    cc: ['copia@gmail.com'],
+    subject: 'Hola',
+    html: '<p>Mensaje</p>',
+    text: 'Mensaje',
+  });
+
+  assert.equal(sent.fromEmail, 'ventas@cliente.com');
+  assert.equal(sent.message.status, 'sent');
+  assert.equal(sent.message.providerMessageId, 'ses-msg-1');
+
+  const history = await service.listCorporateEmailMessages({ empresaId: 'msg1' });
+  assert.equal(history.length, 1);
+  assert.equal(history[0].fromAlias, 'ventas@cliente.com');
+  assert.equal(history[0].status, 'sent');
+  assert.deepEqual(history[0].to, ['destino@gmail.com']);
+  assert.deepEqual(history[0].cc, ['copia@gmail.com']);
+});
+
+test('rechaza envio cuando el fromAlias no existe como correo corporativo', async () => {
+  const { service, sesClient } = createService({
+    companies: {
+      msg2: { dominio: 'cliente.com' },
+    },
+    senderProfiles: {
+      msg2: {
+        id: 'amazonSes',
+        empresaId: 'msg2',
+        provider: 'amazon_ses',
+        enabled: true,
+        domain: 'cliente.com',
+        identityVerified: true,
+      },
+    },
+  });
+  sesClient.setIdentity('cliente.com', { exists: true, verified: true });
+
+  await assert.rejects(
+    () => service.sendAmazonSesEmail({
+      empresaId: 'msg2',
+      fromAlias: 'fantasma@cliente.com',
+      to: ['destino@gmail.com'],
+      subject: 'No deberia salir',
+      text: 'Alias inexistente',
+    }),
+    (error) => error?.code === 'ALIAS_NOT_FOUND'
+  );
+  assert.equal(sesClient.sent.length, 0);
+});
+
+test('getSendingStatus refleja ready y pendiente segun la identidad', async () => {
+  const ready = createService({
+    companies: { st1: { dominio: 'cliente.com' } },
+    senderProfiles: {
+      st1: {
+        id: 'amazonSes',
+        empresaId: 'st1',
+        provider: 'amazon_ses',
+        enabled: true,
+        domain: 'cliente.com',
+        identityVerified: true,
+      },
+    },
+  });
+  const okStatus = await ready.service.getSendingStatus({ empresaId: 'st1' });
+  assert.equal(okStatus.enabled, true);
+  assert.equal(okStatus.status, 'ready');
+
+  const pending = createService({
+    companies: { st2: { dominio: 'cliente.com' } },
+    senderProfiles: {
+      st2: {
+        id: 'amazonSes',
+        empresaId: 'st2',
+        provider: 'amazon_ses',
+        enabled: true,
+        domain: 'cliente.com',
+        identityVerified: false,
+      },
+    },
+  });
+  const pendingStatus = await pending.service.getSendingStatus({ empresaId: 'st2' });
+  assert.equal(pendingStatus.enabled, false);
+  assert.equal(pendingStatus.status, 'pending_verification');
 });

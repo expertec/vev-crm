@@ -273,6 +273,26 @@ export class CorporateEmailService {
     };
   }
 
+  serializeCorporateEmailMessage(record = {}) {
+    return {
+      id: cleanString(record.id || '', 180),
+      empresaId: cleanString(record.empresaId || '', 140),
+      fromAlias: normalizeEmailAddress(record.fromAlias || record.from || ''),
+      to: uniqueStrings(record.to || [], 320),
+      cc: uniqueStrings(record.cc || [], 320),
+      bcc: uniqueStrings(record.bcc || [], 320),
+      subject: cleanString(record.subject || '', 240),
+      direction: cleanString(record.direction || 'outbound', 40).toLowerCase(),
+      status: cleanString(record.status || 'sent', 40).toLowerCase(),
+      provider: cleanString(record.provider || 'amazon_ses', 80).toLowerCase(),
+      providerMessageId: cleanString(record.providerMessageId || '', 200),
+      errorMessage: cleanString(record.errorMessage || '', 500),
+      createdBy: cleanString(record.createdBy || '', 200),
+      createdAt: toIso(record.createdAt),
+      updatedAt: toIso(record.updatedAt),
+    };
+  }
+
   serializeEmailPlan(record = {}) {
     const baseAliasesIncluded = Math.max(
       0,
@@ -835,6 +855,67 @@ export class CorporateEmailService {
     const stamp = Date.now();
     const random = crypto.randomBytes(4).toString('hex');
     return `req_${stamp}_${random}`;
+  }
+
+  buildEmailMessageId() {
+    const stamp = Date.now();
+    const random = crypto.randomBytes(5).toString('hex');
+    return `msg_${stamp}_${random}`;
+  }
+
+  /**
+   * Valida que el alias remitente exista como correo corporativo activo del
+   * tenant y pertenezca al dominio. Devuelve la dirección normalizada.
+   */
+  async resolveVerifiedSenderAlias({
+    empresaId,
+    fromAlias,
+    domain,
+  } = {}) {
+    const address = normalizeEmailAddress(fromAlias);
+    if (!address) {
+      throw new CorporateEmailServiceError('`fromAlias` es requerido', {
+        code: 'SES_FROM_EMAIL_REQUIRED',
+        statusCode: 400,
+      });
+    }
+    if (!isValidEmailAddress(address)) {
+      throw new CorporateEmailServiceError('El alias remitente es inválido', {
+        code: 'SES_FROM_EMAIL_INVALID',
+        statusCode: 400,
+      });
+    }
+
+    const safeDomain = normalizeDomain(domain);
+    if (!isEmailInsideDomain({ email: address, domain: safeDomain })) {
+      throw new CorporateEmailServiceError(
+        `El remitente debe pertenecer al dominio ${safeDomain}`,
+        {
+          code: 'SES_FROM_EMAIL_DOMAIN_MISMATCH',
+          statusCode: 400,
+        }
+      );
+    }
+
+    const localPart = address.split('@')[0] || '';
+    const record = await this.repository.getCorporateEmailByAliasAndDomain({
+      empresaId,
+      alias: localPart,
+      domain: safeDomain,
+    });
+
+    if (!record || cleanString(record.status || '', 60).toLowerCase() === 'deleted') {
+      throw new CorporateEmailServiceError(
+        'El alias no existe en los correos corporativos de esta empresa',
+        {
+          code: 'ALIAS_NOT_FOUND',
+          statusCode: 404,
+          details: { fromAlias: address, domain: safeDomain },
+        }
+      );
+    }
+
+    return address;
   }
 
   async ensureCorporateEmailPlan(empresaId) {
@@ -2013,6 +2094,7 @@ export class CorporateEmailService {
   async sendAmazonSesEmail({
     empresaId,
     domain,
+    fromAlias,
     fromEmail,
     replyToEmail,
     to,
@@ -2022,6 +2104,7 @@ export class CorporateEmailService {
     text,
     html,
     configurationSetName,
+    createdBy = '',
     tags = [],
   }) {
     try {
@@ -2041,10 +2124,18 @@ export class CorporateEmailService {
         });
       }
 
-      const resolvedFromEmail = this.validateSenderEmailForDomain({
-        fromEmail: fromEmail || profile?.fromEmail || '',
-        domain: safeDomain,
-      });
+      // Si viene un alias corporativo, validamos que exista y pertenezca al
+      // tenant/dominio. Si no, mantenemos compatibilidad con `fromEmail`.
+      const resolvedFromEmail = cleanString(fromAlias, 320)
+        ? await this.resolveVerifiedSenderAlias({
+          empresaId: safeEmpresaId,
+          fromAlias,
+          domain: safeDomain,
+        })
+        : this.validateSenderEmailForDomain({
+          fromEmail: fromEmail || profile?.fromEmail || '',
+          domain: safeDomain,
+        });
       const resolvedReplyToEmail = cleanString(
         replyToEmail || profile?.replyToEmail || '',
         320
@@ -2104,17 +2195,70 @@ export class CorporateEmailService {
         );
       }
 
-      const result = await sesClient.sendEmail({
-        fromEmail: resolvedFromEmail,
-        toEmails,
-        ccEmails,
-        bccEmails,
-        replyToEmails: resolvedReplyToEmail ? [resolvedReplyToEmail] : [],
+      const messageId = this.buildEmailMessageId();
+      const baseMessagePayload = {
+        companyId: safeEmpresaId,
+        fromAlias: resolvedFromEmail,
+        from: resolvedFromEmail,
+        to: toEmails,
+        cc: ccEmails,
+        bcc: bccEmails,
         subject: safeSubject,
-        textBody,
-        htmlBody,
-        configurationSetName: resolvedConfigSet,
-        tags,
+        bodyHtml: htmlBody,
+        bodyText: textBody,
+        direction: 'outbound',
+        provider: 'amazon_ses',
+        createdBy: cleanString(createdBy, 200),
+      };
+
+      let result;
+      try {
+        result = await sesClient.sendEmail({
+          fromEmail: resolvedFromEmail,
+          toEmails,
+          ccEmails,
+          bccEmails,
+          replyToEmails: resolvedReplyToEmail ? [resolvedReplyToEmail] : [],
+          subject: safeSubject,
+          textBody,
+          htmlBody,
+          configurationSetName: resolvedConfigSet,
+          tags,
+        });
+      } catch (sendError) {
+        const mapped = this.mapError(sendError);
+        await this.repository.createCorporateEmailMessage({
+          empresaId: safeEmpresaId,
+          messageId,
+          payload: {
+            ...baseMessagePayload,
+            status: 'failed',
+            providerMessageId: '',
+            errorMessage: cleanString(mapped?.message || 'Error al enviar el correo', 500),
+          },
+        }).catch((persistError) => {
+          this.logger.error(
+            `[corporate-emails] no se pudo registrar el envío fallido: ${persistError?.message || persistError}`
+          );
+        });
+        throw mapped;
+      }
+
+      const providerMessageId = cleanString(result?.messageId || '', 180);
+      const savedMessage = await this.repository.createCorporateEmailMessage({
+        empresaId: safeEmpresaId,
+        messageId,
+        payload: {
+          ...baseMessagePayload,
+          status: 'sent',
+          providerMessageId,
+          errorMessage: '',
+        },
+      }).catch((persistError) => {
+        this.logger.error(
+          `[corporate-emails] no se pudo registrar el envío: ${persistError?.message || persistError}`
+        );
+        return null;
       });
 
       await this.repository.upsertCorporateEmailSenderProfile({
@@ -2143,8 +2287,71 @@ export class CorporateEmailService {
         to: toEmails,
         cc: ccEmails,
         bcc: bccEmails,
-        messageId: cleanString(result?.messageId || '', 180),
+        messageId: providerMessageId,
+        message: savedMessage ? this.serializeCorporateEmailMessage(savedMessage) : null,
         sentAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async listCorporateEmailMessages({
+    empresaId,
+    limit = 50,
+  }) {
+    try {
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      await this.getCompanyOrThrow(safeEmpresaId);
+      const records = await this.repository.listCorporateEmailMessagesByCompany(safeEmpresaId, {
+        limit: Math.max(1, Math.min(200, parseInteger(limit, 50))),
+      });
+      return records.map((item) => this.serializeCorporateEmailMessage(item));
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async getSendingStatus({
+    empresaId,
+    domain,
+  }) {
+    try {
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({
+        requestedDomain: domain,
+        company,
+      });
+
+      const profile = await this.repository.getCorporateEmailSenderProfile(safeEmpresaId);
+      const providerConfigured = Boolean(this.sesClient);
+      const senderEnabled = profile ? profile.enabled !== false : true;
+      const identityVerified = profile?.identityVerified === true;
+      const enabled = providerConfigured && senderEnabled && identityVerified;
+
+      let status = 'ready';
+      let reason = '';
+      if (!providerConfigured) {
+        status = 'not_configured';
+        reason = 'El servidor no tiene configurado el proveedor de envío.';
+      } else if (!identityVerified) {
+        status = 'pending_verification';
+        reason = 'El dominio aún no está verificado para envío. Ejecuta la provisión del dominio.';
+      } else if (!senderEnabled) {
+        status = 'disabled';
+        reason = 'El envío está deshabilitado para esta empresa.';
+      }
+
+      return {
+        empresaId: safeEmpresaId,
+        domain: safeDomain,
+        provider: 'amazon_ses',
+        enabled,
+        status,
+        reason,
+        identityVerified,
+        fromEmail: normalizeEmailAddress(profile?.fromEmail || ''),
       };
     } catch (error) {
       throw this.mapError(error);

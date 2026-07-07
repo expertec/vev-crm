@@ -116,6 +116,8 @@ import {
 } from './hotelAdvancedRoutes.js';
 import { createProcessInformationRouter } from './routes/processInformationRoutes.js';
 import { createCorporateEmailRouter } from './routes/corporateEmailRoutes.js';
+// ⚠️ TEMPORAL: validación de Cloudflare Email Sending (quitar tras la prueba).
+import { createCloudflareEmailTestRouter } from './routes/cloudflareEmailTestRoutes.js';
 import { generarPIN, generarMensajeCredenciales } from './pinUtils.js';
 import {
   getLeadReactivationSettings,
@@ -2713,6 +2715,9 @@ app.use('/api', createHotelAppRouter());
 // ============== 🆕 FLUJO INFORMACION (SIN SECUENCIAS) ==============
 app.use('/api/web', createProcessInformationRouter());
 app.use('/api/web', createCorporateEmailRouter());
+// ⚠️ TEMPORAL: endpoint POST /api/test/cloudflare-email para validar Cloudflare Email Sending.
+// Eliminar (mount + routes/cloudflareEmailTestRoutes.js) una vez concluida la validación.
+app.use('/api/test', createCloudflareEmailTestRouter());
 
 // ============== RUTAS EXISTENTES ==============
 
