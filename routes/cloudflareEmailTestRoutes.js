@@ -319,5 +319,172 @@ export function createCloudflareEmailTestRouter({ logger = console } = {}) {
     });
   });
 
+  // ⚠️ TEMPORAL — Arreglo de RECEPCIÓN por API (Email Routing).
+  //   POST /api/test/cloudflare-routing-fix
+  //   body: { "domain": "negociosweb.mx", "apply": false, "removeConflictingRootMx": false }
+  // - Sin apply (default): DRY-RUN, solo reporta el plan (no modifica nada).
+  // - apply:true → habilita Email Routing + añade/asegura MX+SPF de recepción.
+  // - removeConflictingRootMx:true → además elimina los MX de la raíz que NO son de Cloudflare
+  //   (ej. mail.negociosweb.mx) que interceptan el correo entrante.
+  router.post('/cloudflare-routing-fix', async (req, res) => {
+    const requiredSecret = String(process.env.CLOUDFLARE_EMAIL_TEST_SECRET || '').trim();
+    if (requiredSecret && String(req.header('x-test-secret') || '').trim() !== requiredSecret) {
+      return res.status(401).json({
+        success: false,
+        code: 'CF_EMAIL_TEST_UNAUTHORIZED',
+        error: 'Falta o no coincide el header x-test-secret.',
+      });
+    }
+
+    const token = String(process.env.CLOUDFLARE_API_TOKEN || '').trim();
+    const accountIdEnv = resolveAccountId();
+    const domain = String(req.body?.domain || '').trim().toLowerCase();
+    const apply = req.body?.apply === true || req.body?.apply === 'true';
+    const removeConflictingRootMx =
+      req.body?.removeConflictingRootMx === true || req.body?.removeConflictingRootMx === 'true';
+
+    if (!token) {
+      return res.status(500).json({
+        success: false,
+        code: 'CF_ROUTING_TOKEN_MISSING',
+        error: 'Falta CLOUDFLARE_API_TOKEN (token con permisos de Email Routing).',
+      });
+    }
+    if (!domain) {
+      return res.status(400).json({ success: false, code: 'CF_DOMAIN_REQUIRED', error: 'Indica domain en el body.' });
+    }
+
+    const http = axios.create({
+      baseURL: CF_API_BASE,
+      timeout: Number(process.env.CLOUDFLARE_API_TIMEOUT_MS || 15_000),
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      validateStatus: () => true,
+    });
+    const cf = async (method, path, { params, data } = {}) => {
+      const r = await http.request({ method, url: path, params, data });
+      const body = r?.data || {};
+      return {
+        httpStatus: r.status,
+        ok: body?.success === true,
+        errors: Array.isArray(body?.errors) ? body.errors : [],
+        result: body?.result,
+      };
+    };
+    const isCloudflareMx = (content) => /\.mx\.cloudflare\.net$/i.test(String(content || ''));
+
+    // Resolver zona
+    const zone = await cf('GET', '/zones', { params: { name: domain, per_page: 1 } });
+    const zoneRow = Array.isArray(zone.result) ? zone.result[0] : null;
+    const zoneId = zoneRow?.id || '';
+    const accountId = accountIdEnv || zoneRow?.account?.id || '';
+    if (!zoneId) {
+      return res.status(404).json({
+        success: false,
+        code: 'CF_ZONE_NOT_FOUND',
+        error: `No se encontró la zona ${domain} con este token.`,
+        zoneStep: { httpStatus: zone.httpStatus, errors: zone.errors },
+      });
+    }
+
+    // MX actuales de la raíz
+    const mxBefore = await cf('GET', `/zones/${zoneId}/dns_records`, { params: { type: 'MX', per_page: 100 } });
+    const mxRecords = (Array.isArray(mxBefore.result) ? mxBefore.result : []).map((r) => ({
+      id: r?.id,
+      name: String(r?.name || '').toLowerCase(),
+      content: r?.content,
+      priority: r?.priority,
+    }));
+    const rootMx = mxRecords.filter((r) => r.name === domain);
+    const conflictingRootMx = rootMx.filter((r) => !isCloudflareMx(r.content));
+
+    const routingBefore = await cf('GET', `/zones/${zoneId}/email/routing`);
+    const enabledBefore = routingBefore.result?.enabled === true;
+
+    const plannedActions = [];
+    if (conflictingRootMx.length) {
+      plannedActions.push(
+        `Eliminar MX raíz conflictivo: ${conflictingRootMx.map((r) => `${r.content} (prio ${r.priority})`).join(', ')}`
+      );
+    }
+    if (!enabledBefore) plannedActions.push('Habilitar Email Routing (POST /email/routing/enable)');
+    plannedActions.push('Asegurar MX+SPF de recepción (POST /email/routing/dns)');
+
+    if (!apply) {
+      return res.status(200).json({
+        success: true,
+        mode: 'dry-run',
+        domain,
+        zoneId,
+        accountId,
+        currentRouting: { enabled: enabledBefore, status: routingBefore.result?.status || '' },
+        rootMx,
+        conflictingRootMx,
+        plannedActions,
+        note:
+          'DRY-RUN: no se modificó nada. Reenvía con {"apply": true} para ejecutar. '
+          + 'Para eliminar el MX raíz conflictivo agrega {"removeConflictingRootMx": true} '
+          + '(solo si NO usas un servidor de correo propio en ese host).',
+      });
+    }
+
+    // ---- APLICAR ----
+    const actions = [];
+    const warnings = [];
+
+    if (conflictingRootMx.length) {
+      if (removeConflictingRootMx) {
+        for (const rec of conflictingRootMx) {
+          const del = await cf('DELETE', `/zones/${zoneId}/dns_records/${rec.id}`);
+          actions.push({
+            action: 'delete_root_mx',
+            content: rec.content,
+            httpStatus: del.httpStatus,
+            ok: del.ok,
+            errors: del.errors,
+          });
+        }
+      } else {
+        warnings.push(
+          `Se dejó el MX raíz conflictivo (${conflictingRootMx.map((r) => r.content).join(', ')}); `
+          + 'seguirá interceptando el correo entrante. Reenvía con removeConflictingRootMx:true para eliminarlo.'
+        );
+      }
+    }
+
+    const enable = await cf('POST', `/zones/${zoneId}/email/routing/enable`, { data: {} });
+    actions.push({ action: 'enable_routing', httpStatus: enable.httpStatus, ok: enable.ok, errors: enable.errors });
+
+    const dns = await cf('POST', `/zones/${zoneId}/email/routing/dns`, { data: {} });
+    actions.push({ action: 'ensure_routing_dns', httpStatus: dns.httpStatus, ok: dns.ok, errors: dns.errors });
+
+    // Verificación final
+    const routingAfter = await cf('GET', `/zones/${zoneId}/email/routing`);
+    const mxAfterResp = await cf('GET', `/zones/${zoneId}/dns_records`, { params: { type: 'MX', per_page: 100 } });
+    const rootMxAfter = (Array.isArray(mxAfterResp.result) ? mxAfterResp.result : [])
+      .filter((r) => String(r?.name || '').toLowerCase() === domain)
+      .map((r) => ({ content: r?.content, priority: r?.priority, isCloudflare: isCloudflareMx(r?.content) }));
+
+    const enabledAfter = routingAfter.result?.enabled === true;
+    const rootMxOk = rootMxAfter.length > 0
+      && rootMxAfter.every((r) => r.isCloudflare);
+
+    return res.status(200).json({
+      success: true,
+      mode: 'apply',
+      domain,
+      zoneId,
+      accountId,
+      actions,
+      warnings,
+      routingBefore: { enabled: enabledBefore, status: routingBefore.result?.status || '' },
+      routingAfter: { enabled: enabledAfter, status: routingAfter.result?.status || '' },
+      rootMxAfter,
+      receptionReady: enabledAfter && rootMxOk,
+      note: enabledAfter && rootMxOk
+        ? '✅ Recepción lista: Email Routing habilitado y MX raíz apuntando a Cloudflare.'
+        : 'Aún no queda listo: revisa actions/warnings y el MX raíz (puede tardar unos minutos en propagar).',
+    });
+  });
+
   return router;
 }
