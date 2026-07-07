@@ -222,14 +222,22 @@ export function createCloudflareEmailTestRouter({ logger = console } = {}) {
     const zoneRow = Array.isArray(zone.result) ? zone.result[0] : null;
     const zoneId = zoneRow?.id || '';
     const accountId = accountIdEnv || zoneRow?.account?.id || '';
+    const zoneStatus = zoneRow?.status || '';
+    const zoneNameServers = Array.isArray(zoneRow?.name_servers) ? zoneRow.name_servers : [];
     steps.zone = {
       httpStatus: zone.httpStatus,
       permissionError: zone.permissionError,
       found: Boolean(zoneId),
       zoneId,
       accountId,
+      status: zoneStatus,
+      nameServers: zoneNameServers,
+      totalZonesWithThisName: Array.isArray(zone.result) ? zone.result.length : 0,
       errors: zone.errors,
     };
+    if (zoneStatus && zoneStatus !== 'active') {
+      diagnosis.push(`⚠️ La zona del token está en estado "${zoneStatus}" (no "active"). Puede no ser la autoritativa.`);
+    }
     if (zone.permissionError) {
       diagnosis.push('❌ El token CLOUDFLARE_API_TOKEN no tiene permiso para leer zonas (Zone: Read).');
     }
@@ -308,6 +316,49 @@ export function createCloudflareEmailTestRouter({ logger = console } = {}) {
       }
     } else {
       diagnosis.push('⚠️ No se pudo resolver accountId; revisa CLOUDFLARE_ACCOUNT_ID.');
+    }
+
+    // Comparación con el DNS público EN VIVO (DoH a Cloudflare, sin token) para
+    // detectar si el token administra una zona distinta de la autoritativa.
+    try {
+      const doh = await axios.get('https://cloudflare-dns.com/dns-query', {
+        params: { name: domain, type: 'MX' },
+        headers: { accept: 'application/dns-json' },
+        timeout: 8000,
+        validateStatus: () => true,
+      });
+      const answers = Array.isArray(doh.data?.Answer) ? doh.data.Answer : [];
+      const liveMx = answers
+        .map((a) => String(a?.data || '').trim())
+        .filter(Boolean)
+        .map((entry) => {
+          const parts = entry.split(/\s+/);
+          const host = String(parts[parts.length - 1] || '').replace(/\.$/, '').toLowerCase();
+          const priority = Number(parts.length > 1 ? parts[0] : 0);
+          return { host, priority };
+        });
+      const zoneMxContents = (steps.mx?.records || [])
+        .map((r) => String(r.content || '').replace(/\.$/, '').toLowerCase());
+      const liveHosts = liveMx.map((m) => m.host);
+      const liveMatchesZone = liveHosts.length > 0 && liveHosts.every((h) => zoneMxContents.includes(h));
+      steps.liveDns = {
+        source: 'cloudflare-dns.com',
+        mx: liveMx,
+        matchesTokenZone: liveMatchesZone,
+      };
+
+      if (liveHosts.length > 0 && !liveMatchesZone) {
+        diagnosis.push(
+          `🚨 El MX EN VIVO (${liveHosts.join(', ')}) NO coincide con la zona del token (${zoneMxContents.join(', ') || 'vacío'}). `
+          + 'Muy probablemente negociosweb.mx está en OTRA zona/cuenta de Cloudflare y el token administra la zona equivocada. '
+          + 'Arreglar el routing por API en esta zona NO afectará el correo real hasta consolidar en una sola zona autoritativa.'
+        );
+      }
+      if (liveHosts.some((h) => /_dc-mx\./i.test(h))) {
+        diagnosis.push('⚠️ El MX en vivo parece de cPanel/HostGator (_dc-mx). El correo entrante hoy se entrega ahí, no en Cloudflare Routing.');
+      }
+    } catch (dohError) {
+      steps.liveDns = { error: dohError?.message || 'DoH lookup failed' };
     }
 
     return res.status(200).json({
