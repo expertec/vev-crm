@@ -101,6 +101,8 @@ import {
   rejectClienteTokenOnAdminRoutes,
   sendClienteWhatsApp,
   updateClienteWhatsAppLeadStage,
+  sendWhatsAppApiMessage,
+  getWhatsAppApiStatus,
 } from './clientePortalAuthRoutes.js';
 import {
   restoreAllSessions as restoreWhatsAppSessions,
@@ -2697,6 +2699,12 @@ app.get('/api/cliente/whatsapp/config', getClienteWhatsAppConfig);
 app.put('/api/cliente/whatsapp/config', putClienteWhatsAppConfig);
 app.get('/api/cliente/whatsapp/metrics', getClienteWhatsAppMetrics);
 app.post('/api/cliente/whatsapp/lead-stage', updateClienteWhatsAppLeadStage);
+
+// WhatsApp API EXTERNA (machine-to-machine): el sistema externo del cliente
+// envía WhatsApp con su key dedicada (negociosapi/{id}.whatsappApi). Auth propia
+// por key, ligada a la sesión Baileys de ese negocio. Gestionada desde SuperAdmin.
+app.post('/api/wa/v1/messages', sendWhatsAppApiMessage);
+app.get('/api/wa/v1/status', getWhatsAppApiStatus);
 
 // ============== 🆕 APPS AVANZADAS + HOTEL PREMIUM ==============
 app.use('/api', createAdvancedAppsRouter());

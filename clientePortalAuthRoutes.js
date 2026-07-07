@@ -6,6 +6,7 @@ import {
   getSessionState as waGetSessionState,
   logoutSession as waLogoutSession,
   sendText as waSendText,
+  sendMedia as waSendMedia,
 } from './whatsappSessionManager.js';
 import {
   recordOutboundMessage as waRecordOutbound,
@@ -1388,5 +1389,199 @@ export async function putClienteWhatsAppConfig(req, res) {
   } catch (error) {
     console.error('[cliente whatsapp config put] Error:', error);
     return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo guardar la configuración.', error?.message || null);
+  }
+}
+
+/* =========================================================================
+ * WhatsApp API EXTERNA (machine-to-machine): permite a un sistema externo del
+ * cliente enviar WhatsApp (texto/imagen/PDF) usando la sesión Baileys de SU
+ * negocio. Auth con una key dedicada (negociosapi/{id}.whatsappApi.keyHash),
+ * distinta de la del portal. La key va ligada 1-a-1 al negocioId => a su sesión,
+ * así que no puede usar la de otro negocio.
+ * ========================================================================= */
+
+const WA_API_SCOPE = 'messages:send';
+const WA_API_IMAGE_MIME = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const WA_API_DOC_MIME = new Set(['application/pdf']);
+const WA_API_MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+const WA_API_MAX_DOC_BYTES = 20 * 1024 * 1024; // 20 MB
+const WA_API_RATE_PER_MINUTE = Number(process.env.WA_API_RATE_PER_MINUTE || 60);
+
+// Rate-limit simple en memoria por negocio. En multi-instancia conviene Redis.
+const waApiRateBuckets = new Map(); // negocioId -> { count, resetAt }
+function waApiRateLimit(negocioId) {
+  const now = Date.now();
+  const bucket = waApiRateBuckets.get(negocioId);
+  if (!bucket || now > bucket.resetAt) {
+    waApiRateBuckets.set(negocioId, { count: 1, resetAt: now + 60000 });
+    return true;
+  }
+  if (bucket.count >= WA_API_RATE_PER_MINUTE) return false;
+  bucket.count += 1;
+  return true;
+}
+
+function readWhatsAppApiSettings(configData = {}) {
+  const wa = configData.whatsappApi;
+  return wa && typeof wa === 'object' ? wa : null;
+}
+
+// Valida la key dedicada de WhatsApp. Devuelve { ok, negocioId } o responde error.
+async function validateWhatsAppApiKey(req, res) {
+  const negocioId = String(req.get('x-negocio-id') || '').trim();
+  const token = readBearerToken(req);
+
+  if (!negocioId || !token) {
+    jsonError(res, 401, 'UNAUTHORIZED', 'Faltan x-negocio-id o Authorization Bearer.');
+    return { ok: false };
+  }
+
+  const configRecord = await readNegocioApiConfig(negocioId);
+  const wa = configRecord ? readWhatsAppApiSettings(configRecord.data) : null;
+
+  if (!wa || !wa.keyHash) {
+    jsonError(res, 401, 'UNAUTHORIZED', 'La API de WhatsApp no está configurada para este negocio.');
+    return { ok: false };
+  }
+  if (wa.enabled !== true || wa.revoked === true) {
+    jsonError(res, 401, 'UNAUTHORIZED', 'La API de WhatsApp está deshabilitada.');
+    return { ok: false };
+  }
+  if (!timingSafeEqualString(toLowerSafe(wa.keyHash), hashSha256(token))) {
+    jsonError(res, 401, 'UNAUTHORIZED', 'Key de WhatsApp inválida.');
+    return { ok: false };
+  }
+  const scopes = Array.isArray(wa.scopes) ? wa.scopes.map(toLowerSafe) : [];
+  if (scopes.length && !scopes.includes('*') && !scopes.includes(WA_API_SCOPE)) {
+    jsonError(res, 403, 'INVALID_SCOPE', 'La key no permite enviar mensajes.');
+    return { ok: false };
+  }
+  if (!waApiRateLimit(negocioId)) {
+    jsonError(res, 429, 'RATE_LIMITED', 'Demasiadas solicitudes, intenta más tarde.');
+    return { ok: false };
+  }
+
+  return { ok: true, negocioId };
+}
+
+// Marca de último uso (best-effort, no bloquea la respuesta).
+function touchWhatsAppApiUsage(negocioId) {
+  db.collection('negociosapi').doc(negocioId)
+    .set({ whatsappApi: { lastUsedAt: admin.firestore.Timestamp.now() } }, { merge: true })
+    .catch(() => {});
+}
+
+async function fetchRemoteMedia(url, maxBytes) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const resp = await fetch(url, { signal: controller.signal, redirect: 'follow' });
+    if (!resp.ok) throw new Error(`No se pudo descargar la media (HTTP ${resp.status}).`);
+    const declared = Number(resp.headers.get('content-length') || 0);
+    if (declared && declared > maxBytes) throw new Error('La media excede el tamaño permitido.');
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    if (buffer.length > maxBytes) throw new Error('La media excede el tamaño permitido.');
+    return buffer;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveWhatsAppApiMedia(media, maxBytes) {
+  if (media?.url) {
+    return fetchRemoteMedia(String(media.url), maxBytes);
+  }
+  if (media?.base64) {
+    const buffer = Buffer.from(String(media.base64), 'base64');
+    if (!buffer.length) throw new Error('media.base64 inválido.');
+    if (buffer.length > maxBytes) throw new Error('La media excede el tamaño permitido.');
+    return buffer;
+  }
+  throw new Error('Falta media.url o media.base64.');
+}
+
+export async function sendWhatsAppApiMessage(req, res) {
+  try {
+    const auth = await validateWhatsAppApiKey(req, res);
+    if (!auth.ok) return undefined;
+
+    const body = req.body || {};
+    const to = String(body.to || '').trim();
+    const type = String(body.type || 'text').trim().toLowerCase();
+    if (!to.replace(/\D/g, '')) {
+      return jsonError(res, 400, 'VALIDATION_ERROR', 'El campo "to" es obligatorio.');
+    }
+
+    let content;
+    let logText;
+    if (type === 'text') {
+      const text = String(body.text || '').trim();
+      if (!text) return jsonError(res, 400, 'VALIDATION_ERROR', 'Falta el campo "text".');
+      content = { text };
+      logText = text;
+
+    } else if (type === 'image') {
+      const mimetype = String(body.media?.mimetype || 'image/jpeg').toLowerCase();
+      if (!WA_API_IMAGE_MIME.has(mimetype)) {
+        return jsonError(res, 400, 'INVALID_MEDIA', 'Tipo de imagen no permitido (jpeg, png, webp).');
+      }
+      const buffer = await resolveWhatsAppApiMedia(body.media, WA_API_MAX_IMAGE_BYTES);
+      const caption = body.caption ? String(body.caption) : undefined;
+      content = { image: buffer, caption };
+      logText = caption || '📷 Imagen';
+
+    } else if (type === 'document') {
+      const mimetype = String(body.mimetype || body.media?.mimetype || 'application/pdf').toLowerCase();
+      if (!WA_API_DOC_MIME.has(mimetype)) {
+        return jsonError(res, 400, 'INVALID_MEDIA', 'Tipo de documento no permitido (solo PDF).');
+      }
+      const buffer = await resolveWhatsAppApiMedia(body.media, WA_API_MAX_DOC_BYTES);
+      const fileName = String(body.filename || 'documento.pdf');
+      content = { document: buffer, mimetype, fileName };
+      logText = `📄 ${fileName}`;
+
+    } else {
+      return jsonError(res, 400, 'VALIDATION_ERROR', 'type debe ser text, image o document.');
+    }
+
+    const result = await waSendMedia(auth.negocioId, to, content);
+
+    // Registra el saliente en la conversación del CRM y marca uso (no bloqueante).
+    waRecordOutbound(auth.negocioId, to, logText, result).catch(() => {});
+    touchWhatsAppApiUsage(auth.negocioId);
+
+    return res.json({
+      success: true,
+      data: {
+        messageId: result?.key?.id || null,
+        to,
+        type,
+        timestamp: Math.floor(Date.now() / 1000),
+      },
+    });
+  } catch (error) {
+    if (error?.code === 'WA_NOT_CONNECTED') {
+      return jsonError(res, 409, 'SESSION_NOT_CONNECTED', error.message);
+    }
+    if (/media|base64|descargar|tamaño/i.test(error?.message || '')) {
+      return jsonError(res, 400, 'INVALID_MEDIA', error.message);
+    }
+    console.error('[wa-api send] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo enviar el mensaje.', error?.message || null);
+  }
+}
+
+export async function getWhatsAppApiStatus(req, res) {
+  try {
+    const auth = await validateWhatsAppApiKey(req, res);
+    if (!auth.ok) return undefined;
+    const state = waGetSessionState(auth.negocioId);
+    return res.json({
+      success: true,
+      data: { connected: Boolean(state.connected), status: state.status, phone: state.phone || null },
+    });
+  } catch (error) {
+    console.error('[wa-api status] Error:', error);
+    return jsonError(res, 500, 'INTERNAL_ERROR', 'No se pudo leer el estado.', error?.message || null);
   }
 }

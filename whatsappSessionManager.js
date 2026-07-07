@@ -259,6 +259,24 @@ export async function sendText(negocioId, phone, text) {
   return sock.sendMessage(toJid(phone), { text: String(text ?? '') });
 }
 
+/**
+ * Envía un contenido Baileys arbitrario (imagen, documento, texto…) desde la
+ * sesión del negocio. `content` es el objeto que espera sock.sendMessage:
+ *   texto     -> { text }
+ *   imagen    -> { image: <Buffer>, caption }
+ *   documento -> { document: <Buffer>, mimetype, fileName }
+ */
+export async function sendMedia(negocioId, phone, content) {
+  const id = sanitizeNegocioId(negocioId);
+  const sock = getSock(id);
+  if (!sock) {
+    const err = new Error('La sesión de WhatsApp de este negocio no está conectada.');
+    err.code = 'WA_NOT_CONNECTED';
+    throw err;
+  }
+  return sock.sendMessage(toJid(phone), content);
+}
+
 /** Cierra la sesión y borra credenciales (requiere nuevo QR para reconectar). */
 export async function logoutSession(negocioId) {
   const id = sanitizeNegocioId(negocioId);
