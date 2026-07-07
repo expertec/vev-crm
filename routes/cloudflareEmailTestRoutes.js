@@ -160,5 +160,164 @@ export function createCloudflareEmailTestRouter({ logger = console } = {}) {
     });
   });
 
+  // ⚠️ TEMPORAL — Diagnóstico de RECEPCIÓN (Email Routing) de solo lectura.
+  // Usa el MISMO token que la recepción (CLOUDFLARE_API_TOKEN) para revelar si le
+  // faltan permisos de Email Routing (403), si el routing está habilitado, si hay
+  // MX, y si los destinos están verificados.
+  //   GET /api/test/cloudflare-routing-status?domain=negociosweb.mx
+  router.get('/cloudflare-routing-status', async (req, res) => {
+    const requiredSecret = String(process.env.CLOUDFLARE_EMAIL_TEST_SECRET || '').trim();
+    if (requiredSecret && String(req.header('x-test-secret') || '').trim() !== requiredSecret) {
+      return res.status(401).json({
+        success: false,
+        code: 'CF_EMAIL_TEST_UNAUTHORIZED',
+        error: 'Falta o no coincide el header x-test-secret.',
+      });
+    }
+
+    // Token de RECEPCIÓN (el que usa el módulo de correos corporativos).
+    const token = String(process.env.CLOUDFLARE_API_TOKEN || '').trim();
+    const accountIdEnv = resolveAccountId();
+    const domain = String(req.query?.domain || '').trim().toLowerCase();
+
+    if (!token) {
+      return res.status(500).json({
+        success: false,
+        code: 'CF_ROUTING_TOKEN_MISSING',
+        error: 'Falta CLOUDFLARE_API_TOKEN (token con permisos de Email Routing).',
+      });
+    }
+    if (!domain) {
+      return res.status(400).json({
+        success: false,
+        code: 'CF_DOMAIN_REQUIRED',
+        error: 'Indica ?domain=tu-dominio.com',
+      });
+    }
+
+    const http = axios.create({
+      baseURL: CF_API_BASE,
+      timeout: Number(process.env.CLOUDFLARE_API_TIMEOUT_MS || 15_000),
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      validateStatus: () => true,
+    });
+
+    const cfGet = async (path, params) => {
+      const r = await http.get(path, { params });
+      const data = r?.data || {};
+      return {
+        httpStatus: r.status,
+        ok: data?.success === true,
+        permissionError: r.status === 403,
+        errors: Array.isArray(data?.errors) ? data.errors : [],
+        result: data?.result,
+      };
+    };
+
+    const steps = {};
+    const diagnosis = [];
+
+    // 1) Zona
+    const zone = await cfGet('/zones', { name: domain, per_page: 1 });
+    const zoneRow = Array.isArray(zone.result) ? zone.result[0] : null;
+    const zoneId = zoneRow?.id || '';
+    const accountId = accountIdEnv || zoneRow?.account?.id || '';
+    steps.zone = {
+      httpStatus: zone.httpStatus,
+      permissionError: zone.permissionError,
+      found: Boolean(zoneId),
+      zoneId,
+      accountId,
+      errors: zone.errors,
+    };
+    if (zone.permissionError) {
+      diagnosis.push('❌ El token CLOUDFLARE_API_TOKEN no tiene permiso para leer zonas (Zone: Read).');
+    }
+    if (!zoneId) {
+      diagnosis.push(`❌ ${domain} no es una zona de esta cuenta de Cloudflare (o el token no la ve).`);
+    }
+
+    // 2) Estado de Email Routing en la zona
+    if (zoneId) {
+      const routing = await cfGet(`/zones/${zoneId}/email/routing`);
+      const enabled = routing.result?.enabled === true;
+      steps.emailRouting = {
+        httpStatus: routing.httpStatus,
+        permissionError: routing.permissionError,
+        enabled,
+        status: routing.result?.status || '',
+        name: routing.result?.name || '',
+        errors: routing.errors,
+      };
+      if (routing.permissionError) {
+        diagnosis.push('❌ El token no tiene permiso de Email Routing en la zona (falta "Email Routing Rules: Edit" o "Zone: Read").');
+      } else if (!enabled) {
+        diagnosis.push(`❌ Email Routing NO está habilitado para ${domain}. Sin esto no se reciben correos ni llegan verificaciones.`);
+      } else {
+        diagnosis.push(`✅ Email Routing habilitado para ${domain} (status: ${routing.result?.status || 'n/a'}).`);
+      }
+
+      // 3) Registros MX de la zona
+      const mx = await cfGet(`/zones/${zoneId}/dns_records`, { type: 'MX', per_page: 100 });
+      const mxRecords = (Array.isArray(mx.result) ? mx.result : []).map((r) => ({
+        name: r?.name,
+        content: r?.content,
+        priority: r?.priority,
+        proxied: r?.proxied === true,
+      }));
+      steps.mx = {
+        httpStatus: mx.httpStatus,
+        permissionError: mx.permissionError,
+        count: mxRecords.length,
+        records: mxRecords,
+      };
+      const hasCloudflareMx = mxRecords.some((r) => /mx\.cloudflare\.net$/i.test(String(r.content || '')));
+      if (mx.permissionError) {
+        diagnosis.push('❌ El token no tiene permiso "DNS: Read" para revisar los MX.');
+      } else if (mxRecords.length === 0) {
+        diagnosis.push('❌ El dominio no tiene registros MX. Email Routing no puede recibir.');
+      } else if (!hasCloudflareMx) {
+        diagnosis.push('⚠️ Los MX no apuntan a *.mx.cloudflare.net. Puede que otro proveedor tenga el MX del dominio.');
+      } else {
+        diagnosis.push('✅ MX de Cloudflare Email Routing presentes.');
+      }
+    }
+
+    // 4) Direcciones de destino (a nivel cuenta) y su verificación
+    if (accountId) {
+      const dest = await cfGet(`/accounts/${accountId}/email/routing/addresses`, { per_page: 200 });
+      const addresses = (Array.isArray(dest.result) ? dest.result : []).map((d) => ({
+        email: String(d?.email || '').toLowerCase(),
+        verified: Boolean(d?.verified),
+      }));
+      steps.destinations = {
+        httpStatus: dest.httpStatus,
+        permissionError: dest.permissionError,
+        count: addresses.length,
+        verifiedCount: addresses.filter((a) => a.verified).length,
+        addresses,
+        errors: dest.errors,
+      };
+      if (dest.permissionError) {
+        diagnosis.push('❌ El token NO tiene "Email Routing Addresses: Edit" → por eso no puede crear destinos ni enviar el correo de verificación. (Causa más probable de tu problema.)');
+      } else {
+        const unverified = addresses.filter((a) => !a.verified).map((a) => a.email);
+        if (unverified.length > 0) {
+          diagnosis.push(`⚠️ Destinos sin verificar: ${unverified.join(', ')}. Reenvía la verificación desde el dashboard.`);
+        }
+      }
+    } else {
+      diagnosis.push('⚠️ No se pudo resolver accountId; revisa CLOUDFLARE_ACCOUNT_ID.');
+    }
+
+    return res.status(200).json({
+      success: true,
+      domain,
+      tokenUsedEnv: 'CLOUDFLARE_API_TOKEN',
+      steps,
+      diagnosis,
+    });
+  });
+
   return router;
 }
