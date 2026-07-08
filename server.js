@@ -118,6 +118,7 @@ import { createProcessInformationRouter } from './routes/processInformationRoute
 import { createCorporateEmailRouter } from './routes/corporateEmailRoutes.js';
 // ⚠️ TEMPORAL: validación de Cloudflare Email Sending (quitar tras la prueba).
 import { createCloudflareEmailTestRouter } from './routes/cloudflareEmailTestRoutes.js';
+import { createMailboxRouter } from './routes/mailboxRoutes.js';
 import { generarPIN, generarMensajeCredenciales } from './pinUtils.js';
 import {
   getLeadReactivationSettings,
@@ -2718,6 +2719,8 @@ app.use('/api/web', createCorporateEmailRouter());
 // ⚠️ TEMPORAL: endpoint POST /api/test/cloudflare-email para validar Cloudflare Email Sending.
 // Eliminar (mount + routes/cloudflareEmailTestRoutes.js) una vez concluida la validación.
 app.use('/api/test', createCloudflareEmailTestRouter());
+// Mini-mail (buzones de agentes): ingesta, login, bandeja, envío.
+app.use('/api', createMailboxRouter());
 
 // ============== RUTAS EXISTENTES ==============
 

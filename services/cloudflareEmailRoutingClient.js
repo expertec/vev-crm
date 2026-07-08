@@ -468,6 +468,63 @@ export class CloudflareEmailRoutingClient {
     };
   }
 
+  async upsertWorkerRoutingRule({
+    zoneId,
+    sourceEmail,
+    workerName,
+    ruleId = '',
+    enabled = true,
+  } = {}) {
+    const safeZoneId = cleanString(zoneId, 120);
+    const safeSourceEmail = cleanString(sourceEmail, 254).toLowerCase();
+    const safeWorker = cleanString(workerName, 200);
+
+    if (!safeZoneId) {
+      throw new CloudflareEmailRoutingError('Falta zoneId para la regla de Worker', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_ZONE_REQUIRED',
+      });
+    }
+    if (!safeSourceEmail) {
+      throw new CloudflareEmailRoutingError('Falta sourceEmail para la regla de Worker', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_SOURCE_REQUIRED',
+      });
+    }
+    if (!safeWorker) {
+      throw new CloudflareEmailRoutingError('Falta workerName para la regla de Worker', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_WORKER_REQUIRED',
+      });
+    }
+
+    const data = {
+      name: `mailbox:${safeSourceEmail}`,
+      matchers: [{ type: 'literal', field: 'to', value: safeSourceEmail }],
+      actions: [{ type: 'worker', value: [safeWorker] }],
+      enabled: enabled !== false,
+    };
+
+    const safeRuleId = cleanString(ruleId, 160);
+    const result = safeRuleId
+      ? await this.request({
+        method: 'PUT',
+        path: `/zones/${safeZoneId}/email/routing/rules/${safeRuleId}`,
+        data,
+      })
+      : await this.request({
+        method: 'POST',
+        path: `/zones/${safeZoneId}/email/routing/rules`,
+        data,
+      });
+
+    return {
+      id: cleanString(result?.id || '', 160),
+      tag: cleanString(result?.tag || '', 160),
+      enabled: result?.enabled !== false,
+    };
+  }
+
   async deleteRoutingRule({ zoneId, ruleId } = {}) {
     const safeZoneId = cleanString(zoneId, 120);
     const safeRuleId = cleanString(ruleId, 160);
