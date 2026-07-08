@@ -5,6 +5,11 @@
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import crypto from 'node:crypto';
 import { db } from '../firebaseAdmin.js';
+import {
+  buildCorporateEmailRecordId,
+  normalizeAlias,
+  normalizeDomain,
+} from '../utils/corporateEmailUtils.js';
 
 function cleanId(value = '', maxLength = 200) {
   return String(value ?? '').trim().slice(0, maxLength);
@@ -14,17 +19,68 @@ function normalizeEmail(value = '') {
   return String(value || '').trim().toLowerCase();
 }
 
+function lookupDocId(address) {
+  // ID de documento seguro a partir del correo (sin '/', sin caracteres raros).
+  const email = normalizeEmail(address);
+  return crypto.createHash('sha1').update(email).digest('hex');
+}
+
 export class FirestoreMailboxRepository {
   constructor({
     dbClient = db,
     companiesCollection = 'Negocios',
     corporateEmailsSub = 'corporateEmails',
     inboxSub = 'inbox',
+    lookupCollection = 'mailboxLookup',
   } = {}) {
     this.db = dbClient;
     this.companiesCollection = companiesCollection;
     this.corporateEmailsSub = corporateEmailsSub;
     this.inboxSub = inboxSub;
+    this.lookupCollection = lookupCollection;
+  }
+
+  lookupRef(address) {
+    return this.db.collection(this.lookupCollection).doc(lookupDocId(address));
+  }
+
+  async getLookup(address) {
+    const email = normalizeEmail(address);
+    if (!email) return null;
+    const snap = await this.lookupRef(email).get();
+    if (!snap.exists) return null;
+    const data = snap.data() || {};
+    if (!data.empresaId || !data.correoId) return null;
+    return { empresaId: cleanId(data.empresaId, 140), correoId: cleanId(data.correoId, 240) };
+  }
+
+  async putLookup({ address, empresaId, correoId }) {
+    const email = normalizeEmail(address);
+    if (!email || !empresaId || !correoId) return;
+    await this.lookupRef(email).set(
+      {
+        address: email,
+        empresaId: cleanId(empresaId, 140),
+        correoId: cleanId(correoId, 240),
+        updatedAt: Timestamp.now(),
+      },
+      { merge: true }
+    );
+  }
+
+  /** Resuelve el correo corporativo por negocio + dirección, SIN queries (lectura directa). */
+  async getCorporateEmailByNegocioAndAddress({ empresaId, address }) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const email = normalizeEmail(address);
+    const [localPart = '', domainPart = ''] = email.split('@');
+    const correoId = buildCorporateEmailRecordId({
+      alias: normalizeAlias(localPart),
+      domain: normalizeDomain(domainPart),
+    });
+    if (!safeEmpresaId || !correoId) return null;
+    const data = await this.getCorporateEmailById(safeEmpresaId, correoId);
+    if (!data) return null;
+    return { empresaId: safeEmpresaId, correoId, data };
   }
 
   companyRef(empresaId) {
@@ -42,17 +98,12 @@ export class FirestoreMailboxRepository {
   }
 
   async findCorporateEmailByAddress(address) {
-    const email = normalizeEmail(address);
-    if (!email) return null;
-    const snap = await this.db
-      .collectionGroup(this.corporateEmailsSub)
-      .where('email', '==', email)
-      .limit(1)
-      .get();
-    if (snap.empty) return null;
-    const doc = snap.docs[0];
-    const empresaId = doc.ref.parent.parent?.id || '';
-    return { empresaId, correoId: doc.id, data: { id: doc.id, ...(doc.data() || {}) } };
+    // Sin queries ni índices: usa la tablita de lookup `mailboxLookup`.
+    const lookup = await this.getLookup(address);
+    if (!lookup) return null;
+    const data = await this.getCorporateEmailById(lookup.empresaId, lookup.correoId);
+    if (!data) return null;
+    return { empresaId: lookup.empresaId, correoId: lookup.correoId, data };
   }
 
   async getCorporateEmailById(empresaId, correoId) {

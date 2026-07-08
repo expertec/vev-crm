@@ -175,7 +175,7 @@ export class MailboxService {
     return { stored: mailboxEnabled, forwardTo };
   }
 
-  async setupMailbox({ adminSecret, empresaId, correoId, address, password, forwardCopyTo, displayName }) {
+  async setupMailbox({ adminSecret, negocioId, empresaId, correoId, address, password, forwardCopyTo, displayName }) {
     if (!this.adminSecret || cleanString(adminSecret, 200) !== this.adminSecret) {
       throw new MailboxServiceError('No autorizado', {
         code: 'MAILBOX_ADMIN_UNAUTHORIZED',
@@ -183,17 +183,30 @@ export class MailboxService {
       });
     }
 
+    const resolvedEmpresaId = cleanString(empresaId || negocioId, 140);
     let target = null;
-    if (empresaId && correoId) {
-      target = { empresaId, correoId, data: await this.repo.getCorporateEmailById(empresaId, correoId) };
+    if (resolvedEmpresaId && correoId) {
+      target = {
+        empresaId: resolvedEmpresaId,
+        correoId: cleanString(correoId, 240),
+        data: await this.repo.getCorporateEmailById(resolvedEmpresaId, correoId),
+      };
+    } else if (resolvedEmpresaId && address) {
+      // Sin índices: resuelve por negocio + dirección (lectura directa).
+      target = await this.repo.getCorporateEmailByNegocioAndAddress({
+        empresaId: resolvedEmpresaId,
+        address,
+      });
     } else if (address) {
       target = await this.repo.findCorporateEmailByAddress(address);
     }
     if (!target || !target.data) {
-      throw new MailboxServiceError('Correo corporativo no encontrado', {
-        code: 'MAILBOX_CORREO_NOT_FOUND',
-        statusCode: 404,
-      });
+      throw new MailboxServiceError(
+        resolvedEmpresaId
+          ? 'No se encontró ese correo en el negocio indicado. Revisa el negocioId y que el alias exista.'
+          : 'Indica el `negocioId` del negocio para activar el buzón.',
+        { code: 'MAILBOX_CORREO_NOT_FOUND', statusCode: 404 }
+      );
     }
 
     const pass = String(password || '');
@@ -217,6 +230,15 @@ export class MailboxService {
       empresaId: target.empresaId,
       correoId: target.correoId,
       patch,
+    });
+
+    // Registra el correo en la tablita de lookup (así ingest/login funcionan sin índices).
+    await this.repo.putLookup({
+      address: normalizeEmail(updated?.email || target?.data?.email || address),
+      empresaId: target.empresaId,
+      correoId: target.correoId,
+    }).catch((error) => {
+      this.logger.error?.('[mailbox] no se pudo guardar el lookup:', error?.message || error);
     });
 
     // Apuntar (por API) el alias al Worker de captura, para que empiece a recibir.

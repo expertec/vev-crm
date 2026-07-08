@@ -75,6 +75,20 @@ export function createCloudflareEmailTestRouter({ logger = console } = {}) {
     });
   });
 
+  // ⚠️ TEMPORAL — ¿están puestas las variables del mini-mail? (sin exponer valores)
+  //   GET /api/test/mailbox-config-status
+  router.get('/mailbox-config-status', (req, res) => {
+    const has = (name) => Boolean(String(process.env[name] || '').trim());
+    return res.status(200).json({
+      success: true,
+      MAILBOX_INGEST_SECRET: has('MAILBOX_INGEST_SECRET'),
+      MAILBOX_JWT_SECRET: has('MAILBOX_JWT_SECRET'),
+      MAILBOX_ADMIN_SECRET: has('MAILBOX_ADMIN_SECRET'),
+      MAILBOX_WORKER_NAME: String(process.env.MAILBOX_WORKER_NAME || '(default) negociosweb-mail-inbound'),
+      note: 'Si MAILBOX_ADMIN_SECRET es false, /mailbox/setup siempre responde No autorizado. Ponla en Render y reinicia.',
+    });
+  });
+
   router.post('/cloudflare-email', async (req, res) => {
     // Guard opcional: si defines CLOUDFLARE_EMAIL_TEST_SECRET, exige el header x-test-secret.
     const requiredSecret = String(process.env.CLOUDFLARE_EMAIL_TEST_SECRET || '').trim();

@@ -65,6 +65,7 @@ export function createMailboxController({ service, logger = console }) {
       try {
         const mailbox = await service.setupMailbox({
           adminSecret: req.header('x-mailbox-admin-secret'),
+          negocioId: req.body?.negocioId,
           empresaId: req.body?.empresaId,
           correoId: req.body?.correoId,
           address: req.body?.address,
