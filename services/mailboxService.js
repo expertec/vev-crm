@@ -175,14 +175,21 @@ export class MailboxService {
     return { stored: mailboxEnabled, forwardTo };
   }
 
-  async setupMailbox({ adminSecret, negocioId, empresaId, correoId, address, password, forwardCopyTo, displayName }) {
+  async setupMailbox({ adminSecret, ...params }) {
     if (!this.adminSecret || cleanString(adminSecret, 200) !== this.adminSecret) {
       throw new MailboxServiceError('No autorizado', {
         code: 'MAILBOX_ADMIN_UNAUTHORIZED',
         statusCode: 401,
       });
     }
+    return this.enableMailboxForOwner(params);
+  }
 
+  /**
+   * Activa el buzón desde el panel del dueño (sin admin secret). El acceso lo
+   * autoriza el propio panel, igual que el resto de endpoints de correos.
+   */
+  async enableMailboxForOwner({ negocioId, empresaId, correoId, address, password, forwardCopyTo, displayName }) {
     const resolvedEmpresaId = cleanString(empresaId || negocioId, 140);
     let target = null;
     if (resolvedEmpresaId && correoId) {

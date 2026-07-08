@@ -5,6 +5,8 @@ import { CorporateEmailService } from '../services/corporateEmailService.js';
 import { CloudflareEmailRoutingClient } from '../services/cloudflareEmailRoutingClient.js';
 import { CloudflareEmailSendingClient } from '../services/cloudflareEmailSendingClient.js';
 import { AmazonSesClient } from '../services/amazonSesClient.js';
+import { FirestoreMailboxRepository } from '../repositories/mailboxRepository.js';
+import { MailboxService } from '../services/mailboxService.js';
 
 export function createCorporateEmailRouter({
   logger = console,
@@ -22,6 +24,18 @@ export function createCorporateEmailRouter({
   });
   const controller = createCorporateEmailController({
     service,
+    logger,
+  });
+
+  // Servicio de buzones (para el botón "Crear buzón" del panel del dueño).
+  const mailboxService = new MailboxService({
+    mailboxRepository: new FirestoreMailboxRepository(),
+    corporateEmailService: service,
+    routingClient: cloudflareClient,
+    workerName: process.env.MAILBOX_WORKER_NAME || 'negociosweb-mail-inbound',
+    ingestSecret: process.env.MAILBOX_INGEST_SECRET,
+    jwtSecret: process.env.MAILBOX_JWT_SECRET,
+    adminSecret: process.env.MAILBOX_ADMIN_SECRET,
     logger,
   });
 
@@ -117,6 +131,35 @@ export function createCorporateEmailRouter({
   router.get(
     '/empresas/:empresaId/correos-corporativos/sending-status',
     controller.getSendingStatus
+  );
+
+  // Crear/activar buzón (mini-mail) para un correo, desde el panel del dueño.
+  router.post(
+    '/empresas/:empresaId/correos-corporativos/:correoId/buzon',
+    async (req, res) => {
+      try {
+        const mailbox = await mailboxService.enableMailboxForOwner({
+          empresaId: req.params?.empresaId,
+          correoId: req.params?.correoId,
+          address: req.body?.address,
+          password: req.body?.password,
+          forwardCopyTo: req.body?.forwardCopyTo,
+          displayName: req.body?.displayName,
+        });
+        return res.status(200).json({ success: true, mailbox });
+      } catch (error) {
+        logger.error('[corporate-emails] enable mailbox error:', error?.message || error);
+        const status = Number.isInteger(error?.statusCode)
+          && error.statusCode >= 400 && error.statusCode <= 599
+          ? error.statusCode
+          : 500;
+        return res.status(status).json({
+          success: false,
+          code: String(error?.code || 'MAILBOX_ERROR'),
+          error: status >= 500 ? 'Error interno al procesar la solicitud' : String(error?.message || 'Solicitud inválida'),
+        });
+      }
+    }
   );
 
   return router;

@@ -206,6 +206,8 @@ export class CorporateEmailService {
       cloudflareEmailRoutingDnsUpdated: record.cloudflareEmailRoutingDnsUpdated === true,
       cloudflareDestinationAddressId: cleanString(record.cloudflareDestinationAddressId || '', 120),
       destinationVerifiedAt: toIso(record.destinationVerifiedAt) || cleanString(record.destinationVerifiedAt || '', 80) || null,
+      mailboxEnabled: record.mailboxEnabled === true,
+      mailboxDisplayName: cleanString(record.displayName || '', 120),
       createdAt: toIso(record.createdAt),
       updatedAt: toIso(record.updatedAt),
       deletedAt: toIso(record.deletedAt),
