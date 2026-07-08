@@ -1,0 +1,16 @@
+# Cloudflare Email Worker — captura de correo entrante para el "mini-mail".
+# Deploy:  cd cloudflare-mail-worker && npm install && npx wrangler deploy
+# Secret:  npx wrangler secret put INGEST_SECRET   (mismo valor que MAILBOX_INGEST_SECRET en el Core API)
+#
+# Después, en Cloudflare Email Routing, apunta la regla del alias (ej. ventas@dominio.com)
+# a este Worker (acción "Send to a Worker" / worker) en lugar de "Forward". El Worker
+# guarda el correo y además lo reenvía como copia al Gmail verificado.
+
+name = "negociosweb-mail-inbound"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+# URL del endpoint interno del Core API que guarda el correo en Firestore.
+INGEST_URL = "https://vev-crm-viy5.onrender.com/api/internal/mailbox/ingest"

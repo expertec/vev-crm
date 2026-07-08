@@ -447,17 +447,12 @@ export function createCorporateEmailController({
         )
           .trim()
           .slice(0, 200000);
-        const configurationSetName = cleanString(
-          req.body?.configurationSetName || req.body?.sesConfigurationSet || '',
-          120
-        );
         const createdBy = cleanString(
           req.body?.createdBy || req.user?.email || req.user?.uid || '',
           200
         );
-        const tags = Array.isArray(req.body?.tags) ? req.body.tags : [];
 
-        const result = await service.sendAmazonSesEmail({
+        const result = await service.sendCorporateEmail({
           empresaId,
           domain,
           fromAlias,
@@ -469,9 +464,7 @@ export function createCorporateEmailController({
           subject,
           text,
           html,
-          configurationSetName,
           createdBy,
-          tags,
         });
 
         return res.status(202).json({

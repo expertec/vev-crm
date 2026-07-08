@@ -1,6 +1,7 @@
 import { Timestamp } from 'firebase-admin/firestore';
 import crypto from 'node:crypto';
 import { CloudflareEmailRoutingError } from './cloudflareEmailRoutingClient.js';
+import { CloudflareEmailSendingError } from './cloudflareEmailSendingClient.js';
 import { AmazonSesClientError } from './amazonSesClient.js';
 import {
   DEFAULT_RESERVED_ALIASES,
@@ -165,6 +166,7 @@ export class CorporateEmailService {
     repository,
     cloudflareClient,
     sesClient = null,
+    emailSendingClient = null,
     logger = console,
     reservedAliases = undefined,
   } = {}) {
@@ -175,6 +177,7 @@ export class CorporateEmailService {
     this.repository = repository;
     this.cloudflareClient = cloudflareClient;
     this.sesClient = sesClient;
+    this.emailSendingClient = emailSendingClient;
     this.logger = logger;
 
     const envReserved = String(process.env.CORPORATE_EMAIL_RESERVED_ALIASES || '')
@@ -1137,6 +1140,17 @@ export class CorporateEmailService {
       );
     }
 
+    if (error instanceof CloudflareEmailSendingError) {
+      return new CorporateEmailServiceError(
+        cleanString(error.message || 'Error al enviar con Cloudflare', 320),
+        {
+          code: cleanString(error.code || 'CLOUDFLARE_SEND_ERROR', 120),
+          statusCode: Number(error.statusCode || 502),
+          details: error.details || null,
+        }
+      );
+    }
+
     if (String(error?.code || '') === 'ALIAS_ALREADY_EXISTS') {
       return new CorporateEmailServiceError('Alias no disponible para este dominio', {
         code: 'ALIAS_ALREADY_EXISTS',
@@ -2091,6 +2105,159 @@ export class CorporateEmailService {
     }
   }
 
+  /**
+   * Envío saliente con Cloudflare Email Sending. Reemplaza a Amazon SES.
+   * Valida propiedad del alias, arma el correo, envía por Cloudflare y guarda
+   * el mensaje en el historial (sent/failed).
+   */
+  async sendCorporateEmail({
+    empresaId,
+    domain,
+    fromAlias,
+    fromEmail,
+    replyToEmail,
+    to,
+    cc,
+    bcc,
+    subject,
+    text,
+    html,
+    createdBy = '',
+  }) {
+    try {
+      if (!this.emailSendingClient) {
+        throw new CorporateEmailServiceError(
+          'El proveedor de envío (Cloudflare Email Sending) no está configurado en el servidor',
+          { code: 'CLOUDFLARE_NOT_CONFIGURED', statusCode: 503 }
+        );
+      }
+
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({ requestedDomain: domain, company });
+
+      const resolvedFromEmail = cleanString(fromAlias, 320)
+        ? await this.resolveVerifiedSenderAlias({
+          empresaId: safeEmpresaId,
+          fromAlias,
+          domain: safeDomain,
+        })
+        : this.validateSenderEmailForDomain({
+          fromEmail: fromEmail || '',
+          domain: safeDomain,
+        });
+
+      const resolvedReplyToEmail = cleanString(replyToEmail, 320)
+        ? this.validateDestinationEmail(replyToEmail)
+        : '';
+
+      const toEmails = this.validateRecipientEmails(to, { fieldName: 'to', required: true });
+      const ccEmails = this.validateRecipientEmails(cc, { fieldName: 'cc', required: false });
+      const bccEmails = this.validateRecipientEmails(bcc, { fieldName: 'bcc', required: false });
+
+      const safeSubject = cleanString(subject, 220);
+      if (!safeSubject) {
+        throw new CorporateEmailServiceError('`subject` es requerido', {
+          code: 'SEND_SUBJECT_REQUIRED',
+          statusCode: 400,
+        });
+      }
+
+      const textBody = String(text ?? '').trim();
+      const htmlBody = String(html ?? '').trim();
+      if (!textBody && !htmlBody) {
+        throw new CorporateEmailServiceError('Incluye `text` o `html` para enviar', {
+          code: 'SEND_BODY_REQUIRED',
+          statusCode: 400,
+        });
+      }
+
+      const messageId = this.buildEmailMessageId();
+      const baseMessagePayload = {
+        companyId: safeEmpresaId,
+        fromAlias: resolvedFromEmail,
+        from: resolvedFromEmail,
+        to: toEmails,
+        cc: ccEmails,
+        bcc: bccEmails,
+        subject: safeSubject,
+        bodyHtml: htmlBody,
+        bodyText: textBody,
+        direction: 'outbound',
+        provider: 'cloudflare_email_sending',
+        createdBy: cleanString(createdBy, 200),
+      };
+
+      let result;
+      try {
+        result = await this.emailSendingClient.sendEmail({
+          from: resolvedFromEmail,
+          to: toEmails,
+          cc: ccEmails,
+          bcc: bccEmails,
+          replyTo: resolvedReplyToEmail ? [resolvedReplyToEmail] : [],
+          subject: safeSubject,
+          html: htmlBody,
+          text: textBody,
+        });
+      } catch (sendError) {
+        const mapped = this.mapError(sendError);
+        await this.repository.createCorporateEmailMessage({
+          empresaId: safeEmpresaId,
+          messageId,
+          payload: {
+            ...baseMessagePayload,
+            status: 'failed',
+            providerMessageId: '',
+            errorMessage: cleanString(mapped?.message || 'Error al enviar el correo', 500),
+          },
+        }).catch((persistError) => {
+          this.logger.error(
+            `[corporate-emails] no se pudo registrar el envío fallido: ${persistError?.message || persistError}`
+          );
+        });
+        throw mapped;
+      }
+
+      const providerMessageId = cleanString(result?.messageId || '', 200);
+      const savedMessage = await this.repository.createCorporateEmailMessage({
+        empresaId: safeEmpresaId,
+        messageId,
+        payload: {
+          ...baseMessagePayload,
+          status: 'sent',
+          providerMessageId,
+          errorMessage: '',
+          deliveryDelivered: Array.isArray(result?.delivered) ? result.delivered : [],
+          deliveryQueued: Array.isArray(result?.queued) ? result.queued : [],
+          deliveryBounces: Array.isArray(result?.bounces) ? result.bounces : [],
+        },
+      }).catch((persistError) => {
+        this.logger.error(
+          `[corporate-emails] no se pudo registrar el envío: ${persistError?.message || persistError}`
+        );
+        return null;
+      });
+
+      return {
+        provider: 'cloudflare_email_sending',
+        domain: safeDomain,
+        fromEmail: resolvedFromEmail,
+        to: toEmails,
+        cc: ccEmails,
+        bcc: bccEmails,
+        messageId: providerMessageId,
+        delivered: Array.isArray(result?.delivered) ? result.delivered : [],
+        queued: Array.isArray(result?.queued) ? result.queued : [],
+        bounces: Array.isArray(result?.bounces) ? result.bounces : [],
+        message: savedMessage ? this.serializeCorporateEmailMessage(savedMessage) : null,
+        sentAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
   async sendAmazonSesEmail({
     empresaId,
     domain,
@@ -2324,34 +2491,22 @@ export class CorporateEmailService {
         company,
       });
 
-      const profile = await this.repository.getCorporateEmailSenderProfile(safeEmpresaId);
-      const providerConfigured = Boolean(this.sesClient);
-      const senderEnabled = profile ? profile.enabled !== false : true;
-      const identityVerified = profile?.identityVerified === true;
-      const enabled = providerConfigured && senderEnabled && identityVerified;
-
-      let status = 'ready';
-      let reason = '';
-      if (!providerConfigured) {
-        status = 'not_configured';
-        reason = 'El servidor no tiene configurado el proveedor de envío.';
-      } else if (!identityVerified) {
-        status = 'pending_verification';
-        reason = 'El dominio aún no está verificado para envío. Ejecuta la provisión del dominio.';
-      } else if (!senderEnabled) {
-        status = 'disabled';
-        reason = 'El envío está deshabilitado para esta empresa.';
-      }
+      const providerConfigured = Boolean(
+        this.emailSendingClient && this.emailSendingClient.isConfigured()
+      );
+      const enabled = providerConfigured;
+      const status = providerConfigured ? 'ready' : 'not_configured';
+      const reason = providerConfigured
+        ? ''
+        : 'El envío por Cloudflare no está configurado en el servidor (falta token o account id).';
 
       return {
         empresaId: safeEmpresaId,
         domain: safeDomain,
-        provider: 'amazon_ses',
+        provider: 'cloudflare_email_sending',
         enabled,
         status,
         reason,
-        identityVerified,
-        fromEmail: normalizeEmailAddress(profile?.fromEmail || ''),
       };
     } catch (error) {
       throw this.mapError(error);

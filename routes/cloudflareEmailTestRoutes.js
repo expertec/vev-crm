@@ -41,6 +41,40 @@ function normalizeRecipients(value) {
 export function createCloudflareEmailTestRouter({ logger = console } = {}) {
   const router = express.Router();
 
+  // ⚠️ TEMPORAL — Diagnóstico de solo lectura: ¿con qué proveedor envía el panel?
+  // NO expone secretos, solo si cada variable existe (true/false).
+  //   GET /api/test/send-provider-status
+  router.get('/send-provider-status', (req, res) => {
+    const has = (name) => Boolean(String(process.env[name] || '').trim());
+    const sesConfigured =
+      has('AWS_REGION') && has('AWS_ACCESS_KEY_ID') && has('AWS_SECRET_ACCESS_KEY');
+    const cloudflareSendConfigured =
+      has('CLOUDFLARE_ACCOUNT_ID') &&
+      (has('CLOUDFLARE_EMAIL_SENDING_API_TOKEN') || has('CLOUDFLARE_API_TOKEN'));
+    return res.status(200).json({
+      success: true,
+      // Lo que el CÓDIGO del panel usa hoy para enviar:
+      panelSendRoute: 'POST /api/web/empresas/:empresaId/correos-corporativos/enviar',
+      panelSendHandler: 'sendAmazonSesEmail (Amazon SES / @aws-sdk/client-sesv2)',
+      aws: {
+        AWS_REGION: has('AWS_REGION'),
+        AWS_ACCESS_KEY_ID: has('AWS_ACCESS_KEY_ID'),
+        AWS_SECRET_ACCESS_KEY: has('AWS_SECRET_ACCESS_KEY'),
+      },
+      sesConfigured,
+      cloudflareSend: {
+        CLOUDFLARE_ACCOUNT_ID: has('CLOUDFLARE_ACCOUNT_ID'),
+        CLOUDFLARE_EMAIL_SENDING_API_TOKEN: has('CLOUDFLARE_EMAIL_SENDING_API_TOKEN'),
+        CLOUDFLARE_API_TOKEN: has('CLOUDFLARE_API_TOKEN'),
+      },
+      cloudflareSendConfigured,
+      conclusion: sesConfigured
+        ? 'El panel está enviando por Amazon SES (hay credenciales AWS configuradas).'
+        : 'No hay credenciales AWS: si el envío del panel "funciona", en realidad estaría fallando o no usando este código.',
+      note: 'El envío Cloudflare solo existe en /api/test/cloudflare-email (prueba, NO conectado al botón Enviar).',
+    });
+  });
+
   router.post('/cloudflare-email', async (req, res) => {
     // Guard opcional: si defines CLOUDFLARE_EMAIL_TEST_SECRET, exige el header x-test-secret.
     const requiredSecret = String(process.env.CLOUDFLARE_EMAIL_TEST_SECRET || '').trim();

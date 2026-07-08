@@ -645,6 +645,27 @@ class FakeAmazonSesClient {
   }
 }
 
+class FakeCloudflareEmailSendingClient {
+  constructor({ configured = true } = {}) {
+    this.configured = configured;
+    this.sent = [];
+  }
+
+  isConfigured() {
+    return this.configured === true;
+  }
+
+  async sendEmail(payload = {}) {
+    this.sent.push(structuredClone(payload));
+    return {
+      messageId: `cf-msg-${this.sent.length}`,
+      delivered: Array.isArray(payload.to) ? payload.to : [payload.to].filter(Boolean),
+      queued: [],
+      bounces: [],
+    };
+  }
+}
+
 function createService({
   companies = {},
   corporateEmails = {},
@@ -652,6 +673,7 @@ function createService({
   senderProfiles = {},
   plans = {},
   planRequests = {},
+  sendingConfigured = true,
 } = {}) {
   const repository = new InMemoryCorporateEmailRepository({
     companies,
@@ -663,13 +685,15 @@ function createService({
   });
   const cloudflareClient = new FakeCloudflareEmailRoutingClient();
   const sesClient = new FakeAmazonSesClient();
+  const emailSendingClient = new FakeCloudflareEmailSendingClient({ configured: sendingConfigured });
   const service = new CorporateEmailService({
     repository,
     cloudflareClient,
     sesClient,
+    emailSendingClient,
     logger: { error() {}, warn() {}, info() {} },
   });
-  return { service, repository, cloudflareClient, sesClient };
+  return { service, repository, cloudflareClient, sesClient, emailSendingClient };
 }
 
 test('crea alias corporativo y guarda datos', async () => {
@@ -1408,9 +1432,9 @@ test('consulta estado de provision y reporta ready cuando DNS+SES estan completo
   assert.equal(status.dns.dkim.every((item) => item.matches), true);
 });
 
-test('envia con fromAlias validado y guarda el mensaje en el historial', async () => {
+test('envia con fromAlias validado (Cloudflare) y guarda el mensaje en el historial', async () => {
   const aliasId = buildCorporateEmailRecordId({ alias: 'ventas', domain: 'cliente.com' });
-  const { service, sesClient } = createService({
+  const { service, emailSendingClient } = createService({
     companies: {
       msg1: { dominio: 'cliente.com' },
     },
@@ -1425,20 +1449,9 @@ test('envia con fromAlias validado y guarda el mensaje en el historial', async (
         },
       ],
     },
-    senderProfiles: {
-      msg1: {
-        id: 'amazonSes',
-        empresaId: 'msg1',
-        provider: 'amazon_ses',
-        enabled: true,
-        domain: 'cliente.com',
-        identityVerified: true,
-      },
-    },
   });
-  sesClient.setIdentity('cliente.com', { exists: true, verified: true });
 
-  const sent = await service.sendAmazonSesEmail({
+  const sent = await service.sendCorporateEmail({
     empresaId: 'msg1',
     fromAlias: 'ventas@cliente.com',
     to: ['destino@gmail.com'],
@@ -1448,38 +1461,32 @@ test('envia con fromAlias validado y guarda el mensaje en el historial', async (
     text: 'Mensaje',
   });
 
+  assert.equal(sent.provider, 'cloudflare_email_sending');
   assert.equal(sent.fromEmail, 'ventas@cliente.com');
   assert.equal(sent.message.status, 'sent');
-  assert.equal(sent.message.providerMessageId, 'ses-msg-1');
+  assert.equal(sent.message.providerMessageId, 'cf-msg-1');
+  assert.equal(emailSendingClient.sent.length, 1);
+  assert.equal(emailSendingClient.sent[0].from, 'ventas@cliente.com');
+  assert.deepEqual(emailSendingClient.sent[0].to, ['destino@gmail.com']);
 
   const history = await service.listCorporateEmailMessages({ empresaId: 'msg1' });
   assert.equal(history.length, 1);
   assert.equal(history[0].fromAlias, 'ventas@cliente.com');
   assert.equal(history[0].status, 'sent');
+  assert.equal(history[0].provider, 'cloudflare_email_sending');
   assert.deepEqual(history[0].to, ['destino@gmail.com']);
   assert.deepEqual(history[0].cc, ['copia@gmail.com']);
 });
 
 test('rechaza envio cuando el fromAlias no existe como correo corporativo', async () => {
-  const { service, sesClient } = createService({
+  const { service, emailSendingClient } = createService({
     companies: {
       msg2: { dominio: 'cliente.com' },
     },
-    senderProfiles: {
-      msg2: {
-        id: 'amazonSes',
-        empresaId: 'msg2',
-        provider: 'amazon_ses',
-        enabled: true,
-        domain: 'cliente.com',
-        identityVerified: true,
-      },
-    },
   });
-  sesClient.setIdentity('cliente.com', { exists: true, verified: true });
 
   await assert.rejects(
-    () => service.sendAmazonSesEmail({
+    () => service.sendCorporateEmail({
       empresaId: 'msg2',
       fromAlias: 'fantasma@cliente.com',
       to: ['destino@gmail.com'],
@@ -1488,41 +1495,24 @@ test('rechaza envio cuando el fromAlias no existe como correo corporativo', asyn
     }),
     (error) => error?.code === 'ALIAS_NOT_FOUND'
   );
-  assert.equal(sesClient.sent.length, 0);
+  assert.equal(emailSendingClient.sent.length, 0);
 });
 
-test('getSendingStatus refleja ready y pendiente segun la identidad', async () => {
+test('getSendingStatus refleja ready cuando Cloudflare esta configurado', async () => {
   const ready = createService({
     companies: { st1: { dominio: 'cliente.com' } },
-    senderProfiles: {
-      st1: {
-        id: 'amazonSes',
-        empresaId: 'st1',
-        provider: 'amazon_ses',
-        enabled: true,
-        domain: 'cliente.com',
-        identityVerified: true,
-      },
-    },
+    sendingConfigured: true,
   });
   const okStatus = await ready.service.getSendingStatus({ empresaId: 'st1' });
+  assert.equal(okStatus.provider, 'cloudflare_email_sending');
   assert.equal(okStatus.enabled, true);
   assert.equal(okStatus.status, 'ready');
 
-  const pending = createService({
+  const notConfigured = createService({
     companies: { st2: { dominio: 'cliente.com' } },
-    senderProfiles: {
-      st2: {
-        id: 'amazonSes',
-        empresaId: 'st2',
-        provider: 'amazon_ses',
-        enabled: true,
-        domain: 'cliente.com',
-        identityVerified: false,
-      },
-    },
+    sendingConfigured: false,
   });
-  const pendingStatus = await pending.service.getSendingStatus({ empresaId: 'st2' });
+  const pendingStatus = await notConfigured.service.getSendingStatus({ empresaId: 'st2' });
   assert.equal(pendingStatus.enabled, false);
-  assert.equal(pendingStatus.status, 'pending_verification');
+  assert.equal(pendingStatus.status, 'not_configured');
 });

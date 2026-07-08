@@ -3,6 +3,7 @@ import { createCorporateEmailController } from '../controllers/corporateEmailCon
 import { FirestoreCorporateEmailRepository } from '../repositories/corporateEmailRepository.js';
 import { CorporateEmailService } from '../services/corporateEmailService.js';
 import { CloudflareEmailRoutingClient } from '../services/cloudflareEmailRoutingClient.js';
+import { CloudflareEmailSendingClient } from '../services/cloudflareEmailSendingClient.js';
 import { AmazonSesClient } from '../services/amazonSesClient.js';
 
 export function createCorporateEmailRouter({
@@ -11,10 +12,12 @@ export function createCorporateEmailRouter({
   const repository = new FirestoreCorporateEmailRepository();
   const cloudflareClient = new CloudflareEmailRoutingClient({ logger });
   const sesClient = new AmazonSesClient({ logger });
+  const emailSendingClient = new CloudflareEmailSendingClient({ logger });
   const service = new CorporateEmailService({
     repository,
     cloudflareClient,
     sesClient,
+    emailSendingClient,
     logger,
   });
   const controller = createCorporateEmailController({
