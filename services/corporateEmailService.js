@@ -1195,6 +1195,8 @@ export class CorporateEmailService {
     alias,
     destinationEmail,
     domain,
+    mailbox = false,
+    workerName = '',
   }) {
     try {
       const safeEmpresaId = this.ensureEmpresaId(empresaId);
@@ -1262,7 +1264,7 @@ export class CorporateEmailService {
           cloudflareLastSyncAt: Timestamp.now(),
         },
       });
-      if (destinationStatus?.verified !== true) {
+      if (!mailbox && destinationStatus?.verified !== true) {
         throw new CorporateEmailServiceError(
           'Correo destino pendiente de verificacion. Revisa tu bandeja y confirma el correo en Cloudflare.',
           {
@@ -1280,11 +1282,19 @@ export class CorporateEmailService {
         );
       }
 
-      const rule = await this.cloudflareClient.createRoutingRule({
-        zoneId,
-        sourceEmail: email,
-        destinationEmail: safeDestinationEmail,
-      });
+      // Modo buzón: la regla apunta al Worker (captura + reenvío-copia).
+      // Modo clásico: reenvío directo al destino verificado.
+      const rule = mailbox
+        ? await this.cloudflareClient.upsertWorkerRoutingRule({
+          zoneId,
+          sourceEmail: email,
+          workerName,
+        })
+        : await this.cloudflareClient.createRoutingRule({
+          zoneId,
+          sourceEmail: email,
+          destinationEmail: safeDestinationEmail,
+        });
 
       const correoId = buildCorporateEmailRecordId({
         alias: safeAlias,
@@ -1302,6 +1312,7 @@ export class CorporateEmailService {
             domain: safeDomain,
             destinationEmail: safeDestinationEmail,
             status,
+            ...(mailbox ? { forwardCopyTo: safeDestinationEmail, mailboxRoutingWorker: true } : {}),
             cloudflareZoneId: zoneId,
             cloudflareAccountId: accountId,
             cloudflareRuleId: cleanString(rule?.id || '', 180),
@@ -1590,6 +1601,51 @@ export class CorporateEmailService {
       });
 
       return this.serializeDestination(saved || {});
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async deleteDestinationEmail({ empresaId, destinationEmail, domain }) {
+    try {
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      const safeDestinationEmail = this.validateDestinationEmail(destinationEmail);
+      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const safeDomain = this.resolveDomain({ requestedDomain: domain, company });
+
+      // No permitir borrar un destino que un correo activo esté usando.
+      const corporateEmailRecords = await this.repository.listCorporateEmailsByCompany(safeEmpresaId);
+      const inUse = this.collectDestinationEmailsFromCorporateRecords(corporateEmailRecords)
+        .has(safeDestinationEmail);
+      if (inUse) {
+        throw new CorporateEmailServiceError(
+          `No se puede eliminar ${safeDestinationEmail}: está en uso por uno o más correos. Elimina o cambia esos correos primero.`,
+          { code: 'DESTINATION_IN_USE', statusCode: 409 }
+        );
+      }
+
+      const zoneId = await this.resolveZoneId({ company, domain: safeDomain });
+      const accountId = await this.resolveAccountId({ company, zoneId });
+
+      // Buscar el id de la dirección en Cloudflare y eliminarla ahí.
+      const existing = await this.cloudflareClient.findDestinationAddressByEmail({
+        accountId,
+        email: safeDestinationEmail,
+      });
+      let cloudflare = { deleted: false, skipped: true };
+      if (existing?.id) {
+        cloudflare = await this.cloudflareClient.deleteDestinationAddress({
+          accountId,
+          addressId: existing.id,
+        });
+      }
+
+      await this.repository.deleteCorporateEmailDestination({
+        empresaId: safeEmpresaId,
+        destinationEmail: safeDestinationEmail,
+      });
+
+      return { destinationEmail: safeDestinationEmail, cloudflare };
     } catch (error) {
       throw this.mapError(error);
     }

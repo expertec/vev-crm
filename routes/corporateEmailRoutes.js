@@ -66,6 +66,11 @@ export function createCorporateEmailRouter({
     controller.listDestinationEmails
   );
 
+  router.delete(
+    '/empresas/:empresaId/correos-corporativos/destinos',
+    controller.deleteDestinationEmail
+  );
+
   router.get(
     '/empresas/:empresaId/correos-corporativos/destinos/verificacion',
     controller.getDestinationVerificationStatus
@@ -131,6 +136,34 @@ export function createCorporateEmailRouter({
   router.get(
     '/empresas/:empresaId/correos-corporativos/sending-status',
     controller.getSendingStatus
+  );
+
+  // Proceso único: crear correo + contraseña + correo de recuperación (buzón).
+  router.post(
+    '/empresas/:empresaId/correos-corporativos/crear-con-buzon',
+    async (req, res) => {
+      try {
+        const result = await mailboxService.createCorporateMailbox({
+          empresaId: req.params?.empresaId,
+          alias: req.body?.alias,
+          password: req.body?.password,
+          recoveryEmail: req.body?.recoveryEmail || req.body?.destinationEmail,
+          displayName: req.body?.displayName,
+        });
+        return res.status(201).json({ success: true, ...result });
+      } catch (error) {
+        logger.error('[corporate-emails] create with mailbox error:', error?.message || error);
+        const status = Number.isInteger(error?.statusCode)
+          && error.statusCode >= 400 && error.statusCode <= 599
+          ? error.statusCode
+          : 500;
+        return res.status(status).json({
+          success: false,
+          code: String(error?.code || 'MAILBOX_ERROR'),
+          error: status >= 500 ? 'Error interno al procesar la solicitud' : String(error?.message || 'Solicitud inválida'),
+        });
+      }
+    }
   );
 
   // Crear/activar buzón (mini-mail) para un correo, desde el panel del dueño.

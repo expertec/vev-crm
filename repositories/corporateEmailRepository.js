@@ -306,6 +306,14 @@ export class FirestoreCorporateEmailRepository {
     return updated;
   }
 
+  async deleteCorporateEmailDestination({ empresaId, destinationEmail }) {
+    const safeEmpresaId = cleanId(empresaId, 140);
+    const safeEmail = normalizeEmailAddress(destinationEmail);
+    if (!safeEmpresaId || !safeEmail) return false;
+    await this.getDestinationRefByEmail(safeEmpresaId, safeEmail).delete().catch(() => {});
+    return true;
+  }
+
   async getCorporateEmailSenderProfile(empresaId) {
     const safeEmpresaId = cleanId(empresaId, 140);
     if (!safeEmpresaId) return null;

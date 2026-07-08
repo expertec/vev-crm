@@ -16,6 +16,7 @@ function resolveSafeMessage(error) {
 
   const shouldExposeMessage =
     code === 'DESTINATION_EMAIL_NOT_VERIFIED'
+    || code === 'DESTINATION_IN_USE'
     || code === 'PLAN_ALIAS_LIMIT_REACHED'
     || code === 'PLAN_UPGRADE_OPTION_INVALID'
     || code === 'PLAN_UPGRADE_REQUEST_PENDING'
@@ -258,6 +259,33 @@ export function createCorporateEmailController({
         });
       } catch (error) {
         logger.error('[corporate-emails] list destinations error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    deleteDestinationEmail: async (req, res) => {
+      try {
+        const empresaId = cleanString(req.params?.empresaId || '', 140);
+        const destinationEmail = cleanString(
+          req.body?.destinationEmail
+          || req.body?.correoDestino
+          || req.body?.email
+          || req.query?.destinationEmail
+          || req.query?.email
+          || '',
+          280
+        );
+        const domain = cleanString(req.body?.domain || req.query?.domain || req.body?.dominio || '', 200);
+
+        const result = await service.deleteDestinationEmail({
+          empresaId,
+          destinationEmail,
+          domain,
+        });
+
+        return res.status(200).json({ success: true, ...result });
+      } catch (error) {
+        logger.error('[corporate-emails] delete destination error:', error?.message || error);
         return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
       }
     },

@@ -340,6 +340,32 @@ export class CloudflareEmailRoutingClient {
     return mapDestinationAddress(result || {});
   }
 
+  async deleteDestinationAddress({ accountId, addressId } = {}) {
+    const safeAccountId = cleanString(accountId, 120);
+    const safeAddressId = cleanString(addressId, 120);
+    if (!safeAccountId) {
+      throw new CloudflareEmailRoutingError('Falta accountId para eliminar destino', {
+        statusCode: 400,
+        code: 'CLOUDFLARE_ACCOUNT_REQUIRED',
+      });
+    }
+    if (!safeAddressId) {
+      return { deleted: false, skipped: true };
+    }
+    try {
+      await this.request({
+        method: 'DELETE',
+        path: `/accounts/${safeAccountId}/email/routing/addresses/${safeAddressId}`,
+      });
+      return { deleted: true, notFound: false };
+    } catch (error) {
+      if (error instanceof CloudflareEmailRoutingError && error.statusCode === 404) {
+        return { deleted: false, notFound: true };
+      }
+      throw error;
+    }
+  }
+
   async ensureDestinationAddress({
     accountId,
     email,

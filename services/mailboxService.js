@@ -266,6 +266,42 @@ export class MailboxService {
     };
   }
 
+  /**
+   * Proceso único: crea el correo (buzón) + contraseña + correo de recuperación.
+   * El correo funciona al instante (buzón por Worker); la recuperación queda
+   * pendiente de confirmar para que también lleguen copias ahí.
+   */
+  async createCorporateMailbox({ empresaId, alias, password, recoveryEmail, displayName }) {
+    const pass = String(password || '');
+    if (pass.length < 6) {
+      throw new MailboxServiceError('La contraseña debe tener al menos 6 caracteres', {
+        code: 'MAILBOX_WEAK_PASSWORD',
+        statusCode: 400,
+      });
+    }
+
+    // 1. Crear el correo en modo buzón (ruta al Worker, sin exigir verificación).
+    const corporateEmail = await this.corporate.createCorporateEmail({
+      empresaId,
+      alias,
+      destinationEmail: recoveryEmail,
+      mailbox: true,
+      workerName: this.workerName,
+    });
+
+    // 2. Activar el buzón: contraseña + reenvío-copia + lookup.
+    const mailbox = await this.enableMailboxForOwner({
+      empresaId,
+      correoId: corporateEmail.id,
+      address: corporateEmail.email,
+      password: pass,
+      forwardCopyTo: recoveryEmail,
+      displayName: displayName || alias,
+    });
+
+    return { corporateEmail, mailbox };
+  }
+
   async login({ email, password }) {
     const address = normalizeEmail(email);
     if (!address || !password) {
