@@ -11,6 +11,9 @@ import {
   resolveSampleSlug,
   hasLeadCompletedForm,
 } from './leadReactivationService.js';
+import { db } from '../firebaseAdmin.js';
+import { stripe } from '../stripeConfig.js';
+import { Timestamp } from 'firebase-admin/firestore';
 
 function cleanText(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -45,10 +48,308 @@ function getBankDetails() {
   return raw.replace(/\\n/g, '\n').replace(/\s*\|\s*/g, '\n').trim();
 }
 
+const PAYMENT_REFERENCE_PLANS = {
+  basico: {
+    id: 'basico',
+    name: 'Plan Basico Negocios Web',
+    description: 'Pagina web profesional con funciones basicas',
+    amountCents: 39700,
+    currency: 'mxn',
+    durationDays: 365,
+  },
+  pro: {
+    id: 'pro',
+    name: 'Plan Pro Negocios Web',
+    description: 'Pagina web premium con funciones avanzadas',
+    amountCents: 99700,
+    currency: 'mxn',
+    durationDays: 365,
+  },
+};
+
+function cleanDigits(value = '') {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function cleanEmail(value = '') {
+  const email = cleanText(value).toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
+}
+
+function getClientUrl(context = {}) {
+  const req = context.req || {};
+  return (
+    process.env.CLIENT_URL ||
+    req.headers?.origin ||
+    (req.headers?.host ? `${req.protocol || 'http'}://${req.headers.host}` : 'https://negociosweb.mx')
+  );
+}
+
+function centsFromEnv() {
+  const cents = Number.parseInt(String(process.env.STRIPE_PAYMENT_REFERENCE_AMOUNT_CENTS || '').trim(), 10);
+  if (Number.isFinite(cents) && cents > 0) return cents;
+
+  const amount = Number.parseFloat(
+    String(process.env.STRIPE_PAYMENT_REFERENCE_AMOUNT || process.env.PAYMENT_REFERENCE_AMOUNT || '')
+      .replace(/,/g, '')
+      .trim()
+  );
+  if (Number.isFinite(amount) && amount > 0) return Math.round(amount * 100);
+
+  return null;
+}
+
+function centsFromInput(value = '') {
+  const raw = String(value ?? '').replace(/,/g, '').trim();
+  if (!raw) return null;
+  const amount = Number.parseFloat(raw);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    const error = new Error('Define un monto valido mayor a 0 para generar la referencia de Stripe.');
+    error.code = 'INVALID_PAYMENT_AMOUNT';
+    throw error;
+  }
+  return Math.round(amount * 100);
+}
+
+function normalizeCatalogContextItem(value = null) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    id: cleanText(value.id || ''),
+    source: cleanText(value.source || ''),
+    sourceId: cleanText(value.sourceId || ''),
+    name: cleanText(value.name || value.title || ''),
+    description: cleanText(value.description || ''),
+    category: cleanText(value.category || ''),
+    imageUrl: String(value.imageUrl || value.image || '').trim(),
+  };
+}
+
+function getPaymentReferenceConfig(context = {}) {
+  const planId = cleanText(process.env.STRIPE_PAYMENT_REFERENCE_PLAN_ID || 'basico').toLowerCase();
+  const basePlan = PAYMENT_REFERENCE_PLANS[planId] || PAYMENT_REFERENCE_PLANS.basico;
+  const catalogItem = normalizeCatalogContextItem(context.paymentCatalogItem);
+  const amountCents = centsFromInput(context.paymentAmount) || centsFromEnv() || basePlan.amountCents;
+  const currency = cleanText(process.env.STRIPE_PAYMENT_REFERENCE_CURRENCY || basePlan.currency || 'mxn').toLowerCase();
+  const customConcept = cleanText(context.paymentConcept || catalogItem?.name || '');
+  const name = cleanText(customConcept || process.env.STRIPE_PAYMENT_REFERENCE_PRODUCT_NAME || basePlan.name);
+  const description = cleanText(catalogItem?.description || customConcept || process.env.STRIPE_PAYMENT_REFERENCE_DESCRIPTION || basePlan.description);
+  const durationDays = Number.parseInt(
+    String(process.env.STRIPE_PAYMENT_REFERENCE_DURATION_DAYS || basePlan.durationDays || 365),
+    10
+  );
+
+  return {
+    planId: basePlan.id,
+    name,
+    description,
+    amountCents,
+    amount: amountCents / 100,
+    currency,
+    customConcept,
+    catalogItem,
+    durationDays: Number.isFinite(durationDays) && durationDays > 0 ? durationDays : 365,
+  };
+}
+
+function timestampToMillis(value) {
+  if (!value) return 0;
+  if (typeof value.toMillis === 'function') return value.toMillis();
+  if (typeof value.toDate === 'function') return value.toDate().getTime();
+  if (value instanceof Date) return value.getTime();
+  const asNumber = Number(value);
+  return Number.isFinite(asNumber) ? asNumber : 0;
+}
+
+function reusableStripeReference(lead = {}, config = {}) {
+  const ref = lead?.stripePaymentReference || {};
+  const expiresAtMs = timestampToMillis(ref.expiresAt);
+  const isUsable =
+    String(ref.checkoutUrl || '').trim() &&
+    String(ref.status || '').startsWith('pending') &&
+    Number(ref.amountCents || 0) === config.amountCents &&
+    String(ref.currency || '').toLowerCase() === config.currency &&
+    cleanText(ref.productName || '') === config.name &&
+    expiresAtMs > Date.now() + 15 * 60 * 1000;
+
+  return isUsable ? ref : null;
+}
+
+async function getOrCreateStripeCustomer(lead = {}) {
+  const leadId = cleanText(lead.id || '');
+  const phone = cleanDigits(lead.telefono || lead.phone || lead.leadPhone || '');
+  const name = cleanText(lead.nombre || lead.name || '');
+  const email = cleanEmail(lead.email || lead.contactEmail || lead.customerEmail || '');
+  let customerId = cleanText(lead.stripeCustomerId || '');
+
+  if (customerId) {
+    try {
+      await stripe.customers.retrieve(customerId);
+      return customerId;
+    } catch {
+      customerId = '';
+    }
+  }
+
+  const customer = await stripe.customers.create({
+    ...(name ? { name } : {}),
+    ...(email ? { email } : {}),
+    ...(phone ? { phone } : {}),
+    metadata: {
+      ...(leadId ? { leadId } : {}),
+      ...(phone ? { phone } : {}),
+      source: 'crm_followup_payment_reference',
+    },
+  });
+
+  if (leadId) {
+    await db.collection('leads').doc(leadId).set({
+      stripeCustomerId: customer.id,
+      updatedAt: Timestamp.now(),
+    }, { merge: true });
+  }
+
+  return customer.id;
+}
+
+async function createStripePaymentReference(lead = {}, context = {}) {
+  const leadId = cleanText(lead.id || '');
+  if (!leadId) {
+    const error = new Error('Este lead no tiene ID para asociar la referencia de pago.');
+    error.code = 'NO_LINK_AVAILABLE';
+    throw error;
+  }
+
+  const config = getPaymentReferenceConfig(context);
+  const reusable = reusableStripeReference(lead, config);
+  if (reusable) {
+    return {
+      ...reusable,
+      planId: reusable.planId || config.planId,
+      productName: reusable.productName || config.name,
+      amount: Number(reusable.amount || config.amount),
+    };
+  }
+
+  const customerId = await getOrCreateStripeCustomer(lead);
+  const clientUrl = getClientUrl(context).replace(/\/+$/, '');
+  const phone = cleanDigits(lead.telefono || lead.phone || lead.leadPhone || '');
+  const negocioId = cleanText(lead.negocioId || lead.businessId || lead.negocio?.id || '');
+  const productData = {
+    name: config.name,
+    description: config.description,
+  };
+  if (config.catalogItem?.imageUrl) {
+    productData.images = [config.catalogItem.imageUrl];
+  }
+
+  const session = await stripe.checkout.sessions.create({
+    customer: customerId,
+    payment_method_types: ['customer_balance'],
+    payment_method_options: {
+      customer_balance: {
+        funding_type: 'bank_transfer',
+        bank_transfer: {
+          type: 'mx_bank_transfer',
+          requested_address_types: ['spei'],
+        },
+      },
+    },
+    line_items: [
+      {
+        price_data: {
+          currency: config.currency,
+          product_data: productData,
+          unit_amount: config.amountCents,
+        },
+        quantity: 1,
+      },
+    ],
+    mode: 'payment',
+    success_url: `${clientUrl}/pago?status=success`,
+    cancel_url: `${clientUrl}/pago?status=canceled`,
+    metadata: {
+      paymentType: 'lead_bank_transfer',
+      leadId,
+      ...(phone ? { phone } : {}),
+      ...(negocioId ? { negocioId } : {}),
+      planId: config.planId,
+      planNombre: config.name,
+      ...(config.customConcept ? { concepto: config.customConcept } : {}),
+      ...(config.catalogItem?.id ? { catalogItemId: config.catalogItem.id } : {}),
+      ...(config.catalogItem?.source ? { catalogSource: config.catalogItem.source } : {}),
+      ...(config.catalogItem?.sourceId ? { catalogSourceId: config.catalogItem.sourceId } : {}),
+      duracionDias: String(config.durationDays),
+    },
+    locale: 'es-419',
+  });
+
+  const expiresAt = session.expires_at
+    ? Timestamp.fromDate(new Date(Number(session.expires_at) * 1000))
+    : null;
+  const reference = {
+    provider: 'stripe',
+    paymentMethod: 'mx_bank_transfer',
+    sessionId: session.id,
+    checkoutUrl: session.url,
+    customerId,
+    planId: config.planId,
+    productName: config.name,
+    catalogItem: config.catalogItem || null,
+    amount: config.amount,
+    amountCents: config.amountCents,
+    currency: config.currency,
+    status: 'pending_bank_transfer',
+    ...(expiresAt ? { expiresAt } : {}),
+    createdAt: Timestamp.now(),
+    updatedAt: Timestamp.now(),
+  };
+
+  await db.collection('leads').doc(leadId).set({
+    stripeCustomerId: customerId,
+    stripePaymentReference: reference,
+    updatedAt: Timestamp.now(),
+  }, { merge: true });
+
+  await db.collection('pagos_stripe').add({
+    sessionId: session.id,
+    leadId,
+    ...(negocioId ? { negocioId } : {}),
+    phone: phone || null,
+    customerId,
+    planId: config.planId,
+    planNombre: config.name,
+    catalogItem: config.catalogItem || null,
+    monto: config.amount,
+    montoCentavos: config.amountCents,
+    currency: config.currency,
+    status: 'pending_bank_transfer',
+    paymentMethod: 'stripe_bank_transfer',
+    paymentType: 'lead_bank_transfer',
+    checkoutUrl: session.url,
+    ...(expiresAt ? { expiresAt } : {}),
+    createdAt: Timestamp.now(),
+  });
+
+  return reference;
+}
+
 function buildBankPaymentMessage(lead = {}, details = '') {
   const nombre = firstName(lead?.nombre || '');
   const saludo = nombre ? `Hola ${nombre}, ` : 'Hola, ';
   return `${saludo}con gusto. Estos son los datos para tu pago por transferencia:\n\n${details}\n\nEn cuanto la hagas, mandame el comprobante por aqui y activo tu pagina. Gracias!`;
+}
+
+function buildStripePaymentMessage(lead = {}, reference = {}) {
+  const nombre = firstName(lead?.nombre || '');
+  const saludo = nombre ? `Hola ${nombre}, ` : 'Hola, ';
+  const amount = Number(reference.amount || 0).toLocaleString('es-MX', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  });
+  const currency = cleanText(reference.currency || 'mxn').toUpperCase();
+  const productName = cleanText(reference.productName || 'Negocios Web');
+
+  return `${saludo}para que tu pago quede registrado de forma segura por Negocios Web, te comparto este enlace de Stripe:\n\n${reference.checkoutUrl}\n\nElige transferencia bancaria SPEI. Stripe te mostrara la CLABE y referencia unica para completar el pago por ${productName} (${amount} ${currency}). En cuanto se confirme, queda registrado automaticamente.`;
 }
 
 // Catalogo de acciones. requiresLink: 'sample_or_form' (dinamico) | 'form' | null.
@@ -120,11 +421,12 @@ const ACTIONS = [
   },
   {
     key: 'enviar_datos_pago',
-    label: 'Enviar datos de pago',
+    label: 'Enviar referencia Stripe',
     emoji: '💳',
-    description: 'Manda los datos de transferencia bancaria configurados (requiere PAYMENT_BANK_DETAILS).',
+    description: 'Genera un enlace de Stripe con transferencia SPEI y referencia unica para el cliente.',
     requiresLink: 'bank',
-    // El mensaje se arma aparte (preservando saltos de línea de los datos).
+    requiresPaymentAmount: true,
+    // El mensaje se arma aparte porque puede crear/reutilizar una sesion de Stripe.
     variants: [],
   },
   {
@@ -187,6 +489,7 @@ export function listFollowupActions() {
     emoji: a.emoji,
     description: a.description,
     requiresLink: a.requiresLink || null,
+    requiresPaymentAmount: a.requiresPaymentAmount === true,
   }));
 }
 
@@ -194,7 +497,7 @@ export function listFollowupActions() {
  * Construye el mensaje de una accion para un lead.
  * @returns {{ actionKey, label, message, linkType }} o lanza si la accion no existe.
  */
-export function buildFollowupMessage(actionKey = '', lead = {}) {
+export async function buildFollowupMessage(actionKey = '', lead = {}, context = {}) {
   const action = ACTION_MAP.get(String(actionKey || '').trim());
   if (!action) {
     const error = new Error(`Accion de seguimiento desconocida: ${actionKey}`);
@@ -207,14 +510,25 @@ export function buildFollowupMessage(actionKey = '', lead = {}) {
   let link = '';
   let variants = action.variants || [];
 
-  // Datos de pago por transferencia: se arma aparte para preservar saltos de línea.
+  // Referencia de pago por Stripe: crea una sesion con customer_balance + mx_bank_transfer.
   if (action.requiresLink === 'bank') {
+    if (process.env.STRIPE_PAYMENT_REFERENCE_DISABLED !== 'true') {
+      const reference = await createStripePaymentReference(lead, context);
+      return {
+        actionKey: action.key,
+        label: action.label,
+        linkType: 'stripe_bank_transfer',
+        message: buildStripePaymentMessage(lead, reference).slice(0, 900),
+      };
+    }
+
     const details = getBankDetails();
-    if (!details) {
-      const error = new Error('No hay datos de pago configurados. Define la variable PAYMENT_BANK_DETAILS en el servidor.');
+    if (!details || process.env.ALLOW_MANUAL_PAYMENT_DETAILS_FALLBACK !== 'true') {
+      const error = new Error('No se pudo generar una referencia de Stripe. Revisa STRIPE_SECRET_KEY y habilita transferencias bancarias en Stripe.');
       error.code = 'NO_LINK_AVAILABLE';
       throw error;
     }
+
     return {
       actionKey: action.key,
       label: action.label,

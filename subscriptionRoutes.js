@@ -273,6 +273,13 @@ export async function stripeWebhook(req, res) {
         // Guardar como pendiente
         await handleOxxoPending(session);
       }
+    } else if (session.mode === 'payment' && session.metadata?.paymentType === 'lead_bank_transfer') {
+      if (session.payment_status === 'paid') {
+        await handleLeadBankTransferCompleted(session);
+      } else {
+        console.log(`⏳ Transferencia bancaria pendiente: ${session.id} - esperando confirmación`);
+        await handleLeadBankTransferPending(session);
+      }
     } else {
       await handleCheckoutCompleted(session);
     }
@@ -284,6 +291,9 @@ export async function stripeWebhook(req, res) {
     if (asyncSession.metadata?.paymentType === 'one_time') {
       console.log(`✅ Pago OXXO confirmado: ${asyncSession.id}`);
       await handleOneTimePaymentCompleted(asyncSession);
+    } else if (asyncSession.metadata?.paymentType === 'lead_bank_transfer') {
+      console.log(`✅ Transferencia bancaria confirmada: ${asyncSession.id}`);
+      await handleLeadBankTransferCompleted(asyncSession);
     }
     break;
 
@@ -293,6 +303,9 @@ export async function stripeWebhook(req, res) {
     if (failedSession.metadata?.paymentType === 'one_time') {
       console.log(`❌ Pago OXXO expirado/fallido: ${failedSession.id}`);
       await handleOxxoFailed(failedSession);
+    } else if (failedSession.metadata?.paymentType === 'lead_bank_transfer') {
+      console.log(`❌ Transferencia bancaria fallida/expirada: ${failedSession.id}`);
+      await handleLeadBankTransferFailed(failedSession);
     }
     break;
 
@@ -1073,6 +1086,88 @@ Si aún deseas activar tu plan, puedes generar un nuevo pago desde nuestra pági
       { type: 'texto', contenido: mensaje },
       `OXXO expired enviado a ${finalPhone}`
     );
+  }
+}
+
+async function updateLeadBankTransferPayment(session, status, extra = {}) {
+  const { metadata, payment_intent, amount_total } = session;
+  const { leadId } = metadata || {};
+  const safePaymentIntent = payment_intent || null;
+  const safeAmountTotal = Number.isFinite(amount_total) ? amount_total : 0;
+
+  const paymentPatch = {
+    status,
+    paymentMethod: 'stripe_bank_transfer',
+    ...(safePaymentIntent ? { paymentIntentId: safePaymentIntent } : {}),
+    ...(safeAmountTotal > 0 ? { montoCentavos: safeAmountTotal, monto: safeAmountTotal / 100 } : {}),
+    updatedAt: Timestamp.now(),
+    ...extra,
+  };
+
+  const pagoSnap = await db.collection('pagos_stripe')
+    .where('sessionId', '==', session.id)
+    .limit(1)
+    .get();
+
+  if (!pagoSnap.empty) {
+    await pagoSnap.docs[0].ref.update(paymentPatch);
+  }
+
+  if (leadId) {
+    await db.collection('leads').doc(leadId).set({
+      stripePaymentReference: {
+        sessionId: session.id,
+        status,
+        ...(safePaymentIntent ? { paymentIntentId: safePaymentIntent } : {}),
+        ...(safeAmountTotal > 0 ? { amountCents: safeAmountTotal, amount: safeAmountTotal / 100 } : {}),
+        updatedAt: Timestamp.now(),
+        ...extra,
+      },
+      updatedAt: Timestamp.now(),
+    }, { merge: true });
+  }
+}
+
+async function handleLeadBankTransferPending(session) {
+  await updateLeadBankTransferPayment(session, 'pending_bank_transfer');
+}
+
+async function handleLeadBankTransferFailed(session) {
+  await updateLeadBankTransferPayment(session, 'failed', {
+    failedAt: Timestamp.now(),
+  });
+}
+
+async function handleLeadBankTransferCompleted(session) {
+  const { metadata, payment_intent, amount_total, currency } = session;
+  const { leadId, negocioId, planId } = metadata || {};
+  const safeAmountTotal = Number.isFinite(amount_total) ? amount_total : 0;
+  const safePaymentIntent = payment_intent || null;
+
+  await updateLeadBankTransferPayment(session, 'completed', {
+    processedAt: Timestamp.now(),
+  });
+
+  await db.collection('PaymentHistory').add({
+    ...(leadId ? { leadId } : {}),
+    ...(negocioId ? { negocioId } : {}),
+    event: 'lead_bank_transfer_completed',
+    sessionId: session.id,
+    paymentIntentId: safePaymentIntent,
+    planId: planId || null,
+    amount: safeAmountTotal / 100,
+    currency: currency || 'mxn',
+    timestamp: Timestamp.now(),
+  });
+
+  if (negocioId) {
+    await handleOneTimePaymentCompleted({
+      ...session,
+      metadata: {
+        ...(metadata || {}),
+        paymentType: 'one_time',
+      },
+    });
   }
 }
 

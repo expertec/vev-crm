@@ -4692,10 +4692,126 @@ app.get('/api/whatsapp/followup-actions', (_req, res) => {
   }
 });
 
+function normalizePaymentCatalogPrice(item = {}) {
+  return roundMoney(toMoneyNumber(
+    item.price
+    ?? item.precio
+    ?? item.unitPrice
+    ?? item.amount
+    ?? item.totalAmount
+    ?? item.monthlyPrice
+    ?? item.oneTimePrice
+    ?? item.basePrice
+    ?? 0,
+    0
+  ));
+}
+
+function normalizePaymentCatalogImage(item = {}) {
+  const imageCandidates = [
+    item.imageUrl,
+    item.imageURL,
+    item.image,
+    item.photoUrl,
+    item.photoURL,
+    item.thumbnail,
+    item.thumbnailUrl,
+  ];
+  const fromArray = Array.isArray(item.images) ? item.images[0] : '';
+  const fromUrls = Array.isArray(item.imageUrls) ? item.imageUrls[0] : '';
+  return String(imageCandidates.find(Boolean) || fromArray || fromUrls || '').trim();
+}
+
+function normalizePaymentCatalogItem(source, item = {}, fallbackId = '') {
+  if (!item || typeof item !== 'object') return null;
+  const id = String(item.id || item.key || item.slug || item.sku || fallbackId || '').trim();
+  const name = String(item.name || item.title || item.label || item.planName || item.serviceName || '').trim();
+  const price = normalizePaymentCatalogPrice(item);
+  if (!name || price <= 0) return null;
+
+  return {
+    id: `${source}:${id || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}`,
+    source,
+    sourceId: id,
+    name: name.slice(0, 160),
+    description: String(item.description || item.text || item.summary || '').trim().slice(0, 260),
+    category: String(item.category || item.type || '').trim().slice(0, 80),
+    price,
+    currency: String(item.currency || 'MXN').trim().toUpperCase() || 'MXN',
+    imageUrl: normalizePaymentCatalogImage(item),
+  };
+}
+
+function normalizePaymentCatalogList(source, list = []) {
+  const items = Array.isArray(list)
+    ? list
+    : (list && typeof list === 'object' ? Object.entries(list).map(([key, value]) => ({ id: key, ...(value || {}) })) : []);
+  return items
+    .map((item, index) => normalizePaymentCatalogItem(source, item, String(index + 1)))
+    .filter(Boolean);
+}
+
+app.get('/api/whatsapp/payment-catalog', async (req, res) => {
+  const { leadId = '', phone = '', negocioId = '' } = req.query || {};
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+
+    const negocioSchema = negocioCtx.negocioData?.schema || {};
+    const negocioProducts = normalizePaymentCatalogList(
+      'business_product',
+      negocioSchema?.products?.items || []
+    );
+    const negocioServices = normalizePaymentCatalogList(
+      'business_service',
+      negocioSchema?.services?.items || []
+    );
+
+    const catalogSnap = await db.collection('SiteConfig').doc('catalog').get();
+    const catalogData = catalogSnap.exists ? catalogSnap.data() || {} : {};
+    const globalServices = normalizePaymentCatalogList('global_service', catalogData.services || []);
+    const globalPlans = normalizePaymentCatalogList('global_plan', catalogData.plans || []);
+
+    return res.json({
+      success: true,
+      leadId: leadCtx.leadId || '',
+      negocioId: negocioCtx.negocioId || '',
+      items: [
+        ...negocioProducts,
+        ...negocioServices,
+        ...globalServices,
+        ...globalPlans,
+      ],
+      groups: {
+        businessProducts: negocioProducts.length,
+        businessServices: negocioServices.length,
+        globalServices: globalServices.length,
+        globalPlans: globalPlans.length,
+      },
+    });
+  } catch (error) {
+    console.error('[payment-catalog] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 // Genera (y opcionalmente envia) el mensaje de una accion de seguimiento.
 // preview=true -> solo devuelve el texto para revisar/editar antes de enviar.
 app.post('/api/whatsapp/followup-actions/send', async (req, res) => {
-  const { leadId, actionKey, preview = false, customMessage = '' } = req.body || {};
+  const {
+    leadId,
+    actionKey,
+    preview = false,
+    customMessage = '',
+    paymentAmount = '',
+    paymentConcept = '',
+    paymentCatalogItem = null,
+  } = req.body || {};
   const safeLeadId = String(leadId || '').trim();
   const safeActionKey = String(actionKey || '').trim();
   if (!safeLeadId || !safeActionKey) {
@@ -4711,7 +4827,12 @@ app.post('/api/whatsapp/followup-actions/send', async (req, res) => {
     let message = String(customMessage || '').trim();
     let built = null;
     if (!message) {
-      built = buildFollowupMessage(safeActionKey, leadData);
+      built = await buildFollowupMessage(safeActionKey, leadData, {
+        req,
+        paymentAmount,
+        paymentConcept,
+        paymentCatalogItem,
+      });
       message = built.message;
     }
 
@@ -4750,7 +4871,7 @@ app.post('/api/whatsapp/followup-actions/send', async (req, res) => {
   } catch (error) {
     const status = error?.code === 'UNKNOWN_ACTION'
       ? 400
-      : (error?.code === 'NO_LINK_AVAILABLE' ? 409 : 500);
+      : (error?.code === 'INVALID_PAYMENT_AMOUNT' ? 400 : (error?.code === 'NO_LINK_AVAILABLE' ? 409 : 500));
     console.error('[followup-actions/send] Error:', error);
     return res.status(status).json({ error: error.message || String(error) });
   }
