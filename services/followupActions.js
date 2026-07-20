@@ -85,6 +85,17 @@ function getClientUrl(context = {}) {
   );
 }
 
+function parseStripeError(error) {
+  const message = cleanText(error?.message || error?.raw?.message || error?.type || '');
+  return {
+    message,
+    type: cleanText(error?.type || error?.rawType || ''),
+    code: cleanText(error?.code || error?.raw?.code || ''),
+    param: cleanText(error?.param || error?.raw?.param || ''),
+    statusCode: Number(error?.statusCode || error?.status || 0) || 0,
+  };
+}
+
 function centsFromEnv() {
   const cents = Number.parseInt(String(process.env.STRIPE_PAYMENT_REFERENCE_AMOUNT_CENTS || '').trim(), 10);
   if (Number.isFinite(cents) && cents > 0) return cents;
@@ -242,55 +253,109 @@ async function createStripePaymentReference(lead = {}, context = {}) {
     productData.images = [config.catalogItem.imageUrl];
   }
 
-  const session = await stripe.checkout.sessions.create({
-    customer: customerId,
-    payment_method_types: ['customer_balance'],
-    payment_method_options: {
-      customer_balance: {
-        funding_type: 'bank_transfer',
-        bank_transfer: {
-          type: 'mx_bank_transfer',
-          requested_address_types: ['spei'],
-        },
+  const paymentMethodOptions = {
+    customer_balance: {
+      funding_type: 'bank_transfer',
+      bank_transfer: {
+        type: 'mx_bank_transfer',
+        requested_address_types: ['spei'],
       },
     },
-    line_items: [
-      {
-        price_data: {
-          currency: config.currency,
-          product_data: productData,
-          unit_amount: config.amountCents,
-        },
-        quantity: 1,
-      },
-    ],
-    mode: 'payment',
-    success_url: `${clientUrl}/pago?status=success`,
-    cancel_url: `${clientUrl}/pago?status=canceled`,
-    metadata: {
-      paymentType: 'lead_bank_transfer',
-      leadId,
-      ...(phone ? { phone } : {}),
-      ...(negocioId ? { negocioId } : {}),
-      planId: config.planId,
-      planNombre: config.name,
-      ...(config.customConcept ? { concepto: config.customConcept } : {}),
-      ...(config.catalogItem?.id ? { catalogItemId: config.catalogItem.id } : {}),
-      ...(config.catalogItem?.source ? { catalogSource: config.catalogItem.source } : {}),
-      ...(config.catalogItem?.sourceId ? { catalogSourceId: config.catalogItem.sourceId } : {}),
-      duracionDias: String(config.durationDays),
-    },
-    locale: 'es-419',
-  });
+  };
+  const stripeMetadata = {
+    paymentType: 'lead_bank_transfer',
+    leadId,
+    ...(phone ? { phone } : {}),
+    ...(negocioId ? { negocioId } : {}),
+    planId: config.planId,
+    planNombre: config.name,
+    ...(config.customConcept ? { concepto: config.customConcept } : {}),
+    ...(config.catalogItem?.id ? { catalogItemId: config.catalogItem.id } : {}),
+    ...(config.catalogItem?.source ? { catalogSource: config.catalogItem.source } : {}),
+    ...(config.catalogItem?.sourceId ? { catalogSourceId: config.catalogItem.sourceId } : {}),
+    duracionDias: String(config.durationDays),
+  };
 
-  const expiresAt = session.expires_at
+  let session = null;
+  let checkoutStripeError = null;
+  try {
+    session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ['card', 'customer_balance'],
+      payment_method_options: paymentMethodOptions,
+      line_items: [
+        {
+          price_data: {
+            currency: config.currency,
+            product_data: productData,
+            unit_amount: config.amountCents,
+          },
+          quantity: 1,
+        },
+      ],
+      mode: 'payment',
+      success_url: `${clientUrl}/pago?status=success`,
+      cancel_url: `${clientUrl}/pago?status=canceled`,
+      metadata: stripeMetadata,
+      locale: 'es-419',
+    });
+  } catch (error) {
+    checkoutStripeError = parseStripeError(error);
+    console.error('[stripe-payment-reference] Checkout falló:', checkoutStripeError);
+  }
+
+  let paymentIntent = null;
+  if (!session?.url) {
+    try {
+      paymentIntent = await stripe.paymentIntents.create({
+        amount: config.amountCents,
+        currency: config.currency,
+        customer: customerId,
+        description: config.description,
+        payment_method_types: ['customer_balance'],
+        payment_method_data: { type: 'customer_balance' },
+        payment_method_options: paymentMethodOptions,
+        confirm: true,
+        metadata: stripeMetadata,
+      });
+    } catch (error) {
+      const intentStripeError = parseStripeError(error);
+      console.error('[stripe-payment-reference] PaymentIntent falló:', intentStripeError);
+      const finalMessage =
+        intentStripeError.message ||
+        checkoutStripeError?.message ||
+        'Stripe no pudo generar la referencia de transferencia.';
+      const finalError = new Error(`Stripe no pudo generar la referencia: ${finalMessage}`);
+      finalError.code = 'STRIPE_PAYMENT_REFERENCE_FAILED';
+      finalError.details = {
+        checkout: checkoutStripeError,
+        paymentIntent: intentStripeError,
+      };
+      throw finalError;
+    }
+  }
+
+  const instructions = paymentIntent?.next_action?.display_bank_transfer_instructions || null;
+  const checkoutUrl = session?.url || instructions?.hosted_instructions_url || '';
+  if (!checkoutUrl) {
+    const finalError = new Error('Stripe creó la intención de pago, pero no devolvió un enlace de instrucciones bancarias.');
+    finalError.code = 'STRIPE_PAYMENT_REFERENCE_FAILED';
+    finalError.details = {
+      checkout: checkoutStripeError,
+      paymentIntentId: paymentIntent?.id || '',
+    };
+    throw finalError;
+  }
+
+  const expiresAt = session?.expires_at
     ? Timestamp.fromDate(new Date(Number(session.expires_at) * 1000))
     : null;
   const reference = {
     provider: 'stripe',
     paymentMethod: 'mx_bank_transfer',
-    sessionId: session.id,
-    checkoutUrl: session.url,
+    sessionId: session?.id || '',
+    paymentIntentId: paymentIntent?.id || '',
+    checkoutUrl,
     customerId,
     planId: config.planId,
     productName: config.name,
@@ -299,6 +364,7 @@ async function createStripePaymentReference(lead = {}, context = {}) {
     amountCents: config.amountCents,
     currency: config.currency,
     status: 'pending_bank_transfer',
+    ...(instructions?.financial_addresses ? { financialAddresses: instructions.financial_addresses } : {}),
     ...(expiresAt ? { expiresAt } : {}),
     createdAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
@@ -311,7 +377,8 @@ async function createStripePaymentReference(lead = {}, context = {}) {
   }, { merge: true });
 
   await db.collection('pagos_stripe').add({
-    sessionId: session.id,
+    sessionId: session?.id || '',
+    paymentIntentId: paymentIntent?.id || null,
     leadId,
     ...(negocioId ? { negocioId } : {}),
     phone: phone || null,
@@ -325,7 +392,7 @@ async function createStripePaymentReference(lead = {}, context = {}) {
     status: 'pending_bank_transfer',
     paymentMethod: 'stripe_bank_transfer',
     paymentType: 'lead_bank_transfer',
-    checkoutUrl: session.url,
+    checkoutUrl,
     ...(expiresAt ? { expiresAt } : {}),
     createdAt: Timestamp.now(),
   });

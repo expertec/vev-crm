@@ -4871,7 +4871,11 @@ app.post('/api/whatsapp/followup-actions/send', async (req, res) => {
   } catch (error) {
     const status = error?.code === 'UNKNOWN_ACTION'
       ? 400
-      : (error?.code === 'INVALID_PAYMENT_AMOUNT' ? 400 : (error?.code === 'NO_LINK_AVAILABLE' ? 409 : 500));
+      : (error?.code === 'INVALID_PAYMENT_AMOUNT'
+          ? 400
+          : (error?.code === 'NO_LINK_AVAILABLE'
+              ? 409
+              : (error?.code === 'STRIPE_PAYMENT_REFERENCE_FAILED' ? 502 : 500)));
     console.error('[followup-actions/send] Error:', error);
     return res.status(status).json({ error: error.message || String(error) });
   }
