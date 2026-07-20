@@ -4877,7 +4877,10 @@ app.post('/api/whatsapp/followup-actions/send', async (req, res) => {
               ? 409
               : (error?.code === 'STRIPE_PAYMENT_REFERENCE_FAILED' ? 502 : 500)));
     console.error('[followup-actions/send] Error:', error);
-    return res.status(status).json({ error: error.message || String(error) });
+    return res.status(status).json({
+      error: error.message || String(error),
+      ...(error?.details ? { details: error.details } : {}),
+    });
   }
 });
 

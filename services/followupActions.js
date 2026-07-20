@@ -96,6 +96,29 @@ function parseStripeError(error) {
   };
 }
 
+function extractSpeiBankInstructions(instructions = null) {
+  if (!instructions || typeof instructions !== 'object') return null;
+  const financialAddresses = Array.isArray(instructions.financial_addresses)
+    ? instructions.financial_addresses
+    : [];
+  const speiAddress = financialAddresses.find((item) => item?.spei) || null;
+  const spei = speiAddress?.spei || null;
+  if (!spei?.clabe) return null;
+
+  return {
+    type: 'spei',
+    amountRemainingCents: Number(instructions.amount_remaining || 0) || 0,
+    amountRemaining: (Number(instructions.amount_remaining || 0) || 0) / 100,
+    currency: cleanText(instructions.currency || 'mxn').toUpperCase(),
+    reference: cleanText(instructions.reference || ''),
+    hostedInstructionsUrl: String(instructions.hosted_instructions_url || '').trim(),
+    accountHolderName: cleanText(spei.account_holder_name || ''),
+    bankName: cleanText(spei.bank_name || ''),
+    bankCode: cleanText(spei.bank_code || ''),
+    clabe: cleanText(spei.clabe || ''),
+  };
+}
+
 function centsFromEnv() {
   const cents = Number.parseInt(String(process.env.STRIPE_PAYMENT_REFERENCE_AMOUNT_CENTS || '').trim(), 10);
   if (Number.isFinite(cents) && cents > 0) return cents;
@@ -258,7 +281,6 @@ async function createStripePaymentReference(lead = {}, context = {}) {
       funding_type: 'bank_transfer',
       bank_transfer: {
         type: 'mx_bank_transfer',
-        requested_address_types: ['spei'],
       },
     },
   };
@@ -276,71 +298,77 @@ async function createStripePaymentReference(lead = {}, context = {}) {
     duracionDias: String(config.durationDays),
   };
 
-  let session = null;
-  let checkoutStripeError = null;
+  let paymentIntent = null;
+  let intentStripeError = null;
+  let instructions = null;
+  let speiInstructions = null;
   try {
-    session = await stripe.checkout.sessions.create({
+    paymentIntent = await stripe.paymentIntents.create({
+      amount: config.amountCents,
+      currency: config.currency,
       customer: customerId,
-      payment_method_types: ['card', 'customer_balance'],
+      description: config.description,
+      payment_method_types: ['customer_balance'],
+      payment_method_data: { type: 'customer_balance' },
       payment_method_options: paymentMethodOptions,
-      line_items: [
-        {
-          price_data: {
-            currency: config.currency,
-            product_data: productData,
-            unit_amount: config.amountCents,
-          },
-          quantity: 1,
-        },
-      ],
-      mode: 'payment',
-      success_url: `${clientUrl}/pago?status=success`,
-      cancel_url: `${clientUrl}/pago?status=canceled`,
+      confirm: true,
       metadata: stripeMetadata,
-      locale: 'es-419',
     });
   } catch (error) {
-    checkoutStripeError = parseStripeError(error);
-    console.error('[stripe-payment-reference] Checkout falló:', checkoutStripeError);
+    intentStripeError = parseStripeError(error);
+    console.error('[stripe-payment-reference] PaymentIntent falló:', intentStripeError);
   }
 
-  let paymentIntent = null;
-  if (!session?.url) {
+  instructions = paymentIntent?.next_action?.display_bank_transfer_instructions || null;
+  speiInstructions = extractSpeiBankInstructions(instructions);
+
+  let session = null;
+  let checkoutStripeError = null;
+  if (!speiInstructions) {
     try {
-      paymentIntent = await stripe.paymentIntents.create({
-        amount: config.amountCents,
-        currency: config.currency,
+      session = await stripe.checkout.sessions.create({
         customer: customerId,
-        description: config.description,
-        payment_method_types: ['customer_balance'],
-        payment_method_data: { type: 'customer_balance' },
+        payment_method_types: ['card', 'customer_balance'],
         payment_method_options: paymentMethodOptions,
-        confirm: true,
+        line_items: [
+          {
+            price_data: {
+              currency: config.currency,
+              product_data: productData,
+              unit_amount: config.amountCents,
+            },
+            quantity: 1,
+          },
+        ],
+        mode: 'payment',
+        success_url: `${clientUrl}/pago?status=success`,
+        cancel_url: `${clientUrl}/pago?status=canceled`,
         metadata: stripeMetadata,
+        locale: 'es-419',
       });
     } catch (error) {
-      const intentStripeError = parseStripeError(error);
-      console.error('[stripe-payment-reference] PaymentIntent falló:', intentStripeError);
+      checkoutStripeError = parseStripeError(error);
+      console.error('[stripe-payment-reference] Checkout falló:', checkoutStripeError);
       const finalMessage =
-        intentStripeError.message ||
         checkoutStripeError?.message ||
+        intentStripeError?.message ||
         'Stripe no pudo generar la referencia de transferencia.';
       const finalError = new Error(`Stripe no pudo generar la referencia: ${finalMessage}`);
       finalError.code = 'STRIPE_PAYMENT_REFERENCE_FAILED';
       finalError.details = {
-        checkout: checkoutStripeError,
         paymentIntent: intentStripeError,
+        checkout: checkoutStripeError,
       };
       throw finalError;
     }
   }
 
-  const instructions = paymentIntent?.next_action?.display_bank_transfer_instructions || null;
-  const checkoutUrl = session?.url || instructions?.hosted_instructions_url || '';
+  const checkoutUrl = speiInstructions?.hostedInstructionsUrl || session?.url || instructions?.hosted_instructions_url || '';
   if (!checkoutUrl) {
-    const finalError = new Error('Stripe creó la intención de pago, pero no devolvió un enlace de instrucciones bancarias.');
+    const finalError = new Error('Stripe creó la intención de pago, pero no devolvió instrucciones bancarias ni enlace de Checkout.');
     finalError.code = 'STRIPE_PAYMENT_REFERENCE_FAILED';
     finalError.details = {
+      paymentIntent: intentStripeError,
       checkout: checkoutStripeError,
       paymentIntentId: paymentIntent?.id || '',
     };
@@ -364,6 +392,7 @@ async function createStripePaymentReference(lead = {}, context = {}) {
     amountCents: config.amountCents,
     currency: config.currency,
     status: 'pending_bank_transfer',
+    ...(speiInstructions ? { bankInstructions: speiInstructions } : {}),
     ...(instructions?.financial_addresses ? { financialAddresses: instructions.financial_addresses } : {}),
     ...(expiresAt ? { expiresAt } : {}),
     createdAt: Timestamp.now(),
@@ -409,12 +438,33 @@ function buildBankPaymentMessage(lead = {}, details = '') {
 function buildStripePaymentMessage(lead = {}, reference = {}) {
   const nombre = firstName(lead?.nombre || '');
   const saludo = nombre ? `Hola ${nombre}, ` : 'Hola, ';
-  const amount = Number(reference.amount || 0).toLocaleString('es-MX', {
+  const amountValue = Number(reference.bankInstructions?.amountRemaining || reference.amount || 0);
+  const amount = amountValue.toLocaleString('es-MX', {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
   });
   const currency = cleanText(reference.currency || 'mxn').toUpperCase();
   const productName = cleanText(reference.productName || 'Negocios Web');
+  const bank = reference.bankInstructions || null;
+
+  if (bank?.clabe) {
+    const bankLines = [
+      `${saludo}para que tu pago quede registrado de forma segura por Negocios Web, realiza una transferencia SPEI con estos datos:`,
+      '',
+      `Concepto: ${productName}`,
+      `Monto: ${amount} ${currency}`,
+      `Banco: ${bank.bankName || 'Stripe Payments Mexico'}`,
+      `Titular/beneficiario: ${bank.accountHolderName || 'Negocios Web'}`,
+      `CLABE: ${bank.clabe}`,
+    ];
+
+    if (bank.reference) {
+      bankLines.push(`Referencia: ${bank.reference}`);
+    }
+
+    bankLines.push('', 'Es importante transferir el monto exacto y poner la referencia si tu banco la solicita. En cuanto Stripe confirme el pago, queda registrado automaticamente.');
+    return bankLines.join('\n');
+  }
 
   return `${saludo}para que tu pago quede registrado de forma segura por Negocios Web, te comparto este enlace de Stripe:\n\n${reference.checkoutUrl}\n\nElige transferencia bancaria SPEI. Stripe te mostrara la CLABE y referencia unica para completar el pago por ${productName} (${amount} ${currency}). En cuanto se confirme, queda registrado automaticamente.`;
 }

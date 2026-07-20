@@ -309,6 +309,31 @@ export async function stripeWebhook(req, res) {
     }
     break;
 
+  case 'payment_intent.succeeded':
+    const succeededIntent = event.data.object;
+    if (succeededIntent.metadata?.paymentType === 'lead_bank_transfer') {
+      console.log(`✅ Transferencia bancaria confirmada: ${succeededIntent.id}`);
+      await handleLeadBankTransferCompleted(succeededIntent);
+    }
+    break;
+
+  case 'payment_intent.partially_funded':
+    const partiallyFundedIntent = event.data.object;
+    if (partiallyFundedIntent.metadata?.paymentType === 'lead_bank_transfer') {
+      console.log(`⏳ Transferencia bancaria parcialmente fondeada: ${partiallyFundedIntent.id}`);
+      await handleLeadBankTransferPending(partiallyFundedIntent);
+    }
+    break;
+
+  case 'payment_intent.payment_failed':
+  case 'payment_intent.canceled':
+    const failedIntent = event.data.object;
+    if (failedIntent.metadata?.paymentType === 'lead_bank_transfer') {
+      console.log(`❌ Transferencia bancaria fallida/cancelada: ${failedIntent.id}`);
+      await handleLeadBankTransferFailed(failedIntent);
+    }
+    break;
+
   case 'customer.subscription.created':
   case 'customer.subscription.updated':
     await handleSubscriptionUpdate(event.data.object);
@@ -1090,10 +1115,17 @@ Si aún deseas activar tu plan, puedes generar un nuevo pago desde nuestra pági
 }
 
 async function updateLeadBankTransferPayment(session, status, extra = {}) {
-  const { metadata, payment_intent, amount_total } = session;
+  const { metadata } = session;
   const { leadId } = metadata || {};
-  const safePaymentIntent = payment_intent || null;
-  const safeAmountTotal = Number.isFinite(amount_total) ? amount_total : 0;
+  const safeSessionId = session.object === 'payment_intent' ? '' : session.id;
+  const safePaymentIntent = session.payment_intent || (session.object === 'payment_intent' ? session.id : null);
+  const safeAmountTotal = Number.isFinite(session.amount_total)
+    ? session.amount_total
+    : Number.isFinite(session.amount_received)
+      ? session.amount_received
+      : Number.isFinite(session.amount)
+        ? session.amount
+        : 0;
 
   const paymentPatch = {
     status,
@@ -1104,19 +1136,29 @@ async function updateLeadBankTransferPayment(session, status, extra = {}) {
     ...extra,
   };
 
-  const pagoSnap = await db.collection('pagos_stripe')
-    .where('sessionId', '==', session.id)
-    .limit(1)
-    .get();
+  let pagoSnap = null;
+  if (safeSessionId) {
+    pagoSnap = await db.collection('pagos_stripe')
+      .where('sessionId', '==', safeSessionId)
+      .limit(1)
+      .get();
+  }
 
-  if (!pagoSnap.empty) {
+  if ((!pagoSnap || pagoSnap.empty) && safePaymentIntent) {
+    pagoSnap = await db.collection('pagos_stripe')
+      .where('paymentIntentId', '==', safePaymentIntent)
+      .limit(1)
+      .get();
+  }
+
+  if (pagoSnap && !pagoSnap.empty) {
     await pagoSnap.docs[0].ref.update(paymentPatch);
   }
 
   if (leadId) {
     await db.collection('leads').doc(leadId).set({
       stripePaymentReference: {
-        sessionId: session.id,
+        ...(safeSessionId ? { sessionId: safeSessionId } : {}),
         status,
         ...(safePaymentIntent ? { paymentIntentId: safePaymentIntent } : {}),
         ...(safeAmountTotal > 0 ? { amountCents: safeAmountTotal, amount: safeAmountTotal / 100 } : {}),
@@ -1139,10 +1181,17 @@ async function handleLeadBankTransferFailed(session) {
 }
 
 async function handleLeadBankTransferCompleted(session) {
-  const { metadata, payment_intent, amount_total, currency } = session;
+  const { metadata, currency } = session;
   const { leadId, negocioId, planId } = metadata || {};
-  const safeAmountTotal = Number.isFinite(amount_total) ? amount_total : 0;
-  const safePaymentIntent = payment_intent || null;
+  const safeSessionId = session.object === 'payment_intent' ? '' : session.id;
+  const safePaymentIntent = session.payment_intent || (session.object === 'payment_intent' ? session.id : null);
+  const safeAmountTotal = Number.isFinite(session.amount_total)
+    ? session.amount_total
+    : Number.isFinite(session.amount_received)
+      ? session.amount_received
+      : Number.isFinite(session.amount)
+        ? session.amount
+        : 0;
 
   await updateLeadBankTransferPayment(session, 'completed', {
     processedAt: Timestamp.now(),
@@ -1152,7 +1201,7 @@ async function handleLeadBankTransferCompleted(session) {
     ...(leadId ? { leadId } : {}),
     ...(negocioId ? { negocioId } : {}),
     event: 'lead_bank_transfer_completed',
-    sessionId: session.id,
+    sessionId: safeSessionId || null,
     paymentIntentId: safePaymentIntent,
     planId: planId || null,
     amount: safeAmountTotal / 100,
@@ -1163,6 +1212,8 @@ async function handleLeadBankTransferCompleted(session) {
   if (negocioId) {
     await handleOneTimePaymentCompleted({
       ...session,
+      amount_total: safeAmountTotal,
+      payment_intent: safePaymentIntent,
       metadata: {
         ...(metadata || {}),
         paymentType: 'one_time',
