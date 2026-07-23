@@ -8,6 +8,7 @@ import {
   signMailboxToken,
   verifyMailboxToken,
 } from '../utils/mailboxAuth.js';
+import { parseMailboxImport } from './mailboxImportParser.js';
 
 function cleanString(value = '', maxLength = 300) {
   return String(value ?? '').trim().slice(0, maxLength);
@@ -29,6 +30,25 @@ function toIso(value) {
   if (value instanceof Date) return value.toISOString();
   const parsed = Date.parse(String(value));
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+function parseBoolean(value, defaultValue = true) {
+  if (value === undefined || value === null || value === '') return defaultValue;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'si', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return defaultValue;
+}
+
+function uniqueEmails(values = []) {
+  return Array.from(
+    new Set(
+      (Array.isArray(values) ? values : [])
+        .map((value) => normalizeEmail(value))
+        .filter(Boolean)
+    )
+  );
 }
 
 export class MailboxServiceError extends Error {
@@ -370,7 +390,7 @@ export class MailboxService {
     return this.serializeInbound({ ...message, read: true });
   }
 
-  async send({ empresaId, mailboxEmail, to, cc, bcc, subject, text, html }) {
+  async send({ empresaId, mailboxEmail, to, cc, bcc, subject, text, html, attachments = [] }) {
     // El remitente se fuerza al correo del buzón autenticado (no arbitrario).
     return this.corporate.sendCorporateEmail({
       empresaId,
@@ -381,8 +401,87 @@ export class MailboxService {
       subject,
       text,
       html,
+      attachments,
       createdBy: mailboxEmail,
     });
+  }
+
+  async importInbox({
+    empresaId,
+    correoId,
+    mailboxEmail,
+    raw,
+    fileName = '',
+    markAsRead = true,
+    maxMessages = 1000,
+  }) {
+    const source = String(raw || '');
+    if (!source.trim()) {
+      throw new MailboxServiceError('Sube un archivo mbox/EML válido.', {
+        code: 'MAILBOX_IMPORT_EMPTY',
+        statusCode: 400,
+      });
+    }
+
+    const messages = parseMailboxImport(source, { maxMessages });
+    if (messages.length === 0) {
+      throw new MailboxServiceError('No se encontraron mensajes para importar.', {
+        code: 'MAILBOX_IMPORT_NO_MESSAGES',
+        statusCode: 400,
+      });
+    }
+
+    const read = parseBoolean(markAsRead, true);
+    const result = {
+      total: messages.length,
+      imported: 0,
+      duplicates: 0,
+      failed: 0,
+      skipped: 0,
+      fileName: cleanString(fileName, 240),
+    };
+
+    for (const message of messages) {
+      try {
+        const providerMessageId = cleanString(message.messageId || message.importHash, 260);
+        if (!providerMessageId) {
+          result.skipped += 1;
+          continue;
+        }
+        const to = uniqueEmails(message.to);
+        const inboxId = this.repo.buildInboxMessageId(providerMessageId);
+        const stored = await this.repo.saveInboundMessage({
+          empresaId,
+          correoId,
+          messageId: inboxId,
+          payload: {
+            from: normalizeEmail(message.from),
+            to: to.length > 0 ? to : [normalizeEmail(mailboxEmail)],
+            cc: uniqueEmails(message.cc),
+            subject: cleanString(message.subject, 300),
+            textBody: String(message.textBody || '').slice(0, 200000),
+            htmlBody: String(message.htmlBody || '').slice(0, 500000),
+            providerMessageId,
+            date: cleanString(message.date, 120),
+            sizeBytes: Number(message.sizeBytes || 0) || 0,
+            imported: true,
+            importSource: cleanString(fileName || 'mailbox-import', 240),
+            read,
+            createdAt: message.date || undefined,
+          },
+        });
+        if (stored?.duplicate) {
+          result.duplicates += 1;
+        } else {
+          result.imported += 1;
+        }
+      } catch (error) {
+        result.failed += 1;
+        this.logger.warn?.('[mailbox] import message failed:', error?.message || error);
+      }
+    }
+
+    return result;
   }
 
   async getSent({ empresaId, mailboxEmail }) {
@@ -391,5 +490,33 @@ export class MailboxService {
     return (Array.isArray(all) ? all : []).filter(
       (item) => normalizeEmail(item?.fromAlias) === address
     );
+  }
+
+  async getContacts({ empresaId, mailboxEmail, limit = 200 }) {
+    const all = await this.corporate.listCorporateEmailMessages({ empresaId, limit });
+    const address = normalizeEmail(mailboxEmail);
+    const contacts = new Map();
+
+    for (const item of Array.isArray(all) ? all : []) {
+      if (normalizeEmail(item?.fromAlias) !== address) continue;
+      const recipients = uniqueEmails([
+        ...(item?.to || []),
+        ...(item?.cc || []),
+        ...(item?.bcc || []),
+      ]);
+
+      for (const email of recipients) {
+        const current = contacts.get(email) || { email, count: 0, lastSentAt: null };
+        current.count += 1;
+        current.lastSentAt = current.lastSentAt || item?.createdAt || null;
+        contacts.set(email, current);
+      }
+    }
+
+    return Array.from(contacts.values()).sort((a, b) => {
+      const bTime = Date.parse(b.lastSentAt || '') || 0;
+      const aTime = Date.parse(a.lastSentAt || '') || 0;
+      return bTime - aTime || b.count - a.count || a.email.localeCompare(b.email);
+    });
   }
 }

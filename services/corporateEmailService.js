@@ -144,6 +144,45 @@ function isEmailInsideDomain({
   return emailDomain === safeDomain || emailDomain.endsWith(`.${safeDomain}`);
 }
 
+const DEFAULT_BLOCKED_ATTACHMENT_EXTENSIONS = new Set([
+  'app',
+  'bat',
+  'cmd',
+  'com',
+  'exe',
+  'hta',
+  'html',
+  'js',
+  'jse',
+  'mjs',
+  'msi',
+  'ps1',
+  'scr',
+  'sh',
+  'vbs',
+  'wsf',
+]);
+
+function getAttachmentExtension(filename = '') {
+  const name = cleanString(filename, 260).toLowerCase();
+  const dotIndex = name.lastIndexOf('.');
+  return dotIndex >= 0 ? name.slice(dotIndex + 1) : '';
+}
+
+function safeAttachmentFilename(filename = '') {
+  return cleanString(String(filename || '').split(/[\\/]/).pop() || 'archivo-adjunto', 180)
+    || 'archivo-adjunto';
+}
+
+function attachmentContentToBuffer(item = {}) {
+  if (Buffer.isBuffer(item?.buffer)) return item.buffer;
+  if (Buffer.isBuffer(item?.content)) return item.content;
+  if (typeof item?.content === 'string' && item.content) {
+    return Buffer.from(item.content, item.encoding === 'base64' ? 'base64' : 'utf8');
+  }
+  return Buffer.alloc(0);
+}
+
 export class CorporateEmailServiceError extends Error {
   constructor(
     message,
@@ -293,6 +332,13 @@ export class CorporateEmailService {
       providerMessageId: cleanString(record.providerMessageId || '', 200),
       errorMessage: cleanString(record.errorMessage || '', 500),
       createdBy: cleanString(record.createdBy || '', 200),
+      attachments: Array.isArray(record.attachments)
+        ? record.attachments.map((item) => ({
+          filename: cleanString(item?.filename || '', 180),
+          type: cleanString(item?.type || '', 160),
+          size: Number(item?.size || 0) || 0,
+        })).filter((item) => item.filename)
+        : [],
       createdAt: toIso(record.createdAt),
       updatedAt: toIso(record.updatedAt),
     };
@@ -514,6 +560,65 @@ export class CorporateEmailService {
     }
 
     return recipients;
+  }
+
+  validateAttachments(attachments = []) {
+    const source = Array.isArray(attachments) ? attachments : [];
+    const maxFiles = Math.max(0, parseInteger(process.env.MAILBOX_SEND_MAX_ATTACHMENTS, 3));
+    const maxFileBytes = Math.max(1, parseInteger(process.env.MAILBOX_SEND_MAX_ATTACHMENT_BYTES, 2 * 1024 * 1024));
+    const maxTotalBytes = Math.max(1, parseInteger(process.env.MAILBOX_SEND_MAX_TOTAL_ATTACHMENT_BYTES, 3.5 * 1024 * 1024));
+
+    if (source.length > maxFiles) {
+      throw new CorporateEmailServiceError(`Máximo ${maxFiles} adjuntos por correo`, {
+        code: 'SEND_ATTACHMENTS_TOO_MANY',
+        statusCode: 400,
+      });
+    }
+
+    let totalBytes = 0;
+    const out = [];
+    for (const item of source) {
+      const filename = safeAttachmentFilename(item?.filename || item?.originalname || item?.name);
+      const extension = getAttachmentExtension(filename);
+      if (DEFAULT_BLOCKED_ATTACHMENT_EXTENSIONS.has(extension)) {
+        throw new CorporateEmailServiceError(`El archivo ${filename} no está permitido`, {
+          code: 'SEND_ATTACHMENT_BLOCKED_TYPE',
+          statusCode: 400,
+        });
+      }
+
+      const buffer = attachmentContentToBuffer(item);
+      const size = Number(item?.size || buffer.length || 0);
+      if (!buffer.length || !size) {
+        throw new CorporateEmailServiceError(`El archivo ${filename} está vacío`, {
+          code: 'SEND_ATTACHMENT_EMPTY',
+          statusCode: 400,
+        });
+      }
+      if (size > maxFileBytes) {
+        throw new CorporateEmailServiceError(`El archivo ${filename} supera el límite de 2 MB`, {
+          code: 'SEND_ATTACHMENT_TOO_LARGE',
+          statusCode: 400,
+        });
+      }
+
+      totalBytes += size;
+      if (totalBytes > maxTotalBytes) {
+        throw new CorporateEmailServiceError('Los adjuntos superan el límite total permitido', {
+          code: 'SEND_ATTACHMENTS_TOTAL_TOO_LARGE',
+          statusCode: 400,
+        });
+      }
+
+      out.push({
+        filename,
+        type: cleanString(item?.type || item?.mimetype || 'application/octet-stream', 160) || 'application/octet-stream',
+        size,
+        buffer,
+      });
+    }
+
+    return out;
   }
 
   resolveDestinationOwnership(record = {}, empresaId = '') {
@@ -2180,6 +2285,7 @@ export class CorporateEmailService {
     subject,
     text,
     html,
+    attachments = [],
     createdBy = '',
   }) {
     try {
@@ -2229,6 +2335,12 @@ export class CorporateEmailService {
           statusCode: 400,
         });
       }
+      const safeAttachments = this.validateAttachments(attachments);
+      const attachmentMetadata = safeAttachments.map(({ filename, type, size }) => ({
+        filename,
+        type,
+        size,
+      }));
 
       const messageId = this.buildEmailMessageId();
       const baseMessagePayload = {
@@ -2244,6 +2356,7 @@ export class CorporateEmailService {
         direction: 'outbound',
         provider: 'cloudflare_email_sending',
         createdBy: cleanString(createdBy, 200),
+        attachments: attachmentMetadata,
       };
 
       let result;
@@ -2257,6 +2370,7 @@ export class CorporateEmailService {
           subject: safeSubject,
           html: htmlBody,
           text: textBody,
+          attachments: safeAttachments,
         });
       } catch (sendError) {
         const mapped = this.mapError(sendError);

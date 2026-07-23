@@ -138,10 +138,54 @@ export function createMailboxController({ service, logger = console }) {
           subject: req.body?.subject,
           text: req.body?.text || req.body?.bodyText,
           html: req.body?.html || req.body?.bodyHtml,
+          attachments: Array.isArray(req.files)
+            ? req.files.map((file) => ({
+              filename: file.originalname,
+              type: file.mimetype,
+              size: file.size,
+              buffer: file.buffer,
+            }))
+            : [],
         });
         return res.status(202).json({ success: true, result, message: result?.message || null });
       } catch (error) {
         logger.error?.('[mailbox] send error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    importInbox: async (req, res) => {
+      try {
+        const fileBuffer = req.file?.buffer || null;
+        const raw =
+          fileBuffer
+            ? fileBuffer.toString('latin1')
+            : String(req.body?.raw || req.body?.mbox || '');
+        const result = await service.importInbox({
+          empresaId: req.mailbox.empresaId,
+          correoId: req.mailbox.correoId,
+          mailboxEmail: req.mailbox.email,
+          raw,
+          fileName: req.file?.originalname || req.body?.fileName || '',
+          markAsRead: req.body?.markAsRead,
+          maxMessages: req.body?.maxMessages,
+        });
+        return res.status(200).json({ success: true, result });
+      } catch (error) {
+        logger.error?.('[mailbox] import error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    contacts: async (req, res) => {
+      try {
+        const items = await service.getContacts({
+          empresaId: req.mailbox.empresaId,
+          mailboxEmail: req.mailbox.email,
+          limit: req.query?.limit,
+        });
+        return res.status(200).json({ success: true, items });
+      } catch (error) {
         return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
       }
     },

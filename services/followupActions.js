@@ -462,7 +462,7 @@ function buildStripePaymentMessage(lead = {}, reference = {}) {
       bankLines.push(`Referencia: ${bank.reference}`);
     }
 
-    bankLines.push('', 'Es importante transferir el monto exacto y poner la referencia si tu banco la solicita. En cuanto Stripe confirme el pago, queda registrado automaticamente.');
+    bankLines.push('', 'Es importante transferir el monto exacto y poner la referencia si tu banco la solicita. En cuanto nuestro equipo de finanzas confirme el pago, queda registrado automaticamente.');
     return bankLines.join('\n');
   }
 

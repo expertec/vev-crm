@@ -19,6 +19,19 @@ function normalizeEmail(value = '') {
   return String(value || '').trim().toLowerCase();
 }
 
+function toTimestamp(value, fallback = Timestamp.now()) {
+  if (!value) return fallback;
+  if (typeof value?.toDate === 'function') return value;
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return Timestamp.fromDate(value);
+  }
+  const parsed = Date.parse(String(value));
+  if (Number.isFinite(parsed)) {
+    return Timestamp.fromDate(new Date(parsed));
+  }
+  return fallback;
+}
+
 function lookupDocId(address) {
   // ID de documento seguro a partir del correo (sin '/', sin caracteres raros).
   const email = normalizeEmail(address);
@@ -136,11 +149,16 @@ export class FirestoreMailboxRepository {
       return { id: existing.id, ...(existing.data() || {}), duplicate: true };
     }
     const now = Timestamp.now();
-    await ref.set({ ...payload, direction: 'inbound', read: false, createdAt: now }, { merge: true });
-    await this.correoRef(empresaId, correoId).set(
-      { unreadCount: FieldValue.increment(1), lastInboundAt: now },
-      { merge: true }
-    );
+    const createdAt = toTimestamp(payload.createdAt || payload.date, now);
+    const read = payload.read === true;
+    const { createdAt: _createdAt, read: _read, ...safePayload } = payload;
+    await ref.set({ ...safePayload, direction: 'inbound', read, createdAt }, { merge: true });
+    if (!read) {
+      await this.correoRef(empresaId, correoId).set(
+        { unreadCount: FieldValue.increment(1), lastInboundAt: createdAt },
+        { merge: true }
+      );
+    }
     const snap = await ref.get();
     return { id: snap.id, ...(snap.data() || {}) };
   }

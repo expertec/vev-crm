@@ -4693,7 +4693,16 @@ app.get('/api/whatsapp/followup-actions', (_req, res) => {
 });
 
 function normalizePaymentCatalogPrice(item = {}) {
-  return roundMoney(toMoneyNumber(
+  const centsValue =
+    item.priceCents
+    ?? item.precioCentavos
+    ?? item.amountCents
+    ?? item.unitAmountCents
+    ?? item.unit_amount;
+  const cents = toMoneyNumber(centsValue, 0);
+  if (cents > 0) return roundMoney(cents / 100);
+
+  const directPrice = toMoneyNumber(
     item.price
     ?? item.precio
     ?? item.unitPrice
@@ -4702,9 +4711,30 @@ function normalizePaymentCatalogPrice(item = {}) {
     ?? item.monthlyPrice
     ?? item.oneTimePrice
     ?? item.basePrice
+    ?? item.precioBase
+    ?? item.precioDesde
+    ?? item.startingPrice
+    ?? item.minPrice
+    ?? item.cost
+    ?? item.costo
+    ?? item.valor
+    ?? item.total
     ?? 0,
     0
-  ));
+  );
+  if (directPrice > 0) return roundMoney(directPrice);
+
+  const nestedItems = [
+    ...(Array.isArray(item.variants) ? item.variants : []),
+    ...(Array.isArray(item.prices) ? item.prices : []),
+    ...(Array.isArray(item.options) ? item.options : []),
+  ];
+  for (const nested of nestedItems) {
+    const nestedPrice = normalizePaymentCatalogPrice(nested || {});
+    if (nestedPrice > 0) return nestedPrice;
+  }
+
+  return 0;
 }
 
 function normalizePaymentCatalogImage(item = {}) {
@@ -4725,7 +4755,17 @@ function normalizePaymentCatalogImage(item = {}) {
 function normalizePaymentCatalogItem(source, item = {}, fallbackId = '') {
   if (!item || typeof item !== 'object') return null;
   const id = String(item.id || item.key || item.slug || item.sku || fallbackId || '').trim();
-  const name = String(item.name || item.title || item.label || item.planName || item.serviceName || '').trim();
+  const name = String(
+    item.name
+    || item.nombre
+    || item.title
+    || item.titulo
+    || item.label
+    || item.planName
+    || item.serviceName
+    || item.productName
+    || ''
+  ).trim();
   const price = normalizePaymentCatalogPrice(item);
   if (!name || price <= 0) return null;
 
@@ -4734,8 +4774,8 @@ function normalizePaymentCatalogItem(source, item = {}, fallbackId = '') {
     source,
     sourceId: id,
     name: name.slice(0, 160),
-    description: String(item.description || item.text || item.summary || '').trim().slice(0, 260),
-    category: String(item.category || item.type || '').trim().slice(0, 80),
+    description: String(item.description || item.descripcion || item.text || item.summary || '').trim().slice(0, 260),
+    category: String(item.category || item.categoria || item.type || '').trim().slice(0, 80),
     price,
     currency: String(item.currency || 'MXN').trim().toUpperCase() || 'MXN',
     imageUrl: normalizePaymentCatalogImage(item),
@@ -4756,8 +4796,14 @@ app.get('/api/whatsapp/payment-catalog', async (req, res) => {
 
   try {
     const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const leadNegocioId = String(
+      leadCtx.leadData?.negocioId
+      || leadCtx.leadData?.businessId
+      || leadCtx.leadData?.negocio?.id
+      || ''
+    ).trim();
     const negocioCtx = await resolveNegocioByIdentity({
-      negocioId,
+      negocioId: negocioId || leadNegocioId,
       leadId: leadCtx.leadId,
       phoneDigits: leadCtx.phoneDigits,
     });
@@ -4776,6 +4822,17 @@ app.get('/api/whatsapp/payment-catalog', async (req, res) => {
     const catalogData = catalogSnap.exists ? catalogSnap.data() || {} : {};
     const globalServices = normalizePaymentCatalogList('global_service', catalogData.services || []);
     const globalPlans = normalizePaymentCatalogList('global_plan', catalogData.plans || []);
+    const financeCatalogSnap = await db
+      .collection(FINANCE_CATALOG_COLLECTION)
+      .orderBy('updatedAt', 'desc')
+      .limit(300)
+      .get();
+    const financeCatalog = normalizePaymentCatalogList(
+      'finance_catalog',
+      financeCatalogSnap.docs
+        .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() || {}) }))
+        .filter((item) => item.active !== false)
+    );
 
     return res.json({
       success: true,
@@ -4786,12 +4843,14 @@ app.get('/api/whatsapp/payment-catalog', async (req, res) => {
         ...negocioServices,
         ...globalServices,
         ...globalPlans,
+        ...financeCatalog,
       ],
       groups: {
         businessProducts: negocioProducts.length,
         businessServices: negocioServices.length,
         globalServices: globalServices.length,
         globalPlans: globalPlans.length,
+        financeCatalog: financeCatalog.length,
       },
     });
   } catch (error) {

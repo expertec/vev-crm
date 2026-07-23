@@ -25,6 +25,29 @@ function toArray(value) {
   return [value];
 }
 
+function attachmentToPayload(item = {}) {
+  const filename = cleanString(item?.filename || item?.name || 'archivo-adjunto', 180);
+  const type = cleanString(item?.type || item?.mimetype || 'application/octet-stream', 160)
+    || 'application/octet-stream';
+  let content = '';
+  if (Buffer.isBuffer(item?.buffer)) {
+    content = item.buffer.toString('base64');
+  } else if (Buffer.isBuffer(item?.content)) {
+    content = item.content.toString('base64');
+  } else if (typeof item?.content === 'string') {
+    content = item.encoding === 'base64'
+      ? item.content
+      : Buffer.from(item.content).toString('base64');
+  }
+
+  return {
+    content,
+    filename,
+    type,
+    disposition: 'attachment',
+  };
+}
+
 export class CloudflareEmailSendingClient {
   constructor({
     apiToken = process.env.CLOUDFLARE_EMAIL_SENDING_API_TOKEN
@@ -76,6 +99,7 @@ export class CloudflareEmailSendingClient {
     subject = '',
     html = '',
     text = '',
+    attachments = [],
   } = {}) {
     this.assertConfigured();
 
@@ -104,6 +128,10 @@ export class CloudflareEmailSendingClient {
     if (ccList.length) payload.cc = ccList;
     if (bccList.length) payload.bcc = bccList;
     if (replyList.length) payload.reply_to = replyList;
+    const attachmentPayload = toArray(attachments)
+      .map((item) => attachmentToPayload(item))
+      .filter((item) => item.content && item.filename);
+    if (attachmentPayload.length) payload.attachments = attachmentPayload;
 
     let response;
     try {
