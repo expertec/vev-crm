@@ -301,13 +301,28 @@ export class MailboxService {
     }
 
     // 1. Crear el correo en modo buzón (ruta al Worker, sin exigir verificación).
-    const corporateEmail = await this.corporate.createCorporateEmail({
-      empresaId,
-      alias,
-      destinationEmail: recoveryEmail,
-      mailbox: true,
-      workerName: this.workerName,
-    });
+    let corporateEmail = null;
+    try {
+      corporateEmail = await this.corporate.createCorporateEmail({
+        empresaId,
+        alias,
+        destinationEmail: recoveryEmail,
+        mailbox: true,
+        workerName: this.workerName,
+      });
+    } catch (error) {
+      if (String(error?.code || '') !== 'ALIAS_ALREADY_EXISTS') {
+        throw error;
+      }
+
+      corporateEmail = await this.findExistingCorporateEmailForMailbox({
+        empresaId,
+        alias,
+      });
+      if (!corporateEmail) {
+        throw error;
+      }
+    }
 
     // 2. Activar el buzón: contraseña + reenvío-copia + lookup.
     const mailbox = await this.enableMailboxForOwner({
@@ -320,6 +335,24 @@ export class MailboxService {
     });
 
     return { corporateEmail, mailbox };
+  }
+
+  async findExistingCorporateEmailForMailbox({ empresaId, alias }) {
+    const safeEmpresaId = cleanString(empresaId, 140);
+    if (!safeEmpresaId || !alias) return null;
+
+    const safeAlias = this.corporate.validateAlias(alias);
+    const company = await this.corporate.getCompanyOrThrow(safeEmpresaId);
+    const domain = this.corporate.resolveDomain({ company });
+    const existing = await this.corporate.repository.getCorporateEmailByAliasAndDomain({
+      empresaId: safeEmpresaId,
+      alias: safeAlias,
+      domain,
+    });
+    if (!existing || String(existing.status || '').toLowerCase() === 'deleted') {
+      return null;
+    }
+    return this.corporate.serializeCorporateEmail(existing);
   }
 
   async login({ email, password }) {
