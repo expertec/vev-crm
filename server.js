@@ -39,6 +39,7 @@ import {
   connectToWhatsApp,
   getLatestQR,
   getConnectionStatus,
+  getLastConnectionError,
   getWhatsAppSock,
   sendMessageToLead,
   sendImageToLead,
@@ -2731,7 +2732,28 @@ app.get('/', (req, res) => {
 
 // WhatsApp status / número
 app.get('/api/whatsapp/status', (_req, res) => {
-  res.json({ status: getConnectionStatus(), qr: getLatestQR() });
+  res.json({
+    status: getConnectionStatus(),
+    qr: getLatestQR(),
+    lastError: getLastConnectionError(),
+  });
+});
+
+app.post('/api/whatsapp/reconnect', async (_req, res) => {
+  try {
+    await connectToWhatsApp();
+    res.json({
+      ok: true,
+      status: getConnectionStatus(),
+      qr: getLatestQR(),
+      lastError: getLastConnectionError(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error?.message || 'No se pudo reintentar la conexión de WhatsApp',
+      lastError: getLastConnectionError(),
+    });
+  }
 });
 
 app.get('/api/whatsapp/number', (_req, res) => {

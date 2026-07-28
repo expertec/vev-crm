@@ -38,6 +38,7 @@ let latestQR = null;
 let connectionStatus = 'Desconectado';
 let whatsappSock = null;
 let sessionPhone = null;
+let lastConnectionError = null;
 
 const localAuthFolder = '/var/data';
 const { FieldValue } = admin.firestore;
@@ -902,28 +903,43 @@ export async function connectToWhatsApp() {
       if (qr) {
         latestQR = qr;
         connectionStatus = 'QR disponible. Escanéalo.';
+        lastConnectionError = null;
         QRCode.generate(qr, { small: true });
       }
       if (connection === 'open') {
         connectionStatus = 'Conectado';
         latestQR = null;
+        lastConnectionError = null;
         if (sock.user?.id) sessionPhone = sock.user.id.split('@')[0];
       }
       if (connection === 'close') {
+        whatsappSock = null;
         const reason = lastDisconnect?.error?.output?.statusCode;
         const reasonName = getDisconnectReasonName(reason);
+        lastConnectionError = {
+          reason,
+          reasonName,
+          message: lastDisconnect?.error?.message || 'Connection closed',
+          at: new Date().toISOString(),
+        };
         console.warn('[WA] conexion cerrada', {
           reason,
           reasonName,
           message: lastDisconnect?.error?.message,
         });
-        connectionStatus = 'Desconectado';
+        connectionStatus = reason === WA_SESSION_REJECTED
+          ? 'Registro rechazado por WhatsApp (405)'
+          : 'Desconectado';
         if (reason === DisconnectReason.loggedOut || reason === WA_SESSION_REJECTED) {
           console.warn('[WA] limpiando credenciales locales para forzar nuevo QR', {
             reason,
             reasonName,
           });
           clearWhatsAppAuthState();
+        }
+        if (reason === WA_SESSION_REJECTED) {
+          console.warn('[WA] registro rechazado por WhatsApp; reconexión automática pausada');
+          return;
         }
         // Backoff más largo para Render
         const delay = Math.floor(Math.random() * 8000) + 5000;
@@ -1803,6 +1819,7 @@ export async function connectToWhatsApp() {
 /* ----------------------------- helpers envío ---------------------------- */
 export function getLatestQR() { return latestQR; }
 export function getConnectionStatus() { return connectionStatus; }
+export function getLastConnectionError() { return lastConnectionError; }
 export function getWhatsAppSock() { return whatsappSock; }
 export function getSessionPhone() { return sessionPhone; }
 
