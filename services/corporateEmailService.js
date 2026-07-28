@@ -336,6 +336,8 @@ export class CorporateEmailService {
       cc: uniqueStrings(record.cc || [], 320),
       bcc: uniqueStrings(record.bcc || [], 320),
       subject: cleanString(record.subject || '', 240),
+      bodyHtml: String(record.bodyHtml || '').slice(0, 500000),
+      bodyText: String(record.bodyText || '').slice(0, 200000),
       direction: cleanString(record.direction || 'outbound', 40).toLowerCase(),
       status: cleanString(record.status || 'sent', 40).toLowerCase(),
       provider: cleanString(record.provider || 'amazon_ses', 80).toLowerCase(),

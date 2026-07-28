@@ -42,6 +42,10 @@ const localAuthFolder = '/var/data';
 const { FieldValue } = admin.firestore;
 const bucket = admin.storage().bucket();
 
+function getDisconnectReasonName(reason) {
+  return DisconnectReason?.[reason] || 'unknown';
+}
+
 /* ------------------------------ helpers ------------------------------ */
 // alias → trigger (en minúsculas)
 const STATIC_HASHTAG_MAP = {
@@ -895,6 +899,12 @@ export async function connectToWhatsApp() {
       }
       if (connection === 'close') {
         const reason = lastDisconnect?.error?.output?.statusCode;
+        const reasonName = getDisconnectReasonName(reason);
+        console.warn('[WA] conexion cerrada', {
+          reason,
+          reasonName,
+          message: lastDisconnect?.error?.message,
+        });
         connectionStatus = 'Desconectado';
         if (reason === DisconnectReason.loggedOut) {
           for (const f of fs.readdirSync(localAuthFolder)) {
