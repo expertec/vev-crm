@@ -152,16 +152,25 @@ export function createCorporateEmailRouter({
         });
         return res.status(201).json({ success: true, ...result });
       } catch (error) {
-        logger.error('[corporate-emails] create with mailbox error:', error?.message || error);
+        logger.error('[corporate-emails] create with mailbox error:', {
+          code: String(error?.code || 'MAILBOX_ERROR'),
+          statusCode: error?.statusCode,
+          message: error?.message || String(error),
+          details: error?.details || null,
+        });
         const status = Number.isInteger(error?.statusCode)
           && error.statusCode >= 400 && error.statusCode <= 599
           ? error.statusCode
           : 500;
-        return res.status(status).json({
+        const body = {
           success: false,
           code: String(error?.code || 'MAILBOX_ERROR'),
           error: status >= 500 ? 'Error interno al procesar la solicitud' : String(error?.message || 'Solicitud inválida'),
-        });
+        };
+        if (error?.details && typeof error.details === 'object') {
+          body.details = error.details;
+        }
+        return res.status(status).json(body);
       }
     }
   );

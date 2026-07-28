@@ -5,9 +5,10 @@
 //   POST /api/mailbox/login             (email + password → token)
 //   GET  /api/mailbox/inbox             (auth) bandeja
 //   GET  /api/mailbox/messages/:id      (auth) leer mensaje (marca leído)
+//   GET  /api/mailbox/messages/:id/attachments/:attachmentId (auth) descargar adjunto
 //   GET  /api/mailbox/sent              (auth) enviados
 //   POST /api/mailbox/send              (auth) enviar (Cloudflare)
-//   POST /api/mailbox/import            (auth) importar mbox/EML al inbox
+//   POST /api/mailbox/import            (auth) importar mbox/EML a inbox o sent (?folder=sent)
 //   GET  /api/mailbox/contacts          (auth) contactos de enviados
 import express from 'express';
 import multer from 'multer';
@@ -58,6 +59,9 @@ export function createMailboxRouter({ logger = console } = {}) {
     ingestSecret: process.env.MAILBOX_INGEST_SECRET,
     jwtSecret: process.env.MAILBOX_JWT_SECRET,
     adminSecret: process.env.MAILBOX_ADMIN_SECRET,
+    maxInboundAttachments: process.env.MAILBOX_INBOUND_MAX_ATTACHMENTS,
+    maxInboundAttachmentBytes: process.env.MAILBOX_INBOUND_MAX_ATTACHMENT_BYTES,
+    maxInboundTotalAttachmentBytes: process.env.MAILBOX_INBOUND_MAX_TOTAL_ATTACHMENT_BYTES,
     logger,
   });
   const controller = createMailboxController({ service, logger });
@@ -83,6 +87,7 @@ export function createMailboxRouter({ logger = console } = {}) {
   router.get('/mailbox/inbox', controller.requireAuth, controller.inbox);
   router.get('/mailbox/sent', controller.requireAuth, controller.sent);
   router.get('/mailbox/messages/:id', controller.requireAuth, controller.message);
+  router.get('/mailbox/messages/:id/attachments/:attachmentId', controller.requireAuth, controller.attachment);
   router.post('/mailbox/send', controller.requireAuth, runUpload(sendUpload.array('attachments', 3)), controller.send);
   router.post('/mailbox/import', controller.requireAuth, runUpload(importUpload.single('file')), controller.importInbox);
   router.get('/mailbox/contacts', controller.requireAuth, controller.contacts);

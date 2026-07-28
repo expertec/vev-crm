@@ -18,6 +18,16 @@ function repositoryError(message, code = 'REPOSITORY_ERROR') {
   return error;
 }
 
+function toTimestamp(value, fallback = Timestamp.now()) {
+  if (!value) return fallback;
+  if (typeof value?.toDate === 'function') return value;
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return Timestamp.fromDate(value);
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? Timestamp.fromDate(new Date(parsed)) : fallback;
+}
+
 function buildDestinationRecordId(email = '') {
   const safeEmail = normalizeEmailAddress(email);
   if (!safeEmail) return '';
@@ -388,11 +398,13 @@ export class FirestoreCorporateEmailRepository {
 
     const messageRef = this.getMessageRef(safeEmpresaId, safeMessageId);
     const now = Timestamp.now();
+    const createdAt = toTimestamp(payload.createdAt, now);
+    const { createdAt: _createdAt, ...safePayload } = payload;
     await messageRef.set(
       {
-        ...payload,
+        ...safePayload,
         empresaId: safeEmpresaId,
-        createdAt: now,
+        createdAt,
         updatedAt: now,
       },
       { merge: true }

@@ -19,6 +19,11 @@ function buildErrorResponse(error) {
   };
 }
 
+function contentDispositionAttachment(filename = 'adjunto') {
+  const safeName = cleanString(filename || 'adjunto', 240).replace(/[\r\n"]/g, '_') || 'adjunto';
+  return `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
+}
+
 export function createMailboxController({ service, logger = console }) {
   if (!service) throw new Error('createMailboxController requiere service');
 
@@ -53,6 +58,7 @@ export function createMailboxController({ service, logger = console }) {
           date: req.body?.date,
           sizeBytes: req.body?.sizeBytes,
           inReplyTo: req.body?.inReplyTo,
+          attachments: Array.isArray(req.body?.attachments) ? req.body.attachments : [],
         });
         return res.status(200).json({ success: true, ...out });
       } catch (error) {
@@ -115,6 +121,23 @@ export function createMailboxController({ service, logger = console }) {
       }
     },
 
+    attachment: async (req, res) => {
+      try {
+        const item = await service.getAttachment({
+          empresaId: req.mailbox.empresaId,
+          correoId: req.mailbox.correoId,
+          messageId: req.params?.id,
+          attachmentId: req.params?.attachmentId,
+        });
+        res.setHeader('Content-Type', item.contentType || 'application/octet-stream');
+        res.setHeader('Content-Disposition', contentDispositionAttachment(item.filename));
+        res.setHeader('Content-Length', String(item.buffer.length));
+        return res.status(200).send(item.buffer);
+      } catch (error) {
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
     sent: async (req, res) => {
       try {
         const items = await service.getSent({
@@ -169,6 +192,7 @@ export function createMailboxController({ service, logger = console }) {
           fileName: req.file?.originalname || req.body?.fileName || '',
           markAsRead: req.body?.markAsRead,
           maxMessages: req.body?.maxMessages,
+          folder: req.query?.folder || req.body?.folder,
         });
         return res.status(200).json({ success: true, result });
       } catch (error) {

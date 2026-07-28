@@ -50,6 +50,16 @@ function toIso(value) {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 
+function toFirestoreTimestamp(value, fallback = Timestamp.now()) {
+  if (!value) return fallback;
+  if (typeof value?.toDate === 'function') return value;
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return Timestamp.fromDate(value);
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? Timestamp.fromDate(new Date(parsed)) : fallback;
+}
+
 function parseCsvOrArray(value) {
   if (Array.isArray(value)) {
     return value
@@ -971,6 +981,14 @@ export class CorporateEmailService {
     const stamp = Date.now();
     const random = crypto.randomBytes(5).toString('hex');
     return `msg_${stamp}_${random}`;
+  }
+
+  buildImportedEmailMessageId(providerMessageId = '') {
+    const source = cleanString(providerMessageId, 260);
+    if (source) {
+      return `imp_${crypto.createHash('sha1').update(source).digest('hex').slice(0, 24)}`;
+    }
+    return this.buildEmailMessageId();
   }
 
   /**
@@ -2424,6 +2442,79 @@ export class CorporateEmailService {
         bounces: Array.isArray(result?.bounces) ? result.bounces : [],
         message: savedMessage ? this.serializeCorporateEmailMessage(savedMessage) : null,
         sentAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      throw this.mapError(error);
+    }
+  }
+
+  async importCorporateEmailMessage({
+    empresaId,
+    fromAlias,
+    to,
+    cc,
+    bcc,
+    subject,
+    text,
+    html,
+    providerMessageId,
+    date,
+    sizeBytes,
+    importSource = '',
+    createdBy = '',
+  }) {
+    try {
+      const safeEmpresaId = this.ensureEmpresaId(empresaId);
+      await this.getCompanyOrThrow(safeEmpresaId);
+      const resolvedFromEmail = normalizeEmailAddress(fromAlias);
+      if (!resolvedFromEmail || !isValidEmailAddress(resolvedFromEmail)) {
+        throw new CorporateEmailServiceError('El remitente importado es inválido', {
+          code: 'IMPORT_FROM_INVALID',
+          statusCode: 400,
+        });
+      }
+
+      const toEmails = uniqueStrings(to || [], 320).map(normalizeEmailAddress).filter(Boolean);
+      const ccEmails = uniqueStrings(cc || [], 320).map(normalizeEmailAddress).filter(Boolean);
+      const bccEmails = uniqueStrings(bcc || [], 320).map(normalizeEmailAddress).filter(Boolean);
+      const cleanProviderMessageId = cleanString(providerMessageId, 200);
+      const messageId = this.buildImportedEmailMessageId(cleanProviderMessageId);
+      const existing = await this.repository.getCorporateEmailMessageById(safeEmpresaId, messageId);
+      if (existing) {
+        return {
+          ...this.serializeCorporateEmailMessage(existing),
+          duplicate: true,
+        };
+      }
+
+      const savedMessage = await this.repository.createCorporateEmailMessage({
+        empresaId: safeEmpresaId,
+        messageId,
+        payload: {
+          companyId: safeEmpresaId,
+          fromAlias: resolvedFromEmail,
+          from: resolvedFromEmail,
+          to: toEmails,
+          cc: ccEmails,
+          bcc: bccEmails,
+          subject: cleanString(subject, 220),
+          bodyHtml: String(html || '').slice(0, 500000),
+          bodyText: String(text || '').slice(0, 200000),
+          direction: 'outbound',
+          status: 'sent',
+          provider: 'mailbox_import',
+          providerMessageId: cleanProviderMessageId,
+          createdBy: cleanString(createdBy, 200),
+          imported: true,
+          importSource: cleanString(importSource || 'mailbox-import', 240),
+          sizeBytes: Number(sizeBytes || 0) || 0,
+          createdAt: toFirestoreTimestamp(date),
+        },
+      });
+
+      return {
+        ...this.serializeCorporateEmailMessage(savedMessage),
+        duplicate: false,
       };
     } catch (error) {
       throw this.mapError(error);

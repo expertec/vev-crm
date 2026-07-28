@@ -4,7 +4,7 @@
 // Negocios/{empresaId}/corporateEmails/{correoId} y le añade la subcolección `inbox`.
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import crypto from 'node:crypto';
-import { db } from '../firebaseAdmin.js';
+import { admin, db } from '../firebaseAdmin.js';
 import {
   buildCorporateEmailRecordId,
   normalizeAlias,
@@ -38,19 +38,35 @@ function lookupDocId(address) {
   return crypto.createHash('sha1').update(email).digest('hex');
 }
 
+function cleanStorageSegment(value = '', maxLength = 160) {
+  const cleaned = cleanId(value, maxLength)
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return cleaned || 'file';
+}
+
 export class FirestoreMailboxRepository {
   constructor({
     dbClient = db,
+    storageBucket = null,
     companiesCollection = 'Negocios',
     corporateEmailsSub = 'corporateEmails',
     inboxSub = 'inbox',
     lookupCollection = 'mailboxLookup',
   } = {}) {
     this.db = dbClient;
+    this.storageBucket = storageBucket;
     this.companiesCollection = companiesCollection;
     this.corporateEmailsSub = corporateEmailsSub;
     this.inboxSub = inboxSub;
     this.lookupCollection = lookupCollection;
+  }
+
+  getStorageBucket() {
+    if (!this.storageBucket) {
+      this.storageBucket = admin.storage().bucket();
+    }
+    return this.storageBucket;
   }
 
   lookupRef(address) {
@@ -161,6 +177,57 @@ export class FirestoreMailboxRepository {
     }
     const snap = await ref.get();
     return { id: snap.id, ...(snap.data() || {}) };
+  }
+
+  buildAttachmentStoragePath({ empresaId, correoId, messageId, attachmentId, filename }) {
+    return [
+      'mailbox',
+      cleanStorageSegment(empresaId, 140),
+      cleanStorageSegment(correoId, 240),
+      'inbox',
+      cleanStorageSegment(messageId, 180),
+      'attachments',
+      `${cleanStorageSegment(attachmentId, 120)}-${cleanStorageSegment(filename, 180)}`,
+    ].join('/');
+  }
+
+  async saveInboundAttachment({
+    empresaId,
+    correoId,
+    messageId,
+    attachmentId,
+    filename,
+    contentType,
+    buffer,
+  }) {
+    const storagePath = this.buildAttachmentStoragePath({
+      empresaId,
+      correoId,
+      messageId,
+      attachmentId,
+      filename,
+    });
+    const file = this.getStorageBucket().file(storagePath);
+    await file.save(buffer, {
+      resumable: false,
+      metadata: {
+        contentType: cleanId(contentType, 200) || 'application/octet-stream',
+        metadata: {
+          empresaId: cleanId(empresaId, 140),
+          correoId: cleanId(correoId, 240),
+          messageId: cleanId(messageId, 180),
+          attachmentId: cleanId(attachmentId, 120),
+        },
+      },
+    });
+    return { storagePath };
+  }
+
+  async downloadInboundAttachment({ storagePath }) {
+    const path = cleanId(storagePath, 1000);
+    if (!path) return null;
+    const [buffer] = await this.getStorageBucket().file(path).download();
+    return buffer;
   }
 
   async listInbox({ empresaId, correoId, limit = 50 }) {
