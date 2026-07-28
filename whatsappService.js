@@ -6,6 +6,7 @@ import {
   makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
+  Browsers,
   fetchLatestBaileysVersion,
   downloadMediaMessage,
 } from 'baileys';
@@ -41,9 +42,20 @@ let sessionPhone = null;
 const localAuthFolder = '/var/data';
 const { FieldValue } = admin.firestore;
 const bucket = admin.storage().bucket();
+const WA_SESSION_REJECTED = 405;
 
 function getDisconnectReasonName(reason) {
+  if (reason === WA_SESSION_REJECTED) return 'sessionRejected';
   return DisconnectReason?.[reason] || 'unknown';
+}
+
+function clearWhatsAppAuthState() {
+  if (!fs.existsSync(localAuthFolder)) return;
+
+  for (const f of fs.readdirSync(localAuthFolder)) {
+    fs.rmSync(path.join(localAuthFolder, f), { force: true, recursive: true });
+  }
+  sessionPhone = null;
 }
 
 /* ------------------------------ helpers ------------------------------ */
@@ -879,8 +891,8 @@ export async function connectToWhatsApp() {
     const { version } = await fetchLatestBaileysVersion();
     const sock = makeWASocket({
       auth: state,
+      browser: Browsers.ubuntu('Chrome'),
       logger: Pino({ level: 'info' }),
-      printQRInTerminal: true,
       version,
     });
     whatsappSock = sock;
@@ -906,11 +918,12 @@ export async function connectToWhatsApp() {
           message: lastDisconnect?.error?.message,
         });
         connectionStatus = 'Desconectado';
-        if (reason === DisconnectReason.loggedOut) {
-          for (const f of fs.readdirSync(localAuthFolder)) {
-            fs.rmSync(path.join(localAuthFolder, f), { force: true, recursive: true });
-          }
-          sessionPhone = null;
+        if (reason === DisconnectReason.loggedOut || reason === WA_SESSION_REJECTED) {
+          console.warn('[WA] limpiando credenciales locales para forzar nuevo QR', {
+            reason,
+            reasonName,
+          });
+          clearWhatsAppAuthState();
         }
         // Backoff más largo para Render
         const delay = Math.floor(Math.random() * 8000) + 5000;
