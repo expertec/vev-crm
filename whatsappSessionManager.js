@@ -19,11 +19,12 @@ import {
   makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
+  Browsers,
 } from 'baileys';
 import Pino from 'pino';
 import fs from 'fs';
 import path from 'path';
+import { getWhatsAppWebVersion } from './baileysVersion.js';
 
 const SESSIONS_ROOT = process.env.WA_SESSIONS_ROOT || '/var/data/wa-sessions';
 
@@ -117,13 +118,14 @@ export async function connectSession(negocioId) {
       patchSession(session, { phone: state.creds.me.id.split('@')[0] });
     }
 
-    const { version } = await fetchLatestBaileysVersion();
+    const version = getWhatsAppWebVersion();
     const sock = makeWASocket({
       auth: state,
       logger,
       printQRInTerminal: false, // el QR se expone por API; el panel lo renderiza
       version,
-      browser: ['NegociosWeb CRM', 'Chrome', '1.0.0'],
+      browser: Browsers.macOS('Chrome'),
+      generateHighQualityLinkPreview: false,
       markOnlineOnConnect: false,
     });
 

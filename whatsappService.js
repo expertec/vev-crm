@@ -7,7 +7,6 @@ import {
   useMultiFileAuthState,
   DisconnectReason,
   Browsers,
-  fetchLatestBaileysVersion,
   downloadMediaMessage,
 } from 'baileys';
 import QRCode from 'qrcode-terminal';
@@ -32,6 +31,7 @@ import {
 } from './queue.js';
 import { detectMetaAdSignal } from './utils/metaAdDetector.js';
 import { handleInboundLeadReply } from './services/hotLeadDetector.js';
+import { getWhatsAppWebVersion } from './baileysVersion.js';
 
 
 let latestQR = null;
@@ -889,10 +889,11 @@ export async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState(localAuthFolder);
     if (state.creds.me?.id) sessionPhone = state.creds.me.id.split('@')[0];
 
-    const { version } = await fetchLatestBaileysVersion();
+    const version = getWhatsAppWebVersion();
     const sock = makeWASocket({
       auth: state,
-      browser: Browsers.ubuntu('Chrome'),
+      browser: Browsers.macOS('Chrome'),
+      generateHighQualityLinkPreview: false,
       logger: Pino({ level: 'info' }),
       version,
     });
