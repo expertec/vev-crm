@@ -95,6 +95,21 @@ export function createMailboxController({ service, logger = console }) {
       }
     },
 
+    changePassword: async (req, res) => {
+      try {
+        const result = await service.changePassword({
+          empresaId: req.mailbox.empresaId,
+          correoId: req.mailbox.correoId,
+          mailboxEmail: req.mailbox.email,
+          currentPassword: req.body?.currentPassword,
+          newPassword: req.body?.newPassword || req.body?.password,
+        });
+        return res.status(200).json({ success: true, ...result });
+      } catch (error) {
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
     inbox: async (req, res) => {
       try {
         const items = await service.getInbox({
@@ -210,6 +225,95 @@ export function createMailboxController({ service, logger = console }) {
         });
         return res.status(200).json({ success: true, items });
       } catch (error) {
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    mailingLists: async (req, res) => {
+      try {
+        const items = await service.listMailingLists({
+          empresaId: req.mailbox.empresaId,
+          correoId: req.mailbox.correoId,
+        });
+        return res.status(200).json({ success: true, items });
+      } catch (error) {
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    saveMailingList: async (req, res) => {
+      try {
+        const item = await service.saveMailingList({
+          empresaId: req.mailbox.empresaId,
+          correoId: req.mailbox.correoId,
+          listId: req.params?.listId,
+          name: req.body?.name,
+          description: req.body?.description,
+          members: req.body?.members,
+        });
+        return res.status(200).json({ success: true, item });
+      } catch (error) {
+        logger.error?.('[mailbox] list save error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    deleteMailingList: async (req, res) => {
+      try {
+        const result = await service.deleteMailingList({
+          empresaId: req.mailbox.empresaId,
+          correoId: req.mailbox.correoId,
+          listId: req.params?.listId,
+        });
+        return res.status(200).json({ success: true, ...result });
+      } catch (error) {
+        logger.error?.('[mailbox] list delete error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    drafts: async (req, res) => {
+      try {
+        const items = await service.listDrafts({
+          empresaId: req.mailbox.empresaId,
+          correoId: req.mailbox.correoId,
+        });
+        return res.status(200).json({ success: true, items });
+      } catch (error) {
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    saveDraft: async (req, res) => {
+      try {
+        const item = await service.saveDraft({
+          empresaId: req.mailbox.empresaId,
+          correoId: req.mailbox.correoId,
+          draftId: req.params?.draftId,
+          to: req.body?.to,
+          cc: req.body?.cc,
+          bcc: req.body?.bcc,
+          subject: req.body?.subject,
+          bodyText: req.body?.bodyText || req.body?.text,
+          bodyHtml: req.body?.bodyHtml || req.body?.html,
+        });
+        return res.status(200).json({ success: true, item });
+      } catch (error) {
+        logger.error?.('[mailbox] draft save error:', error?.message || error);
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    deleteDraft: async (req, res) => {
+      try {
+        const result = await service.deleteDraft({
+          empresaId: req.mailbox.empresaId,
+          correoId: req.mailbox.correoId,
+          draftId: req.params?.draftId,
+        });
+        return res.status(200).json({ success: true, ...result });
+      } catch (error) {
+        logger.error?.('[mailbox] draft delete error:', error?.message || error);
         return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
       }
     },

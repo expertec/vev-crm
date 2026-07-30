@@ -98,7 +98,125 @@ function parseContentType(value = '') {
     mime,
     charset: params.charset || '',
     boundary: params.boundary || '',
+    name: decodeHeaderParam(params.name || params['name*'] || ''),
+    params,
   };
+}
+
+function decodeHeaderParam(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const rfc2231 = raw.match(/^([^']*)''(.+)$/);
+  if (rfc2231) {
+    try {
+      return decodeURIComponent(rfc2231[2]);
+    } catch {
+      return rfc2231[2];
+    }
+  }
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return decodeEncodedWords(raw);
+  }
+}
+
+function parseContentDisposition(value = '') {
+  const parts = String(value || '').split(';');
+  const disposition = cleanString(parts.shift() || '', 80).toLowerCase();
+  const params = {};
+  for (const part of parts) {
+    const equalIndex = part.indexOf('=');
+    if (equalIndex <= 0) continue;
+    const key = part.slice(0, equalIndex).trim().toLowerCase();
+    let val = part.slice(equalIndex + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    params[key] = val;
+  }
+  return {
+    disposition,
+    filename: decodeHeaderParam(params.filename || params['filename*'] || ''),
+    params,
+  };
+}
+
+function normalizeContentId(value = '') {
+  return cleanString(decodeEncodedWords(value), 220).replace(/^<|>$/g, '').trim();
+}
+
+function extensionFromMime(mime = '') {
+  const normalized = String(mime || '').toLowerCase();
+  if (normalized === 'image/jpeg') return 'jpg';
+  if (normalized === 'image/png') return 'png';
+  if (normalized === 'image/gif') return 'gif';
+  if (normalized === 'image/webp') return 'webp';
+  if (normalized === 'image/svg+xml') return 'svg';
+  if (normalized === 'application/pdf') return 'pdf';
+  return 'bin';
+}
+
+function decodeBodyBuffer(body = '', headers = new Map()) {
+  const transfer = header(headers, 'content-transfer-encoding').toLowerCase();
+  const source = String(body || '');
+  if (transfer === 'base64') {
+    return Buffer.from(source.replace(/\s+/g, ''), 'base64');
+  }
+  if (transfer === 'quoted-printable') {
+    const withoutSoftBreaks = source.replace(/=\r?\n/g, '');
+    const bytes = [];
+    for (let index = 0; index < withoutSoftBreaks.length; index += 1) {
+      const char = withoutSoftBreaks[index];
+      if (char === '=' && /^[0-9a-fA-F]{2}$/.test(withoutSoftBreaks.slice(index + 1, index + 3))) {
+        bytes.push(Number.parseInt(withoutSoftBreaks.slice(index + 1, index + 3), 16));
+        index += 2;
+      } else {
+        bytes.push(char.charCodeAt(0));
+      }
+    }
+    return Buffer.from(bytes);
+  }
+  return Buffer.from(source, 'latin1');
+}
+
+function attachmentDataUrl(attachment = {}) {
+  if (!attachment?.buffer?.length || !attachment.contentType) return '';
+  return `data:${attachment.contentType};base64,${attachment.buffer.toString('base64')}`;
+}
+
+function decodeCidReference(value = '') {
+  const raw = String(value || '').replace(/^<|>$/g, '').trim();
+  try {
+    return decodeURIComponent(raw).replace(/^<|>$/g, '').toLowerCase();
+  } catch {
+    return raw.toLowerCase();
+  }
+}
+
+function rewriteCidImages(html = '', attachments = []) {
+  let out = String(html || '');
+  if (!out || !Array.isArray(attachments) || attachments.length === 0) return out;
+
+  const byCid = new Map();
+  for (const attachment of attachments) {
+    const cid = normalizeContentId(attachment.contentId);
+    if (!cid || !String(attachment.contentType || '').toLowerCase().startsWith('image/')) continue;
+    byCid.set(cid.toLowerCase(), attachmentDataUrl(attachment));
+  }
+  if (byCid.size === 0) return out;
+
+  out = out.replace(/(["'])cid:([^"'>\s]+)\1/gi, (match, quote, cidValue) => {
+    const cid = decodeCidReference(cidValue);
+    const dataUrl = byCid.get(cid);
+    return dataUrl ? `${quote}${dataUrl}${quote}` : match;
+  });
+  out = out.replace(/url\((["']?)cid:([^"')\s]+)\1\)/gi, (match, quote, cidValue) => {
+    const cid = decodeCidReference(cidValue);
+    const dataUrl = byCid.get(cid);
+    return dataUrl ? `url(${quote || ''}${dataUrl}${quote || ''})` : match;
+  });
+  return out;
 }
 
 function decodeBody(body = '', headers = new Map()) {
@@ -142,24 +260,57 @@ function parseBody(rawBody = '', headers = new Map()) {
   const contentType = parseContentType(header(headers, 'content-type'));
   if (contentType.mime.startsWith('multipart/') && contentType.boundary) {
     const parts = splitMultipart(rawBody, contentType.boundary);
-    const out = { textBody: '', htmlBody: '' };
+    const out = { textBody: '', htmlBody: '', attachments: [] };
     for (const part of parts) {
       const parsed = parseMessagePart(part);
       if (!out.textBody && parsed.textBody) out.textBody = parsed.textBody;
       if (!out.htmlBody && parsed.htmlBody) out.htmlBody = parsed.htmlBody;
-      if (out.textBody && out.htmlBody) break;
+      if (Array.isArray(parsed.attachments) && parsed.attachments.length > 0) {
+        out.attachments.push(...parsed.attachments);
+      }
     }
+    out.htmlBody = rewriteCidImages(out.htmlBody, out.attachments);
     return out;
   }
 
   const decoded = decodeBody(rawBody, headers);
   if (contentType.mime === 'text/html') {
-    return { textBody: '', htmlBody: decoded };
+    return { textBody: '', htmlBody: decoded, attachments: [] };
   }
   if (contentType.mime === 'text/plain' || contentType.mime === 'message/rfc822') {
-    return { textBody: decoded, htmlBody: '' };
+    return { textBody: decoded, htmlBody: '', attachments: [] };
   }
-  return { textBody: '', htmlBody: '' };
+
+  const disposition = parseContentDisposition(header(headers, 'content-disposition'));
+  const contentId = normalizeContentId(header(headers, 'content-id'));
+  const isAttachment =
+    Boolean(contentId)
+    || disposition.disposition === 'attachment'
+    || disposition.disposition === 'inline'
+    || Boolean(disposition.filename || contentType.name)
+    || contentType.mime.startsWith('image/');
+
+  if (isAttachment) {
+    const buffer = decodeBodyBuffer(rawBody, headers);
+    const filename =
+      disposition.filename
+      || contentType.name
+      || (contentId ? `${contentId.replace(/[^a-z0-9._-]+/gi, '_')}.${extensionFromMime(contentType.mime)}` : `adjunto.${extensionFromMime(contentType.mime)}`);
+    return {
+      textBody: '',
+      htmlBody: '',
+      attachments: [{
+        filename: cleanString(filename, 240),
+        contentType: contentType.mime || 'application/octet-stream',
+        sizeBytes: buffer.length,
+        contentId,
+        disposition: disposition.disposition || (contentId ? 'inline' : 'attachment'),
+        buffer,
+      }],
+    };
+  }
+
+  return { textBody: '', htmlBody: '', attachments: [] };
 }
 
 function parseMessagePart(raw = '') {
@@ -214,6 +365,7 @@ export function parseEmailMessage(raw = '') {
     date,
     textBody: parsedBody.textBody,
     htmlBody: parsedBody.htmlBody,
+    attachments: Array.isArray(parsedBody.attachments) ? parsedBody.attachments : [],
     sizeBytes: Buffer.byteLength(source),
   };
 }

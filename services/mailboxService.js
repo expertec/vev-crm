@@ -47,7 +47,7 @@ function uniqueEmails(values = []) {
     new Set(
       (Array.isArray(values) ? values : [])
         .map((value) => normalizeEmail(value))
-        .filter(Boolean)
+        .filter((value) => value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))
     )
   );
 }
@@ -114,6 +114,8 @@ export class MailboxService {
     maxInboundAttachments = 5,
     maxInboundAttachmentBytes = 5 * 1024 * 1024,
     maxInboundTotalAttachmentBytes = 10 * 1024 * 1024,
+    maxMailingListMembers = process.env.MAILBOX_MAX_LIST_MEMBERS || 200,
+    maxSendRecipients = process.env.MAILBOX_MAX_SEND_RECIPIENTS || 100,
     logger = console,
   } = {}) {
     if (!mailboxRepository || !corporateEmailService) {
@@ -130,6 +132,8 @@ export class MailboxService {
     this.maxInboundAttachments = numberOrDefault(maxInboundAttachments, 5);
     this.maxInboundAttachmentBytes = numberOrDefault(maxInboundAttachmentBytes, 5 * 1024 * 1024);
     this.maxInboundTotalAttachmentBytes = numberOrDefault(maxInboundTotalAttachmentBytes, 10 * 1024 * 1024);
+    this.maxMailingListMembers = numberOrDefault(maxMailingListMembers, 200);
+    this.maxSendRecipients = numberOrDefault(maxSendRecipients, 100);
     this.logger = logger;
   }
 
@@ -543,6 +547,59 @@ export class MailboxService {
     };
   }
 
+  async changePassword({ empresaId, correoId, mailboxEmail, currentPassword, newPassword }) {
+    const safeEmpresaId = cleanString(empresaId, 140);
+    const safeCorreoId = cleanString(correoId, 240);
+    const address = normalizeEmail(mailboxEmail);
+    const current = String(currentPassword || '');
+    const next = String(newPassword || '');
+
+    if (!safeEmpresaId || !safeCorreoId || !address) {
+      throw new MailboxServiceError('Buzón no válido', {
+        code: 'MAILBOX_INVALID_CONTEXT',
+        statusCode: 400,
+      });
+    }
+    if (!current || !next) {
+      throw new MailboxServiceError('Contraseña actual y nueva contraseña requeridas', {
+        code: 'MAILBOX_PASSWORD_REQUIRED',
+        statusCode: 400,
+      });
+    }
+    if (next.length < 6) {
+      throw new MailboxServiceError('La nueva contraseña debe tener al menos 6 caracteres', {
+        code: 'MAILBOX_WEAK_PASSWORD',
+        statusCode: 400,
+      });
+    }
+
+    const data = await this.repo.getCorporateEmailById(safeEmpresaId, safeCorreoId);
+    const storedAddress = data ? normalizeEmail(data.email || data.address) : '';
+    if (!data || data.mailboxEnabled !== true || !data.passwordHash || storedAddress !== address) {
+      throw new MailboxServiceError('Buzón no encontrado', {
+        code: 'MAILBOX_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+    if (!verifyPassword(current, data.passwordHash)) {
+      throw new MailboxServiceError('La contraseña actual no es correcta', {
+        code: 'MAILBOX_CURRENT_PASSWORD_INVALID',
+        statusCode: 401,
+      });
+    }
+
+    await this.repo.setMailboxConfig({
+      empresaId: safeEmpresaId,
+      correoId: safeCorreoId,
+      patch: {
+        passwordHash: hashPassword(next),
+        passwordUpdatedAt: new Date(),
+      },
+    });
+
+    return { changed: true };
+  }
+
   authenticate(token) {
     if (!this.jwtSecret) return null;
     const claims = verifyMailboxToken(token, { secret: this.jwtSecret });
@@ -572,6 +629,18 @@ export class MailboxService {
   }
 
   async send({ empresaId, mailboxEmail, to, cc, bcc, subject, text, html, attachments = [] }) {
+    const recipientCount = uniqueEmails([
+      ...(Array.isArray(to) ? to : String(to || '').split(/[,;\s]+/)),
+      ...(Array.isArray(cc) ? cc : String(cc || '').split(/[,;\s]+/)),
+      ...(Array.isArray(bcc) ? bcc : String(bcc || '').split(/[,;\s]+/)),
+    ]).length;
+    if (recipientCount > this.maxSendRecipients) {
+      throw new MailboxServiceError(
+        `Máximo ${this.maxSendRecipients} destinatarios por envío.`,
+        { code: 'MAILBOX_TOO_MANY_RECIPIENTS', statusCode: 400 }
+      );
+    }
+
     // El remitente se fuerza al correo del buzón autenticado (no arbitrario).
     return this.corporate.sendCorporateEmail({
       empresaId,
@@ -585,6 +654,159 @@ export class MailboxService {
       attachments,
       createdBy: mailboxEmail,
     });
+  }
+
+  serializeMailingList(item = {}) {
+    const members = uniqueEmails(Array.isArray(item.members) ? item.members : []);
+    return {
+      id: cleanString(item.id, 180),
+      name: cleanString(item.name, 120),
+      description: cleanString(item.description, 300),
+      members,
+      memberCount: members.length,
+      createdAt: toIso(item.createdAt),
+      updatedAt: toIso(item.updatedAt),
+    };
+  }
+
+  normalizeMailingListPayload({ name, description = '', members = [] } = {}) {
+    const safeName = cleanString(name, 120);
+    if (safeName.length < 2) {
+      throw new MailboxServiceError('Escribe un nombre para la lista.', {
+        code: 'MAILBOX_LIST_NAME_REQUIRED',
+        statusCode: 400,
+      });
+    }
+
+    const sourceMembers = Array.isArray(members)
+      ? members
+      : String(members || '').split(/[,;\s]+/);
+    const safeMembers = uniqueEmails(sourceMembers);
+    if (safeMembers.length === 0) {
+      throw new MailboxServiceError('Agrega al menos un correo válido a la lista.', {
+        code: 'MAILBOX_LIST_MEMBERS_REQUIRED',
+        statusCode: 400,
+      });
+    }
+    if (safeMembers.length > this.maxMailingListMembers) {
+      throw new MailboxServiceError(
+        `Máximo ${this.maxMailingListMembers} contactos por lista.`,
+        { code: 'MAILBOX_LIST_TOO_MANY_MEMBERS', statusCode: 400 }
+      );
+    }
+
+    return {
+      name: safeName,
+      description: cleanString(description, 300),
+      members: safeMembers,
+      memberCount: safeMembers.length,
+    };
+  }
+
+  async listMailingLists({ empresaId, correoId }) {
+    const rows = await this.repo.listMailingLists({ empresaId, correoId });
+    return rows.map((row) => this.serializeMailingList(row));
+  }
+
+  async saveMailingList({ empresaId, correoId, listId = '', name, description, members }) {
+    const payload = this.normalizeMailingListPayload({ name, description, members });
+    const saved = await this.repo.saveMailingList({
+      empresaId,
+      correoId,
+      listId,
+      payload,
+    });
+    return this.serializeMailingList(saved);
+  }
+
+  async deleteMailingList({ empresaId, correoId, listId }) {
+    const safeListId = cleanString(listId, 180);
+    if (!safeListId) {
+      throw new MailboxServiceError('Lista no válida.', {
+        code: 'MAILBOX_LIST_ID_REQUIRED',
+        statusCode: 400,
+      });
+    }
+    const deleted = await this.repo.deleteMailingList({ empresaId, correoId, listId: safeListId });
+    if (!deleted) {
+      throw new MailboxServiceError('Lista no encontrada.', {
+        code: 'MAILBOX_LIST_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+    return { deleted: true };
+  }
+
+  serializeDraft(item = {}) {
+    return {
+      id: cleanString(item.id, 180),
+      to: uniqueEmails(Array.isArray(item.to) ? item.to : String(item.to || '').split(/[,;\s]+/)),
+      cc: uniqueEmails(Array.isArray(item.cc) ? item.cc : String(item.cc || '').split(/[,;\s]+/)),
+      bcc: uniqueEmails(Array.isArray(item.bcc) ? item.bcc : String(item.bcc || '').split(/[,;\s]+/)),
+      subject: cleanString(item.subject, 300),
+      bodyText: String(item.bodyText || '').slice(0, 200000),
+      bodyHtml: String(item.bodyHtml || '').slice(0, 500000),
+      createdAt: toIso(item.createdAt),
+      updatedAt: toIso(item.updatedAt),
+    };
+  }
+
+  normalizeDraftPayload({ to, cc, bcc, subject, bodyText, bodyHtml } = {}) {
+    const payload = {
+      to: uniqueEmails(Array.isArray(to) ? to : String(to || '').split(/[,;\s]+/)),
+      cc: uniqueEmails(Array.isArray(cc) ? cc : String(cc || '').split(/[,;\s]+/)),
+      bcc: uniqueEmails(Array.isArray(bcc) ? bcc : String(bcc || '').split(/[,;\s]+/)),
+      subject: cleanString(subject, 300),
+      bodyText: String(bodyText || '').slice(0, 200000),
+      bodyHtml: String(bodyHtml || '').slice(0, 500000),
+    };
+    const hasContent = payload.to.length > 0
+      || payload.cc.length > 0
+      || payload.bcc.length > 0
+      || payload.subject.trim()
+      || payload.bodyText.trim()
+      || payload.bodyHtml.trim();
+    if (!hasContent) {
+      throw new MailboxServiceError('No hay contenido para guardar como borrador.', {
+        code: 'MAILBOX_DRAFT_EMPTY',
+        statusCode: 400,
+      });
+    }
+    return payload;
+  }
+
+  async listDrafts({ empresaId, correoId }) {
+    const rows = await this.repo.listDrafts({ empresaId, correoId });
+    return rows.map((row) => this.serializeDraft(row));
+  }
+
+  async saveDraft({ empresaId, correoId, draftId = '', to, cc, bcc, subject, bodyText, bodyHtml }) {
+    const payload = this.normalizeDraftPayload({ to, cc, bcc, subject, bodyText, bodyHtml });
+    const saved = await this.repo.saveDraft({
+      empresaId,
+      correoId,
+      draftId,
+      payload,
+    });
+    return this.serializeDraft(saved);
+  }
+
+  async deleteDraft({ empresaId, correoId, draftId }) {
+    const safeDraftId = cleanString(draftId, 180);
+    if (!safeDraftId) {
+      throw new MailboxServiceError('Borrador no válido.', {
+        code: 'MAILBOX_DRAFT_ID_REQUIRED',
+        statusCode: 400,
+      });
+    }
+    const deleted = await this.repo.deleteDraft({ empresaId, correoId, draftId: safeDraftId });
+    if (!deleted) {
+      throw new MailboxServiceError('Borrador no encontrado.', {
+        code: 'MAILBOX_DRAFT_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+    return { deleted: true };
   }
 
   async importInbox({
@@ -663,6 +885,53 @@ export class MailboxService {
         }
 
         const inboxId = this.repo.buildInboxMessageId(providerMessageId);
+        const storedAttachments = [];
+        for (const [index, attachment] of (Array.isArray(message.attachments) ? message.attachments : []).entries()) {
+          const buffer = Buffer.isBuffer(attachment?.buffer) ? attachment.buffer : null;
+          if (!buffer?.length) continue;
+          if (buffer.length > this.maxInboundAttachmentBytes) {
+            this.logger.warn?.('[mailbox] adjunto importado omitido por tamaño:', attachment?.filename || attachment?.name || '');
+            continue;
+          }
+
+          const currentTotal = storedAttachments.reduce((sum, item) => sum + Number(item?.sizeBytes || 0), 0);
+          if (storedAttachments.length >= this.maxInboundAttachments || currentTotal + buffer.length > this.maxInboundTotalAttachmentBytes) {
+            this.logger.warn?.('[mailbox] adjunto importado omitido por límite total:', attachment?.filename || attachment?.name || '');
+            continue;
+          }
+
+          const filename = safeFileName(attachment?.filename || attachment?.name || `adjunto-${index + 1}`);
+          const contentType = normalizeContentType(attachment?.contentType || attachment?.type);
+          const attachmentId = `imp_${String(index + 1).padStart(2, '0')}_${crypto
+            .createHash('sha1')
+            .update(`${providerMessageId}:${filename}:${contentType}:${buffer.length}:${index}`)
+            .digest('hex')
+            .slice(0, 12)}`;
+
+          try {
+            const savedAttachment = await this.repo.saveInboundAttachment({
+              empresaId,
+              correoId,
+              messageId: inboxId,
+              attachmentId,
+              filename,
+              contentType,
+              buffer,
+            });
+            storedAttachments.push({
+              id: attachmentId,
+              filename,
+              contentType,
+              sizeBytes: buffer.length,
+              contentId: cleanString(attachment?.contentId, 200),
+              disposition: cleanString(attachment?.disposition || 'attachment', 40),
+              storagePath: savedAttachment.storagePath,
+            });
+          } catch (error) {
+            this.logger.warn?.('[mailbox] no se pudo guardar adjunto importado:', error?.message || error);
+          }
+        }
+
         const stored = await this.repo.saveInboundMessage({
           empresaId,
           correoId,
@@ -677,6 +946,7 @@ export class MailboxService {
             providerMessageId,
             date: cleanString(message.date, 120),
             sizeBytes: Number(message.sizeBytes || 0) || 0,
+            attachments: storedAttachments,
             imported: true,
             importSource: cleanString(fileName || 'mailbox-import', 240),
             read,

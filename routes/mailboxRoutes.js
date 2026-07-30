@@ -3,6 +3,7 @@
 //   POST /api/internal/mailbox/ingest   (Worker → guarda entrante)   [x-ingest-secret]
 //   POST /api/mailbox/setup             (alta/enable buzón + password) [x-mailbox-admin-secret]
 //   POST /api/mailbox/login             (email + password → token)
+//   PUT  /api/mailbox/password          (auth) cambiar contraseña propia
 //   GET  /api/mailbox/inbox             (auth) bandeja
 //   GET  /api/mailbox/messages/:id      (auth) leer mensaje (marca leído)
 //   GET  /api/mailbox/messages/:id/attachments/:attachmentId (auth) descargar adjunto
@@ -10,6 +11,8 @@
 //   POST /api/mailbox/send              (auth) enviar (Cloudflare)
 //   POST /api/mailbox/import            (auth) importar mbox/EML a inbox o sent (?folder=sent)
 //   GET  /api/mailbox/contacts          (auth) contactos de enviados
+//   GET/POST/PUT/DELETE /api/mailbox/lists (auth) listas de correo
+//   GET/POST/PUT/DELETE /api/mailbox/drafts (auth) borradores
 import express from 'express';
 import multer from 'multer';
 import { FirestoreMailboxRepository } from '../repositories/mailboxRepository.js';
@@ -84,6 +87,7 @@ export function createMailboxRouter({ logger = console } = {}) {
   router.post('/internal/mailbox/ingest', controller.ingest);
   router.post('/mailbox/setup', controller.setup);
   router.post('/mailbox/login', controller.login);
+  router.put('/mailbox/password', controller.requireAuth, controller.changePassword);
   router.get('/mailbox/inbox', controller.requireAuth, controller.inbox);
   router.get('/mailbox/sent', controller.requireAuth, controller.sent);
   router.get('/mailbox/messages/:id', controller.requireAuth, controller.message);
@@ -91,6 +95,14 @@ export function createMailboxRouter({ logger = console } = {}) {
   router.post('/mailbox/send', controller.requireAuth, runUpload(sendUpload.array('attachments', 3)), controller.send);
   router.post('/mailbox/import', controller.requireAuth, runUpload(importUpload.single('file')), controller.importInbox);
   router.get('/mailbox/contacts', controller.requireAuth, controller.contacts);
+  router.get('/mailbox/lists', controller.requireAuth, controller.mailingLists);
+  router.post('/mailbox/lists', controller.requireAuth, controller.saveMailingList);
+  router.put('/mailbox/lists/:listId', controller.requireAuth, controller.saveMailingList);
+  router.delete('/mailbox/lists/:listId', controller.requireAuth, controller.deleteMailingList);
+  router.get('/mailbox/drafts', controller.requireAuth, controller.drafts);
+  router.post('/mailbox/drafts', controller.requireAuth, controller.saveDraft);
+  router.put('/mailbox/drafts/:draftId', controller.requireAuth, controller.saveDraft);
+  router.delete('/mailbox/drafts/:draftId', controller.requireAuth, controller.deleteDraft);
 
   return router;
 }

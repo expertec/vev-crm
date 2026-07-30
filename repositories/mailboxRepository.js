@@ -126,6 +126,14 @@ export class FirestoreMailboxRepository {
     return this.correoRef(empresaId, correoId).collection(this.inboxSub);
   }
 
+  mailingListsCol(empresaId, correoId) {
+    return this.correoRef(empresaId, correoId).collection('mailingLists');
+  }
+
+  draftsCol(empresaId, correoId) {
+    return this.correoRef(empresaId, correoId).collection('drafts');
+  }
+
   async findCorporateEmailByAddress(address) {
     // Sin queries ni índices: usa la tablita de lookup `mailboxLookup`.
     const lookup = await this.getLookup(address);
@@ -259,5 +267,79 @@ export class FirestoreMailboxRepository {
     }
     const updated = await ref.get();
     return { id: updated.id, ...(updated.data() || {}) };
+  }
+
+  async listMailingLists({ empresaId, correoId, limit = 100 }) {
+    const safeLimit = Math.max(1, Math.min(200, Number(limit) || 100));
+    const snap = await this.mailingListsCol(empresaId, correoId)
+      .orderBy('updatedAt', 'desc')
+      .limit(safeLimit)
+      .get();
+    return snap.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) }));
+  }
+
+  async getMailingList({ empresaId, correoId, listId }) {
+    const snap = await this.mailingListsCol(empresaId, correoId).doc(cleanId(listId, 180)).get();
+    if (!snap.exists) return null;
+    return { id: snap.id, ...(snap.data() || {}) };
+  }
+
+  async saveMailingList({ empresaId, correoId, listId, payload = {} }) {
+    const safeListId = cleanId(listId, 180) || `list_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const ref = this.mailingListsCol(empresaId, correoId).doc(safeListId);
+    const now = Timestamp.now();
+    const existing = await ref.get();
+    await ref.set(
+      {
+        ...payload,
+        updatedAt: now,
+        ...(existing.exists ? {} : { createdAt: now }),
+      },
+      { merge: true }
+    );
+    const snap = await ref.get();
+    return { id: snap.id, ...(snap.data() || {}) };
+  }
+
+  async deleteMailingList({ empresaId, correoId, listId }) {
+    const ref = this.mailingListsCol(empresaId, correoId).doc(cleanId(listId, 180));
+    const snap = await ref.get();
+    if (!snap.exists) return false;
+    await ref.delete();
+    return true;
+  }
+
+  async listDrafts({ empresaId, correoId, limit = 100 }) {
+    const safeLimit = Math.max(1, Math.min(200, Number(limit) || 100));
+    const snap = await this.draftsCol(empresaId, correoId)
+      .orderBy('updatedAt', 'desc')
+      .limit(safeLimit)
+      .get();
+    return snap.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) }));
+  }
+
+  async saveDraft({ empresaId, correoId, draftId, payload = {} }) {
+    const safeDraftId = cleanId(draftId, 180) || `draft_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const ref = this.draftsCol(empresaId, correoId).doc(safeDraftId);
+    const now = Timestamp.now();
+    const existing = await ref.get();
+    await ref.set(
+      {
+        ...payload,
+        updatedAt: now,
+        ...(existing.exists ? {} : { createdAt: now }),
+      },
+      { merge: true }
+    );
+    const snap = await ref.get();
+    return { id: snap.id, ...(snap.data() || {}) };
+  }
+
+  async deleteDraft({ empresaId, correoId, draftId }) {
+    const ref = this.draftsCol(empresaId, correoId).doc(cleanId(draftId, 180));
+    const snap = await ref.get();
+    if (!snap.exists) return false;
+    await ref.delete();
+    return true;
   }
 }
