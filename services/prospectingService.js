@@ -28,6 +28,42 @@ const DEFAULT_SERVICE_PROFILE = [
   'correos corporativos',
   'formularios, muestras web y embudos de captacion',
 ].join(', ');
+const DEFAULT_DISCOVERY_CITIES = [
+  'Ciudad Victoria, Tamaulipas',
+  'Tampico, Tamaulipas',
+  'Altamira, Tamaulipas',
+  'Madero, Tamaulipas',
+  'Reynosa, Tamaulipas',
+  'Matamoros, Tamaulipas',
+  'Monterrey, Nuevo Leon',
+  'San Pedro Garza Garcia, Nuevo Leon',
+  'San Nicolas de los Garza, Nuevo Leon',
+  'Guadalupe, Nuevo Leon',
+  'Saltillo, Coahuila',
+  'Torreon, Coahuila',
+  'San Luis Potosi, San Luis Potosi',
+  'Queretaro, Queretaro',
+  'Leon, Guanajuato',
+  'Aguascalientes, Aguascalientes',
+];
+const DEFAULT_DISCOVERY_BUSINESS_TYPES = [
+  'dentistas',
+  'clinicas medicas',
+  'esteticas',
+  'spas',
+  'gimnasios',
+  'restaurantes',
+  'hoteles',
+  'inmobiliarias',
+  'talleres mecanicos',
+  'escuelas privadas',
+  'abogados',
+  'contadores',
+  'veterinarias',
+  'constructoras',
+  'salones de eventos',
+  'mueblerias',
+];
 
 function cleanText(value = '', maxLength = 280) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
@@ -368,6 +404,91 @@ function buildFallbackZoneSuggestions({ area = '', businessType = '' } = {}) {
   }));
 }
 
+function filterCandidatesByRegion(candidates = [], region = '') {
+  const safeRegion = cleanText(region, 120).toLowerCase();
+  if (!safeRegion) return candidates;
+  const tokens = safeRegion
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3);
+  if (!tokens.length) return candidates;
+  const normalizedCandidates = candidates.map((candidate) => ({
+    raw: candidate,
+    normalized: cleanText(candidate, 160)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase(),
+  }));
+  const matches = normalizedCandidates
+    .filter((candidate) => tokens.some((token) => candidate.normalized.includes(token)))
+    .map((candidate) => candidate.raw);
+  return matches.length ? matches : candidates;
+}
+
+function buildFallbackDiscoverySeeds({ region = '', cities = [], businessTypes = [] } = {}) {
+  const citySeeds = unique([
+    ...(Array.isArray(cities) ? cities : []),
+    ...filterCandidatesByRegion(DEFAULT_DISCOVERY_CITIES, region),
+  ]).slice(0, 12);
+  const typeSeeds = unique([
+    ...(Array.isArray(businessTypes) ? businessTypes : []),
+    ...DEFAULT_DISCOVERY_BUSINESS_TYPES,
+  ]).slice(0, 14);
+  return { cities: citySeeds, businessTypes: typeSeeds };
+}
+
+function summarizeDiscoveryCombo({ area, businessType, result } = {}) {
+  const items = Array.isArray(result?.items) ? result.items : [];
+  const priorityProspects = items.filter((item) => item.fit?.label === 'Prioritario');
+  const emailProspects = items.filter((item) => item.primaryEmail);
+  const messageProspects = items.filter((item) => item.phone || item.phoneDigits);
+  const noWebsite = items.filter((item) => !item.website);
+  const score = Math.round(
+    (priorityProspects.length * 18)
+    + (emailProspects.length * 10)
+    + (messageProspects.length * 5)
+    + (noWebsite.length * 8)
+    + Math.min(20, items.length * 2)
+  );
+  const topProspects = items
+    .slice()
+    .sort((a, b) => Number(b.fit?.score || 0) - Number(a.fit?.score || 0))
+    .slice(0, 8);
+  const channel = emailProspects.length >= 2
+    ? 'email'
+    : messageProspects.length >= 2
+      ? 'whatsapp_llamada'
+      : 'validacion_manual';
+
+  return {
+    id: `${normalizeStageKey(businessType)}_${normalizeStageKey(area)}`.slice(0, 140),
+    area,
+    businessType,
+    score: Math.max(0, Math.min(100, score)),
+    priorityLabel: score >= 75 ? 'Alta' : score >= 45 ? 'Media' : 'Exploratoria',
+    channel,
+    metrics: {
+      total: items.length,
+      priorityProspects: priorityProspects.length,
+      emailProspects: emailProspects.length,
+      messageProspects: messageProspects.length,
+      noWebsite: noWebsite.length,
+    },
+    reason: `${priorityProspects.length} prioritarios, ${emailProspects.length} con correo, ${noWebsite.length} sin web.`,
+    topProspects,
+  };
+}
+
+function normalizeStageKey(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 async function callOpenAiJson({ apiKey, model, messages, timeoutMs = 12000 } = {}) {
   if (!apiKey) return null;
   const controller = new AbortController();
@@ -553,6 +674,50 @@ export class ProspectingService {
     };
   }
 
+  async recommendDiscoverySeeds({
+    region = '',
+    cities = [],
+    businessTypes = [],
+    serviceProfile = this.serviceProfile,
+  } = {}) {
+    const fallback = buildFallbackDiscoverySeeds({ region, cities, businessTypes });
+    if (!this.isAiConfigured()) {
+      return { source: 'rules', ...fallback };
+    }
+
+    const payload = await callOpenAiJson({
+      apiKey: this.openAiApiKey,
+      model: this.aiModel,
+      messages: [
+        {
+          role: 'system',
+          content: 'Eres un analista comercial B2B en Mexico. Sugiere ciudades y giros para vender servicios digitales a negocios locales. Responde solo JSON valido.',
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            task: 'Sugiere ciudades/municipios y giros con mayor probabilidad de necesitar pagina web, CRM, WhatsApp automatizado y correo corporativo. Prioriza negocios que normalmente tengan ticket medio y necesiten captar clientes.',
+            region,
+            seedCities: cities,
+            seedBusinessTypes: businessTypes,
+            services: serviceProfile,
+            schema: {
+              cities: ['Ciudad, Estado'],
+              businessTypes: ['giro plural'],
+            },
+          }),
+        },
+      ],
+    });
+    const aiCities = unique(Array.isArray(payload?.cities) ? payload.cities : []).slice(0, 12);
+    const aiTypes = unique(Array.isArray(payload?.businessTypes) ? payload.businessTypes : []).slice(0, 14);
+    return {
+      source: aiCities.length || aiTypes.length ? 'ai' : 'rules',
+      cities: aiCities.length ? aiCities : fallback.cities,
+      businessTypes: aiTypes.length ? aiTypes : fallback.businessTypes,
+    };
+  }
+
   async classifyProspects({ items = [], area = '', businessType = '', useAi = true } = {}) {
     const fallbackItems = items.map((item) => ({
       ...item,
@@ -728,6 +893,81 @@ export class ProspectingService {
       nextPageToken: cleanText(payload.nextPageToken || '', 600),
       googleSearchUrl: normalizeUrl(payload.searchUri || ''),
       searchedAt: new Date().toISOString(),
+    };
+  }
+
+  async discoverOpportunities({
+    region = '',
+    cities = [],
+    businessTypes = [],
+    maxCampaigns = 8,
+    prospectsPerCampaign = 8,
+    scanWebsites = true,
+    useAiClassification = true,
+  } = {}) {
+    if (!this.isConfigured()) {
+      const error = new Error('Falta configurar GOOGLE_PLACES_API_KEY en el servidor.');
+      error.statusCode = 503;
+      error.code = 'GOOGLE_PLACES_NOT_CONFIGURED';
+      throw error;
+    }
+
+    const seeds = await this.recommendDiscoverySeeds({
+      region,
+      cities,
+      businessTypes,
+    });
+    const max = clampNumber(maxCampaigns, 1, 12, 8);
+    const pageSize = clampNumber(prospectsPerCampaign, 4, 12, 8);
+    const citySeeds = seeds.cities.slice(0, 8);
+    const typeSeeds = seeds.businessTypes.slice(0, 10);
+    const pairs = [];
+    for (const city of citySeeds) {
+      for (const type of typeSeeds) {
+        pairs.push({ area: city, businessType: type });
+      }
+    }
+
+    const campaigns = [];
+    const pairLimit = Math.min(pairs.length, max * 2);
+    for (const pair of pairs.slice(0, pairLimit)) {
+      try {
+        const result = await this.search({
+          area: pair.area,
+          businessType: pair.businessType,
+          maxResults: pageSize,
+          scanWebsites,
+          useAiClassification,
+        });
+        campaigns.push(summarizeDiscoveryCombo({
+          area: pair.area,
+          businessType: pair.businessType,
+          result,
+        }));
+      } catch (error) {
+        this.logger.warn('[prospecting] discovery pair skipped:', {
+          area: pair.area,
+          businessType: pair.businessType,
+          error: error?.message || String(error),
+        });
+      }
+    }
+
+    const sorted = campaigns
+      .sort((a, b) => b.score - a.score)
+      .slice(0, max);
+    return {
+      source: seeds.source,
+      region: cleanText(region, 160),
+      seeds,
+      campaigns: sorted,
+      summary: {
+        campaigns: sorted.length,
+        prospects: sorted.reduce((sum, item) => sum + item.metrics.total, 0),
+        emailProspects: sorted.reduce((sum, item) => sum + item.metrics.emailProspects, 0),
+        priorityProspects: sorted.reduce((sum, item) => sum + item.metrics.priorityProspects, 0),
+      },
+      discoveredAt: new Date().toISOString(),
     };
   }
 }

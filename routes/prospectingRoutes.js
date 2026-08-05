@@ -147,6 +147,43 @@ export function createProspectingRouter({ logger = console } = {}) {
     }
   });
 
+  router.post('/crm/prospecting/discover', async (req, res) => {
+    try {
+      const result = await service.discoverOpportunities({
+        region: req.body?.region,
+        cities: req.body?.cities,
+        businessTypes: req.body?.businessTypes,
+        maxCampaigns: req.body?.maxCampaigns,
+        prospectsPerCampaign: req.body?.prospectsPerCampaign,
+        scanWebsites: req.body?.scanWebsites !== false,
+        useAiClassification: req.body?.useAiClassification !== false,
+      });
+
+      try {
+        await db.collection('prospectingDiscoveryRuns').add({
+          provider: 'google_places',
+          region: result.region,
+          source: result.source,
+          summary: result.summary,
+          campaignCount: result.campaigns.length,
+          discoveredAt: new Date(),
+        });
+      } catch (saveError) {
+        logger.warn('[prospecting] No se pudo guardar descubrimiento:', saveError?.message || saveError);
+      }
+
+      return res.json({ success: true, ...result });
+    } catch (error) {
+      logger.error('[prospecting] discover error:', error?.details || error?.message || error);
+      const status = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+      return res.status(status).json({
+        success: false,
+        code: cleanText(error?.code || 'PROSPECTING_DISCOVERY_ERROR', 80),
+        error: status >= 500 ? 'No se pudo completar el descubrimiento de oportunidades.' : cleanText(error?.message || 'Solicitud invalida.'),
+      });
+    }
+  });
+
   router.post('/crm/prospecting/search', async (req, res) => {
     try {
       const result = await service.search({
