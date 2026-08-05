@@ -117,6 +117,7 @@ import {
 } from './hotelAdvancedRoutes.js';
 import { createProcessInformationRouter } from './routes/processInformationRoutes.js';
 import { createCorporateEmailRouter } from './routes/corporateEmailRoutes.js';
+import { createProspectingRouter } from './routes/prospectingRoutes.js';
 // ⚠️ TEMPORAL: validación de Cloudflare Email Sending (quitar tras la prueba).
 import { createCloudflareEmailTestRouter } from './routes/cloudflareEmailTestRoutes.js';
 import { createMailboxRouter } from './routes/mailboxRoutes.js';
@@ -2720,6 +2721,8 @@ app.use('/api/web', createCorporateEmailRouter());
 // ⚠️ TEMPORAL: endpoint POST /api/test/cloudflare-email para validar Cloudflare Email Sending.
 // Eliminar (mount + routes/cloudflareEmailTestRoutes.js) una vez concluida la validación.
 app.use('/api/test', createCloudflareEmailTestRouter());
+// Prospeccion local: Google Places + deteccion de sitio/correos publicos.
+app.use('/api', createProspectingRouter());
 // Mini-mail (buzones de agentes): ingesta, login, bandeja, envío.
 app.use('/api', createMailboxRouter());
 
