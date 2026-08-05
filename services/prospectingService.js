@@ -21,6 +21,13 @@ const SOCIAL_DOMAINS = {
   instagram: /(?:^|\.)instagram\.com$/i,
   whatsapp: /(?:^|\.)wa\.me$|(?:^|\.)whatsapp\.com$/i,
 };
+const DEFAULT_SERVICE_PROFILE = [
+  'paginas web profesionales para negocios locales',
+  'CRM para administrar prospectos y clientes',
+  'automatizacion de WhatsApp para seguimiento y ventas',
+  'correos corporativos',
+  'formularios, muestras web y embudos de captacion',
+].join(', ');
 
 function cleanText(value = '', maxLength = 280) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
@@ -59,6 +66,23 @@ function normalizeUrl(value = '') {
     return url.toString();
   } catch {
     return '';
+  }
+}
+
+function parseJsonObject(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    try {
+      return JSON.parse(raw.slice(start, end + 1));
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -226,6 +250,170 @@ export function scoreProspect({ website = '', emails = [], rating = null, userRa
   return { score: finalScore, label, reasons };
 }
 
+function inferProspectFit(item = {}, { businessType = '', serviceProfile = DEFAULT_SERVICE_PROFILE } = {}) {
+  let score = Number(item?.opportunity?.score || 50);
+  const reasons = [];
+  const segments = [];
+  const website = cleanText(item.website || '', 600);
+  const reviews = Number(item.userRatingCount || 0);
+  const rating = Number(item.rating || 0);
+  const hasEmail = Boolean(item.primaryEmail || item.emails?.length);
+  const hasPhone = Boolean(item.phone || item.phoneDigits);
+  const socialCount = Object.keys(item.socialLinks || {}).filter((key) => item.socialLinks[key]).length;
+  const typeText = `${businessType} ${(item.types || []).join(' ')} ${item.name || ''}`.toLowerCase();
+
+  if (!website) {
+    score += 18;
+    segments.push('sin_web');
+    reasons.push('No tiene sitio web visible para convertir trafico de Google.');
+  } else {
+    segments.push('con_web');
+    reasons.push('Tiene web; conviene revisar si captura prospectos y seguimiento.');
+  }
+
+  if (hasPhone) {
+    score += 7;
+    segments.push('whatsapp_viable');
+    reasons.push('Tiene telefono publico para seguimiento por WhatsApp.');
+  }
+
+  if (!hasEmail && website) {
+    score += 8;
+    segments.push('sin_correo_publico');
+    reasons.push('No se detecto correo publico en su sitio.');
+  } else if (hasEmail) {
+    score += 4;
+    segments.push('email_viable');
+    reasons.push('Tiene correo publico para primer contacto.');
+  }
+
+  if (reviews >= 35) {
+    score += 8;
+    segments.push('demanda_probada');
+    reasons.push('Tiene actividad visible en Google; probablemente ya recibe busquedas.');
+  } else if (reviews <= 5) {
+    score += 6;
+    segments.push('presencia_debil');
+    reasons.push('Poca prueba social; puede necesitar presencia digital.');
+  }
+
+  if (rating > 0 && rating < 4) {
+    score += 4;
+    segments.push('reputacion_mejorable');
+    reasons.push('Rating con margen de mejora para reputacion y seguimiento.');
+  }
+
+  if (socialCount === 0) {
+    score += 5;
+    segments.push('sin_redes_detectadas');
+  }
+
+  if (/restaurant|food|meal|beauty|hair|spa|dent|doctor|clinic|gym|real_estate|lodging|school|store|car|auto|lawyer|accounting/.test(typeText)) {
+    score += 5;
+    segments.push('giro_local_apto');
+  }
+
+  const finalScore = Math.max(0, Math.min(100, Math.round(score)));
+  let label = 'Medio';
+  if (finalScore >= 80) label = 'Prioritario';
+  if (finalScore < 62) label = 'Bajo';
+
+  let pitchAngle = 'Ofrecer mejora de presencia digital, captacion y seguimiento de prospectos.';
+  if (!website) {
+    pitchAngle = 'Ofrecer pagina web rapida con WhatsApp, formulario y correo corporativo.';
+  } else if (!hasEmail) {
+    pitchAngle = 'Ofrecer optimizacion del sitio para captar prospectos y agregar correo corporativo.';
+  } else if (hasPhone) {
+    pitchAngle = 'Ofrecer CRM y automatizacion de WhatsApp para dar seguimiento a clientes.';
+  }
+
+  const nextAction = hasEmail
+    ? 'Enviar correo personalizado'
+    : hasPhone
+      ? 'Contactar por WhatsApp o llamada'
+      : 'Abrir Google Maps y validar contacto manual';
+
+  return {
+    score: finalScore,
+    label,
+    reasons: unique(reasons).slice(0, 4),
+    segments: unique(segments).slice(0, 6),
+    pitchAngle,
+    nextAction,
+    serviceProfile: cleanText(serviceProfile, 500),
+    source: 'rules',
+  };
+}
+
+function buildFallbackZoneSuggestions({ area = '', businessType = '' } = {}) {
+  const base = cleanText(area || 'tu zona', 120);
+  const type = cleanText(businessType || 'negocios locales', 80);
+  const names = [
+    `Zona centro de ${base}`,
+    `Zona norte de ${base}`,
+    `Zona sur de ${base}`,
+    `Zona poniente de ${base}`,
+    `Zona oriente de ${base}`,
+    `Plazas comerciales en ${base}`,
+    `Avenidas principales de ${base}`,
+    `Colonias residenciales con comercio en ${base}`,
+  ];
+  return names.map((name, index) => ({
+    id: `zone_${index + 1}`,
+    name,
+    searchArea: name,
+    reason: `Buena zona para buscar ${type} con necesidad de presencia digital local.`,
+    suggestedBusinessTypes: unique([type, 'clinicas', 'esteticas', 'restaurantes']).slice(0, 4),
+    priority: index < 3 ? 'Alta' : index < 6 ? 'Media' : 'Exploratoria',
+  }));
+}
+
+async function callOpenAiJson({ apiKey, model, messages, timeoutMs = 12000 } = {}) {
+  if (!apiKey) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+        messages,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) return null;
+    return parseJsonObject(payload?.choices?.[0]?.message?.content || '');
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeAiFit(value = {}, fallback = {}) {
+  const score = Math.max(0, Math.min(100, Math.round(Number(value.score ?? fallback.score ?? 50))));
+  let label = cleanText(value.label || fallback.label || 'Medio', 40);
+  if (!['Prioritario', 'Medio', 'Bajo'].includes(label)) {
+    label = score >= 80 ? 'Prioritario' : score < 62 ? 'Bajo' : 'Medio';
+  }
+  return {
+    score,
+    label,
+    reasons: unique(Array.isArray(value.reasons) ? value.reasons : fallback.reasons || []).slice(0, 4),
+    segments: unique(Array.isArray(value.segments) ? value.segments : fallback.segments || []).slice(0, 6),
+    pitchAngle: cleanText(value.pitchAngle || fallback.pitchAngle || '', 260),
+    nextAction: cleanText(value.nextAction || fallback.nextAction || '', 160),
+    source: value.source || 'ai',
+  };
+}
+
 function mapGooglePlace(place = {}, { emails = [], socialLinks = {}, scannedPages = [] } = {}) {
   const website = normalizeUrl(place.websiteUri || '');
   const phone = cleanText(place.internationalPhoneNumber || place.nationalPhoneNumber || '', 80);
@@ -288,8 +476,17 @@ export async function scanBusinessWebsite(website = '') {
 }
 
 export class ProspectingService {
-  constructor({ apiKey = process.env.GOOGLE_PLACES_API_KEY, logger = console } = {}) {
+  constructor({
+    apiKey = process.env.GOOGLE_PLACES_API_KEY,
+    openAiApiKey = process.env.OPENAI_API_KEY,
+    aiModel = process.env.PROSPECTING_AI_MODEL || 'gpt-4o-mini',
+    serviceProfile = process.env.PROSPECTING_SERVICE_PROFILE || DEFAULT_SERVICE_PROFILE,
+    logger = console,
+  } = {}) {
     this.apiKey = apiKey;
+    this.openAiApiKey = openAiApiKey;
+    this.aiModel = aiModel;
+    this.serviceProfile = serviceProfile;
     this.logger = logger;
   }
 
@@ -297,7 +494,154 @@ export class ProspectingService {
     return Boolean(cleanText(this.apiKey || ''));
   }
 
-  async search({ area = '', businessType = '', maxResults = 20, scanWebsites = true, pageToken = '' } = {}) {
+  isAiConfigured() {
+    return Boolean(cleanText(this.openAiApiKey || ''));
+  }
+
+  async recommendZones({ area = '', businessType = '', serviceProfile = this.serviceProfile } = {}) {
+    const safeArea = cleanText(area, 120);
+    const safeBusinessType = cleanText(businessType, 100);
+    const fallback = buildFallbackZoneSuggestions({ area: safeArea, businessType: safeBusinessType });
+    if (!this.isAiConfigured()) {
+      return { source: 'rules', items: fallback };
+    }
+
+    const payload = await callOpenAiJson({
+      apiKey: this.openAiApiKey,
+      model: this.aiModel,
+      messages: [
+        {
+          role: 'system',
+          content: 'Eres un analista comercial B2B para vender servicios digitales a negocios locales. Responde solo JSON valido.',
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            task: 'Sugiere zonas de prospeccion. Pueden ser colonias, corredores, plazas, avenidas, zonas comerciales o areas dentro/cerca del area dada. No inventes direcciones exactas; usa nombres de busqueda utiles para Google Places.',
+            area: safeArea,
+            businessType: safeBusinessType,
+            services: serviceProfile,
+            schema: {
+              items: [
+                {
+                  name: 'string',
+                  searchArea: 'string',
+                  reason: 'string',
+                  suggestedBusinessTypes: ['string'],
+                  priority: 'Alta|Media|Exploratoria',
+                },
+              ],
+            },
+          }),
+        },
+      ],
+    });
+
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const normalized = items.slice(0, 10).map((item, index) => ({
+      id: `zone_ai_${index + 1}`,
+      name: cleanText(item.name || item.searchArea || fallback[index]?.name || '', 120),
+      searchArea: cleanText(item.searchArea || item.name || fallback[index]?.searchArea || '', 140),
+      reason: cleanText(item.reason || fallback[index]?.reason || '', 240),
+      suggestedBusinessTypes: unique(Array.isArray(item.suggestedBusinessTypes) ? item.suggestedBusinessTypes : []).slice(0, 4),
+      priority: ['Alta', 'Media', 'Exploratoria'].includes(item.priority) ? item.priority : fallback[index]?.priority || 'Media',
+    })).filter((item) => item.name && item.searchArea);
+
+    return {
+      source: normalized.length ? 'ai' : 'rules',
+      items: normalized.length ? normalized : fallback,
+    };
+  }
+
+  async classifyProspects({ items = [], area = '', businessType = '', useAi = true } = {}) {
+    const fallbackItems = items.map((item) => ({
+      ...item,
+      fit: inferProspectFit(item, {
+        area,
+        businessType,
+        serviceProfile: this.serviceProfile,
+      }),
+    }));
+    if (!useAi || !this.isAiConfigured() || !fallbackItems.length) {
+      return { source: 'rules', items: fallbackItems };
+    }
+
+    const compactItems = fallbackItems.slice(0, 25).map((item) => ({
+      placeId: item.placeId,
+      name: item.name,
+      address: item.address,
+      website: Boolean(item.website),
+      email: Boolean(item.primaryEmail),
+      phone: Boolean(item.phone || item.phoneDigits),
+      rating: item.rating,
+      reviews: item.userRatingCount,
+      types: item.types,
+      ruleFit: item.fit,
+    }));
+    const payload = await callOpenAiJson({
+      apiKey: this.openAiApiKey,
+      model: this.aiModel,
+      messages: [
+        {
+          role: 'system',
+          content: 'Eres un analista comercial B2B. Clasifica prospectos para vender paginas web, CRM, WhatsApp automatizado y correos corporativos. Responde solo JSON valido.',
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            task: 'Clasifica cada prospecto por probabilidad de funcionar para mis servicios. Prioriza negocios locales con necesidad clara, contacto viable y actividad comercial.',
+            area,
+            businessType,
+            services: this.serviceProfile,
+            prospects: compactItems,
+            schema: {
+              fits: [
+                {
+                  placeId: 'string',
+                  score: 0,
+                  label: 'Prioritario|Medio|Bajo',
+                  reasons: ['string'],
+                  segments: ['string'],
+                  pitchAngle: 'string',
+                  nextAction: 'string',
+                },
+              ],
+            },
+          }),
+        },
+      ],
+    });
+
+    const fits = new Map();
+    (Array.isArray(payload?.fits) ? payload.fits : []).forEach((fit) => {
+      const key = cleanText(fit.placeId || '', 180);
+      if (!key) return;
+      fits.set(key, fit);
+    });
+
+    const aiItems = fallbackItems.map((item) => {
+      const aiFit = fits.get(item.placeId);
+      if (!aiFit) return item;
+      return {
+        ...item,
+        fit: normalizeAiFit({ ...aiFit, source: 'ai' }, item.fit),
+      };
+    });
+
+    return {
+      source: fits.size ? 'ai' : 'rules',
+      items: fits.size ? aiItems : fallbackItems,
+    };
+  }
+
+  async search({
+    area = '',
+    businessType = '',
+    maxResults = 20,
+    scanWebsites = true,
+    pageToken = '',
+    useAiClassification = true,
+  } = {}) {
     if (!this.isConfigured()) {
       const error = new Error('Falta configurar GOOGLE_PLACES_API_KEY en el servidor.');
       error.statusCode = 503;
@@ -353,11 +697,22 @@ export class ProspectingService {
       items.push(mapGooglePlace(place, websiteScan));
     }
 
+    const classified = await this.classifyProspects({
+      items,
+      area: safeArea,
+      businessType: safeBusinessType,
+      useAi: useAiClassification,
+    });
+    const sortedItems = classified.items.sort(
+      (a, b) => Number(b.fit?.score || b.opportunity?.score || 0) - Number(a.fit?.score || a.opportunity?.score || 0)
+    );
+
     const summary = {
       total: items.length,
-      withoutWebsite: items.filter((item) => !item.website).length,
-      withEmail: items.filter((item) => item.emails.length > 0).length,
-      highOpportunity: items.filter((item) => item.opportunity.label === 'Alta').length,
+      withoutWebsite: sortedItems.filter((item) => !item.website).length,
+      withEmail: sortedItems.filter((item) => item.emails.length > 0).length,
+      highOpportunity: sortedItems.filter((item) => item.opportunity.label === 'Alta').length,
+      priorityFit: sortedItems.filter((item) => item.fit?.label === 'Prioritario').length,
     };
 
     return {
@@ -365,9 +720,11 @@ export class ProspectingService {
         area: safeArea,
         businessType: safeBusinessType,
         scanWebsites: Boolean(scanWebsites),
+        useAiClassification: Boolean(useAiClassification),
       },
       summary,
-      items,
+      items: sortedItems,
+      classificationSource: classified.source,
       nextPageToken: cleanText(payload.nextPageToken || '', 600),
       googleSearchUrl: normalizeUrl(payload.searchUri || ''),
       searchedAt: new Date().toISOString(),
