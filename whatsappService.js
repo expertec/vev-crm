@@ -29,7 +29,9 @@ import {
   hasSameTrigger,
   phoneFromJid
 } from './queue.js';
-import { detectMetaAdSignal } from './utils/metaAdDetector.js';
+import { extractMetaAdAttribution } from './utils/metaAdDetector.js';
+import { resolveMetaAdSequenceRoute } from './utils/metaAdSequenceRouter.js';
+import { extractHashtags, resolveStaticTriggerFromMessage } from './utils/messageTriggerRouter.js';
 import { handleInboundLeadReply } from './services/hotLeadDetector.js';
 import { getWhatsAppWebVersion } from './baileysVersion.js';
 
@@ -60,23 +62,6 @@ function clearWhatsAppAuthState() {
 }
 
 /* ------------------------------ helpers ------------------------------ */
-// alias → trigger (en minúsculas)
-const STATIC_HASHTAG_MAP = {
-  '#WebPro990':    'LeadWeb',
-  '#webPro990':    'LeadWeb',
-  '#leadweb':      'LeadWeb',
-  '#nuevolead':    'NuevoLeadWeb',
-  '#planredes990': 'PlanRedes',
-  '#info':         'LeadWeb',
-  '#infoweb':      'NuevoLead',
-
-};
-
-// Si el trigger es LeadWeb, cancela estas (evita duplicidad)
-const STATIC_CANCEL_BY_TRIGGER = {
-  LeadWeb: ['NuevoLeadWeb', 'NuevoLead'],
-};
-
 const WEBPROMO_TRIGGER = 'LeadWhatsapp';
 const META_ADS_CAMPAIGN = 'whatsapp_click_to_chat';
 const FORM_COMPLETED_BLOCKED_TRIGGERS = new Set([
@@ -356,11 +341,6 @@ function shouldProcessAppendMessage(msg, refNow = Date.now()) {
   return (refNow - tsMs) <= APPEND_MAX_AGE_MS;
 }
 
-function extractHashtags(text = '') {
-  const found = String(text).toLowerCase().match(/#[\p{L}\p{N}_-]+/gu);
-  return found ? Array.from(new Set(found)) : [];
-}
-
 // Normaliza a formato que WhatsApp acepta para MX:
 function normalizePhoneForWA(phone) {
   let num = String(phone || '').replace(/\D/g, '');
@@ -385,25 +365,15 @@ async function resolveHashtagInDB(code) {
 
 async function resolveTriggerFromMessage(text, defaultTrigger = 'NuevoLeadWeb') {
   const tags = extractHashtags(text);
-  if (tags.length === 0) return { trigger: defaultTrigger, cancel: [], source: 'default' };
 
-  // 1) Firestore (dinámico)
+  // 1) Firestore (dinámico) para hashtags configurables.
   for (const tag of tags) {
     const dbRule = await resolveHashtagInDB(tag);
     if (dbRule?.trigger) return { ...dbRule, source: 'db' };
   }
 
-  // 2) Estático
-  for (const tag of tags) {
-    const trg = STATIC_HASHTAG_MAP[tag];
-    if (trg) {
-      const cancel = STATIC_CANCEL_BY_TRIGGER[trg] || [];
-      return { trigger: trg, cancel, source: 'hashtag' };
-    }
-  }
-
-  // 3) Default
-  return { trigger: defaultTrigger, cancel: [], source: 'default' };
+  // 2) Reglas locales: hashtags conocidos y textos predefinidos de anuncios.
+  return resolveStaticTriggerFromMessage(text, defaultTrigger);
 }
 
 function getSequenceBlockReason(leadData, nextTrigger) {
@@ -491,6 +461,88 @@ function resolveMetaAdInbound({ baseDetected, leadData, isLidRemote, upsertType 
     return { isMetaAd: true, reason: `lid_${upsertType}_fallback` };
   }
   return { isMetaAd: false, reason: 'none' };
+}
+
+function cleanTextValue(value, max = 500) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.slice(0, max);
+}
+
+function buildMetaAttributionPatch(attribution = {}, {
+  trigger = '',
+  route = null,
+  inboundAt = now(),
+} = {}) {
+  const attr = {
+    source: cleanTextValue(attribution.source || 'click_to_whatsapp', 80),
+    indicator: cleanTextValue(attribution.indicator, 120),
+    path: cleanTextValue(attribution.path, 260),
+    sourceId: cleanTextValue(attribution.sourceId, 160),
+    adId: cleanTextValue(attribution.adId || attribution.sourceId, 160),
+    adSetId: cleanTextValue(attribution.adSetId || attribution.adsetId, 160),
+    campaignId: cleanTextValue(attribution.campaignId, 160),
+    campaignName: cleanTextValue(attribution.campaignName, 220),
+    adName: cleanTextValue(attribution.adName, 220),
+    sourceUrl: cleanTextValue(attribution.sourceUrl, 900),
+    headline: cleanTextValue(attribution.headline, 300),
+    body: cleanTextValue(attribution.body, 500),
+    mediaType: cleanTextValue(attribution.mediaType, 80),
+    thumbnailUrl: cleanTextValue(attribution.thumbnailUrl, 900),
+    ctwaClid: cleanTextValue(attribution.ctwaClid, 240),
+    smbClientCampaignId: cleanTextValue(attribution.smbClientCampaignId, 160),
+    smbServerCampaignId: cleanTextValue(attribution.smbServerCampaignId, 160),
+    entryPointConversionSource: cleanTextValue(attribution.entryPointConversionSource, 160),
+    entryPointConversionApp: cleanTextValue(attribution.entryPointConversionApp, 160),
+    trigger: cleanTextValue(trigger, 160),
+    routeId: cleanTextValue(route?.routeId, 160),
+    routeName: cleanTextValue(route?.routeName, 220),
+    routeSource: cleanTextValue(route?.source, 80),
+    matchScore: Number(route?.matchScore || 0) || 0,
+    capturedAt: inboundAt,
+  };
+
+  Object.keys(attr).forEach((key) => {
+    if (attr[key] === '' || attr[key] === null || attr[key] === undefined) delete attr[key];
+  });
+
+  const patch = {
+    metaAttribution: attr,
+    lastMetaAttribution: attr,
+    lastMetaSequenceTrigger: cleanTextValue(trigger, 160),
+    lastMetaRouteId: cleanTextValue(route?.routeId, 160),
+    lastMetaRouteSource: cleanTextValue(route?.source, 80),
+  };
+
+  if (attr.adId) patch.metaAdId = attr.adId;
+  if (attr.sourceId) patch.metaSourceId = attr.sourceId;
+  if (attr.adSetId) patch.metaAdSetId = attr.adSetId;
+  if (attr.campaignId) patch.metaCampaignId = attr.campaignId;
+  if (attr.campaignName) patch.metaCampaignName = attr.campaignName;
+  if (attr.ctwaClid) patch.metaCtwaClid = attr.ctwaClid;
+
+  Object.keys(patch).forEach((key) => {
+    if (patch[key] === '' || patch[key] === null || patch[key] === undefined) delete patch[key];
+  });
+
+  return patch;
+}
+
+async function resolveMetaTriggerForInbound({
+  attribution,
+  config,
+  fallbackTrigger,
+} = {}) {
+  const route = await resolveMetaAdSequenceRoute({
+    db,
+    attribution,
+    config,
+    fallbackTrigger,
+  });
+  return {
+    route,
+    trigger: route?.trigger || fallbackTrigger,
+  };
 }
 
 function resolveSenderFromLid(msg) {
@@ -1184,10 +1236,22 @@ export async function connectToWhatsApp() {
             );
           }
 
-          const adSignal = sender === 'lead' ? detectMetaAdSignal(msg) : { isFromMetaAd: false, indicator: null, path: null };
+          const metaAdAttribution = sender === 'lead'
+            ? extractMetaAdAttribution(msg)
+            : { isFromMetaAd: false, indicator: null, path: null, signals: [] };
+          const adSignal = sender === 'lead'
+            ? {
+                isFromMetaAd: metaAdAttribution.isFromMetaAd,
+                indicator: metaAdAttribution.indicator,
+                path: metaAdAttribution.path,
+              }
+            : { isFromMetaAd: false, indicator: null, path: null };
           const inboundFromMetaAd = sender === 'lead' && adSignal.isFromMetaAd;
           if (inboundFromMetaAd) {
-            console.log(`[WA] 🎯 Indicador Meta Ads detectado para ${leadId}: ${adSignal.indicator} (${adSignal.path})`);
+            console.log(
+              `[WA] 🎯 Indicador Meta Ads detectado para ${leadId}: ${adSignal.indicator} (${adSignal.path}) `
+              + `ad=${metaAdAttribution.adId || metaAdAttribution.sourceId || 'n/a'} campaign=${metaAdAttribution.campaignId || metaAdAttribution.campaignName || 'n/a'}`
+            );
           } else if (sender === 'lead' && isLidRemote) {
             const msgKeys = Object.keys(msg?.message || {});
             console.log(`[WA] ℹ️ @lid sin indicador Meta Ads para ${leadId}. keys=${msgKeys.join(',') || 'sin-keys'}`);
@@ -1215,8 +1279,17 @@ export async function connectToWhatsApp() {
               // Trigger interno para inbound de anuncio de Meta
               const cfgSnap = await db.collection('config').doc('appConfig').get();
               const cfg = cfgSnap.exists ? cfgSnap.data() : {};
-              const detectedTrigger = cfg.defaultTriggerMetaAds || WEBPROMO_TRIGGER;
               const inboundAt = now();
+              const fallbackMetaTrigger = cfg.defaultTriggerMetaAds || WEBPROMO_TRIGGER;
+              const metaTriggerResult = shouldTreatAsMetaAdInbound
+                ? await resolveMetaTriggerForInbound({
+                    attribution: metaAdAttribution,
+                    config: cfg,
+                    fallbackTrigger: fallbackMetaTrigger,
+                  })
+                : { trigger: fallbackMetaTrigger, route: null };
+              const detectedTrigger = metaTriggerResult.trigger || fallbackMetaTrigger;
+              const metaAdRoute = metaTriggerResult.route;
 
               const baseEtiquetas = [];
               if (shouldTreatAsMetaAdInbound) baseEtiquetas.push('MetaAds', detectedTrigger);
@@ -1238,9 +1311,14 @@ export async function connectToWhatsApp() {
                 source: shouldTreatAsMetaAdInbound ? 'meta_ads' : 'WhatsApp Business API',
                 ...(shouldTreatAsMetaAdInbound
                   ? {
-                      campaign: META_ADS_CAMPAIGN,
+                      campaign: metaAdAttribution.campaignId || metaAdAttribution.campaignName || META_ADS_CAMPAIGN,
                       lastInboundFromAd: true,
                       lastInboundAt: inboundAt,
+                      ...buildMetaAttributionPatch(metaAdAttribution, {
+                        trigger: detectedTrigger,
+                        route: metaAdRoute,
+                        inboundAt,
+                      }),
                     }
                   : {}),
                 lastMessageAt: inboundAt,
@@ -1508,7 +1586,12 @@ export async function connectToWhatsApp() {
             // En ese caso aseguramos alta del lead y programación automática del trigger de Meta.
             if (isLidRemote) {
               try {
-                const adSignalAny = detectMetaAdSignal(msg);
+                const metaAdAttributionAny = extractMetaAdAttribution(msg);
+                const adSignalAny = {
+                  isFromMetaAd: metaAdAttributionAny.isFromMetaAd,
+                  indicator: metaAdAttributionAny.indicator,
+                  path: metaAdAttributionAny.path,
+                };
                 const metaDecision = resolveMetaAdInbound({
                   baseDetected: adSignalAny.isFromMetaAd,
                   leadData: existingLeadData,
@@ -1519,7 +1602,14 @@ export async function connectToWhatsApp() {
                 if (metaDecision.isMetaAd) {
                   const cfgSnap = await db.collection('config').doc('appConfig').get();
                   const cfg = cfgSnap.exists ? cfgSnap.data() : {};
-                  const trigger = cfg.defaultTriggerMetaAds || WEBPROMO_TRIGGER;
+                  const fallbackMetaTrigger = cfg.defaultTriggerMetaAds || WEBPROMO_TRIGGER;
+                  const metaTriggerResult = await resolveMetaTriggerForInbound({
+                    attribution: metaAdAttributionAny,
+                    config: cfg,
+                    fallbackTrigger: fallbackMetaTrigger,
+                  });
+                  const trigger = metaTriggerResult.trigger || fallbackMetaTrigger;
+                  const metaAdRoute = metaTriggerResult.route;
                   const inboundAt = now();
 
                   const currentSnap = await leadRef.get();
@@ -1540,7 +1630,7 @@ export async function connectToWhatsApp() {
                       await leadRef.set(
                         {
                           source: 'meta_ads',
-                          campaign: META_ADS_CAMPAIGN,
+                          campaign: metaAdAttributionAny.campaignId || metaAdAttributionAny.campaignName || META_ADS_CAMPAIGN,
                           lastInboundFromAd: true,
                           lastInboundAt: inboundAt,
                           hasActiveSequences: true,
@@ -1548,10 +1638,18 @@ export async function connectToWhatsApp() {
                           etiquetas: FieldValue.arrayUnion(trigger, 'MetaAds'),
                           lastMetaAutoScheduledAt: inboundAt,
                           lastMetaSequenceAt: inboundAt,
+                          ...buildMetaAttributionPatch(metaAdAttributionAny, {
+                            trigger,
+                            route: metaAdRoute,
+                            inboundAt,
+                          }),
                         },
                         { merge: true }
                       );
-                      console.log(`[WA] 🛟 fromMe@lid fallback → secuencia '${trigger}' programada para ${leadId}`);
+                      console.log(
+                        `[WA] 🛟 fromMe@lid fallback → secuencia '${trigger}' programada para ${leadId}`
+                        + (metaAdRoute?.routeId ? ` route=${metaAdRoute.routeId}` : ' route=fallback')
+                      );
                     } else {
                       console.log(`[WA] ⏭️ fromMe@lid fallback sin programación para ${leadId}: schedule-omit`);
                     }
@@ -1579,6 +1677,7 @@ export async function connectToWhatsApp() {
           let trigger = rule.trigger;
           let triggerSource = rule.source;
           let toCancel = rule.cancel || [];
+          let metaAdRoute = null;
           const inboundAt = now();
           const metaAdDecision = resolveMetaAdInbound({
             baseDetected: inboundFromMetaAd,
@@ -1588,11 +1687,20 @@ export async function connectToWhatsApp() {
           });
           const shouldTreatAsMetaAdInbound = metaAdDecision.isMetaAd;
           if (shouldTreatAsMetaAdInbound) {
-            trigger = metaAdTrigger;
+            const metaTriggerResult = await resolveMetaTriggerForInbound({
+              attribution: metaAdAttribution,
+              config: cfg,
+              fallbackTrigger: metaAdTrigger,
+            });
+            trigger = metaTriggerResult.trigger || metaAdTrigger;
+            metaAdRoute = metaTriggerResult.route;
             triggerSource = 'meta_ad';
             toCancel = [];
             const metaReason = inboundFromMetaAd ? 'signal' : metaAdDecision.reason;
-            console.log(`[WA] 🎯 Inbound tratado como Meta Ads (${metaReason}): trigger interno '${trigger}' para ${leadId}`);
+            console.log(
+              `[WA] 🎯 Inbound tratado como Meta Ads (${metaReason}): trigger interno '${trigger}' para ${leadId}`
+              + (metaAdRoute?.routeId ? ` route=${metaAdRoute.routeId}` : ' route=fallback')
+            );
           }
 
           const etiquetaUnion = shouldTreatAsMetaAdInbound ? [trigger, 'MetaAds'] : [trigger];
@@ -1609,9 +1717,14 @@ export async function connectToWhatsApp() {
             source: shouldTreatAsMetaAdInbound ? 'meta_ads' : 'WhatsApp',
             ...(shouldTreatAsMetaAdInbound
               ? {
-                  campaign: META_ADS_CAMPAIGN,
+                  campaign: metaAdAttribution.campaignId || metaAdAttribution.campaignName || META_ADS_CAMPAIGN,
                   lastInboundFromAd: true,
                   lastInboundAt: inboundAt,
+                  ...buildMetaAttributionPatch(metaAdAttribution, {
+                    trigger,
+                    route: metaAdRoute,
+                    inboundAt,
+                  }),
                 }
               : {}),
           };
@@ -1664,9 +1777,14 @@ export async function connectToWhatsApp() {
             };
             if (shouldTreatAsMetaAdInbound) {
               updatePayload.source = 'meta_ads';
-              updatePayload.campaign = META_ADS_CAMPAIGN;
+              updatePayload.campaign = metaAdAttribution.campaignId || metaAdAttribution.campaignName || META_ADS_CAMPAIGN;
               updatePayload.lastInboundFromAd = true;
               updatePayload.lastInboundAt = inboundAt;
+              Object.assign(updatePayload, buildMetaAttributionPatch(metaAdAttribution, {
+                trigger,
+                route: metaAdRoute,
+                inboundAt,
+              }));
             }
             await leadRef.update(updatePayload);
 
@@ -1682,7 +1800,10 @@ export async function connectToWhatsApp() {
             const blockState = resolveSequenceBlockState(current, trigger, { isMetaAd: isMetaAutoTrigger });
             const blocked = blockState.blocked;
             const alreadyHas = hasSameTrigger(current.secuenciasActivas, trigger);
-            const isSchedulableSource = triggerSource === 'hashtag' || triggerSource === 'db' || isMetaAutoTrigger;
+            const isSchedulableSource = triggerSource === 'hashtag'
+              || triggerSource === 'db'
+              || triggerSource === 'text'
+              || isMetaAutoTrigger;
             const metaCooldownActive = isMetaAutoTrigger && hasRecentMetaAutoSchedule(current, inboundAt);
             if (blockState.overridden) {
               console.log(
@@ -1738,6 +1859,15 @@ export async function connectToWhatsApp() {
             mediaUrl,
             sender,
             timestamp: now(),
+            ...(shouldTreatAsMetaAdInbound
+              ? {
+                  metaAttribution: buildMetaAttributionPatch(metaAdAttribution, {
+                    trigger,
+                    route: metaAdRoute,
+                    inboundAt,
+                  }).metaAttribution,
+                }
+              : {}),
             ...replyContext,
           };
           await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
