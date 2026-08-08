@@ -1870,7 +1870,7 @@ export async function connectToWhatsApp() {
               : {}),
             ...replyContext,
           };
-          await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
+          const persistedMessageId = await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
 
           const upd = buildLeadLastMessagePatch(msgData, { incrementUnread: sender === 'lead' });
           await leadRef.update(upd);
@@ -1885,7 +1885,13 @@ export async function connectToWhatsApp() {
               nombre: existingLeadData?.nombre || msg.pushName || '',
               telefono: normNum,
             };
-            handleInboundLeadReply({ leadRef, leadId, leadData: leadDataForAi, latestText: content })
+            handleInboundLeadReply({
+              leadRef,
+              leadId,
+              leadData: leadDataForAi,
+              latestText: content,
+              inputMessageId: persistedMessageId,
+            })
               .then(async (result) => {
                 if (!result?.ok) return;
 

@@ -14,11 +14,18 @@
 import admin from 'firebase-admin';
 import { db } from '../firebaseAdmin.js';
 import { buildSampleFormLink, hasLeadCompletedForm } from './leadReactivationService.js';
+import {
+  analyzeConversation,
+  buildAcquisitionContext,
+  runSalesBrainForInbound,
+  resolveSalesBrainMode,
+} from './salesBrain/index.js';
+import { SALES_BRAIN_MODES } from './salesBrain/catalog.js';
 
 const { FieldValue } = admin.firestore;
 
 const AUTO_FORM_DISABLED = String(process.env.AUTO_FORM_LINK || '').trim().toLowerCase() === 'off';
-const POSITIVE_INTENTS = new Set(['wants_examples', 'wants_price', 'ready_to_buy', 'question']);
+const POSITIVE_INTENTS = new Set(['wants_information', 'wants_examples', 'wants_price', 'ready_to_buy', 'asks_how_to_start', 'question']);
 
 function leadAlreadyGotFormLink(lead = {}) {
   const tags = Array.isArray(lead?.etiquetas) ? lead.etiquetas.map((t) => normalizeForMatch(t)) : [];
@@ -77,9 +84,11 @@ function firstName(value = '') {
 
 const VALID_INTEREST = new Set(['hot', 'warm', 'cold', 'lost']);
 const VALID_INTENT = new Set([
+  'wants_information',
   'wants_price',
   'wants_examples',
   'ready_to_buy',
+  'asks_how_to_start',
   'needs_time',
   'not_now',
   'no_interest',
@@ -256,16 +265,38 @@ export async function classifyLeadReply({ lead = {}, recentMessages = [], latest
   const fallback = keywordClassify(text);
   fallback.automated = keywordAuto;
 
-  const ai = await aiClassify({ lead, recentMessages, latestText: text });
-  if (!ai) return fallback;
+  const analysis = await analyzeConversation({
+    lead,
+    recentMessages,
+    latestText: text,
+    acquisitionContext: buildAcquisitionContext(lead),
+  });
+  if (!analysis) return fallback;
 
-  const automated = ai.automated === true || keywordAuto;
+  const automated = analysis.automated === true || keywordAuto;
+  const classification = {
+    hot: Boolean(analysis.hot),
+    interestLevel: VALID_INTEREST.has(analysis.interestLevel) ? analysis.interestLevel : fallback.interestLevel,
+    intent: VALID_INTENT.has(analysis.intent) ? analysis.intent : fallback.intent,
+    automated,
+    summary: cleanText(analysis.summary || fallback.summary || '', 240),
+    suggestedReply: '',
+    source: analysis.source || 'keyword',
+    model: analysis.model || (analysis.source === 'ai' ? AI_MODEL : 'keyword'),
+    salesBrainAnalysis: analysis,
+  };
 
-  // La IA manda, pero si el fallback detecto un STOP explicito lo respetamos.
-  if (fallback.interestLevel === 'lost' && ai.interestLevel !== 'lost') {
-    return { ...ai, automated, interestLevel: 'lost', intent: 'no_interest', hot: false };
+  // Si keywords detectaron STOP explicito, se respeta sobre cualquier lectura IA.
+  if (fallback.interestLevel === 'lost' && classification.interestLevel !== 'lost') {
+    return {
+      ...classification,
+      interestLevel: 'lost',
+      intent: 'no_interest',
+      hot: false,
+    };
   }
-  return { ...ai, automated };
+
+  return classification;
 }
 
 // ----------------------------- Lectura de mensajes recientes -----------------------------
@@ -292,9 +323,11 @@ async function loadRecentMessages(leadRef, limit = 12) {
 
 function intentLabel(intent = '') {
   const map = {
+    wants_information: 'pide informacion',
     wants_price: 'pide precio',
     wants_examples: 'pide ejemplos/info',
     ready_to_buy: 'listo para avanzar',
+    asks_how_to_start: 'pregunta como empezar',
     needs_time: 'pide tiempo',
     not_now: 'ahora no',
     no_interest: 'sin interes',
@@ -413,7 +446,13 @@ async function createAutoResponderTask({ leadId, lead, sample }) {
  * Procesa la respuesta de un lead. Nunca lanza.
  * @returns {Promise<object>} resultado de la clasificacion y acciones.
  */
-export async function handleInboundLeadReply({ leadRef, leadId, leadData = {}, latestText = '' } = {}) {
+export async function handleInboundLeadReply({
+  leadRef,
+  leadId,
+  leadData = {},
+  latestText = '',
+  inputMessageId = '',
+} = {}) {
   try {
     const text = cleanText(latestText, 1000);
     if (!text || !leadId) {
@@ -422,6 +461,7 @@ export async function handleInboundLeadReply({ leadRef, leadId, leadData = {}, l
     const ref = leadRef || db.collection('leads').doc(String(leadId));
     const recentMessages = await loadRecentMessages(ref, 12);
     const classification = await classifyLeadReply({ lead: leadData, recentMessages, latestText: text });
+    const salesBrainMode = resolveSalesBrainMode(leadData);
 
     const isAutomated = classification.automated === true;
 
@@ -434,7 +474,7 @@ export async function handleInboundLeadReply({ leadRef, leadId, leadData = {}, l
         summary: classification.summary || '',
         suggestedReply: classification.suggestedReply || '',
         source: classification.source,
-        model: classification.source === 'ai' ? AI_MODEL : 'keyword',
+        model: classification.model || (classification.source === 'ai' ? AI_MODEL : 'keyword'),
         lastText: cleanText(text, 400),
         classifiedAt: FieldValue.serverTimestamp(),
       },
@@ -462,9 +502,24 @@ export async function handleInboundLeadReply({ leadRef, leadId, leadData = {}, l
 
     // A: ¿conviene mandar el formulario de muestra automaticamente?
     // (No para bots; el envio real y el tag los hace whatsappService.)
-    const autoFormLink = isAutomated ? null : decideAutoFormLink(leadData, classification);
+    const autoFormLink = isAutomated || salesBrainMode === SALES_BRAIN_MODES.COPILOT
+      ? null
+      : decideAutoFormLink(leadData, classification);
 
     await ref.set(leadPatch, { merge: true });
+
+    let salesBrain = { ok: true, skipped: true, reason: 'mode_off' };
+    if (salesBrainMode === SALES_BRAIN_MODES.COPILOT) {
+      salesBrain = await runSalesBrainForInbound({
+        leadRef: ref,
+        leadId,
+        leadData,
+        latestText: text,
+        inputMessageId,
+        recentMessages,
+        analysis: classification.salesBrainAnalysis,
+      });
+    }
 
     return {
       ok: true,
@@ -473,6 +528,7 @@ export async function handleInboundLeadReply({ leadRef, leadId, leadData = {}, l
       taskCreated: taskResult.created === true,
       autoResponderTaskCreated: autoTaskResult.created === true,
       autoFormLink,
+      salesBrain,
     };
   } catch (error) {
     console.warn('[hot-lead] handleInboundLeadReply error:', error?.message || error);

@@ -130,6 +130,10 @@ import {
   updateLeadReactivationSettings,
 } from './services/leadReactivationService.js';
 import { classifyLeadReply } from './services/hotLeadDetector.js';
+import {
+  expireCurrentSuggestion,
+  recordSellerFeedback,
+} from './services/salesBrain/index.js';
 import { listFollowupActions, buildFollowupMessage } from './services/followupActions.js';
 import { generateBiReport } from './services/biReport.js';
 
@@ -2996,6 +3000,31 @@ app.post('/api/admin/hot-lead/classify', async (req, res) => {
   }
 });
 
+app.post('/api/admin/sales-brain/feedback', async (req, res) => {
+  const {
+    leadId = '',
+    eventId = '',
+    decision = '',
+    finalReply = '',
+    suggestedReply = '',
+  } = req.body || {};
+
+  try {
+    const result = await recordSellerFeedback({
+      leadId: String(leadId || '').trim(),
+      eventId: String(eventId || '').trim(),
+      decision: String(decision || '').trim(),
+      finalReply: String(finalReply || ''),
+      suggestedReply: String(suggestedReply || ''),
+      actor: String(req.headers['x-user-email'] || req.headers['x-user-id'] || 'crm'),
+    });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('[admin/sales-brain/feedback] Error:', error);
+    return res.status(400).json({ error: error.message || String(error) });
+  }
+});
+
 app.post('/api/admin/lead-reactivation/always-on', async (req, res) => {
   const {
     commit = false,
@@ -4678,6 +4707,9 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
     replyToWaMessageId = '',
     replyPreview = '',
     replySender = '',
+    salesBrainEventId = '',
+    salesBrainDecision = '',
+    salesBrainSuggestedReply = '',
   } = req.body || {};
   if (!leadId || !message)
     return res.status(400).json({ error: 'Faltan leadId o message' });
@@ -4700,6 +4732,27 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
       replyPreview,
       replySender,
     });
+    const safeSalesBrainEventId = String(salesBrainEventId || '').trim();
+    const safeSalesBrainDecision = String(salesBrainDecision || '').trim();
+    if (safeSalesBrainEventId && ['accepted', 'edited'].includes(safeSalesBrainDecision)) {
+      await recordSellerFeedback({
+        leadId,
+        eventId: safeSalesBrainEventId,
+        decision: safeSalesBrainDecision,
+        finalReply: String(message || ''),
+        suggestedReply: String(salesBrainSuggestedReply || ''),
+        actor: String(req.headers['x-user-email'] || req.headers['x-user-id'] || 'crm'),
+      }).catch((feedbackErr) => {
+        console.warn('[SalesBrain] feedback:send_message_error', feedbackErr?.message || feedbackErr);
+      });
+    } else {
+      await expireCurrentSuggestion({
+        leadId,
+        reason: 'manual_reply',
+      }).catch((expireErr) => {
+        console.warn('[SalesBrain] suggestion:expire_manual_error', expireErr?.message || expireErr);
+      });
+    }
     return res.json(result);
   } catch (error) {
     console.error('Error enviando WhatsApp:', error);
