@@ -26,6 +26,16 @@ test('resuelve PlanRedes desde hashtag normalizado', () => {
   assert.equal(result.source, 'hashtag');
 });
 
+test('resuelve PlanRedes desde texto directo de redes sociales', () => {
+  const result = resolveStaticTriggerFromMessage(
+    'Hola, quiero info de redes sociales',
+    'NuevoLeadWeb'
+  );
+
+  assert.equal(result.trigger, 'PlanRedes');
+  assert.equal(result.source, 'text');
+});
+
 test('conserva el default cuando no hay hashtag ni frase conocida', () => {
   const result = resolveStaticTriggerFromMessage('Hola, quiero informacion', 'NuevoLeadWeb');
 
@@ -36,4 +46,3 @@ test('conserva el default cuando no hay hashtag ni frase conocida', () => {
 test('extrae hashtags sin duplicar y en minusculas', () => {
   assert.deepEqual(extractHashtags('#PlanRedes990 texto #planredes990'), ['#planredes990']);
 });
-

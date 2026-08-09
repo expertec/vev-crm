@@ -24,12 +24,52 @@ import { SALES_BRAIN_MODES } from './salesBrain/catalog.js';
 
 const { FieldValue } = admin.firestore;
 
-const AUTO_FORM_DISABLED = String(process.env.AUTO_FORM_LINK || '').trim().toLowerCase() === 'off';
+const AUTO_FORM_LINK_MODE = String(process.env.AUTO_FORM_LINK || '').trim().toLowerCase();
+const AUTO_FORM_ENABLED = ['1', 'true', 'yes', 'on'].includes(AUTO_FORM_LINK_MODE);
+const AUTO_FORM_RESERVATION_TTL_MS = Math.max(
+  60_000,
+  Number(process.env.AUTO_FORM_RESERVATION_TTL_MS || 6 * 60 * 60 * 1000)
+);
+const AUTO_FORM_RECENT_OUTBOUND_MS = Math.max(
+  60_000,
+  Number(process.env.AUTO_FORM_RECENT_OUTBOUND_MS || 30 * 60 * 1000)
+);
 const POSITIVE_INTENTS = new Set(['wants_information', 'wants_examples', 'wants_price', 'ready_to_buy', 'asks_how_to_start', 'question']);
 
 function leadAlreadyGotFormLink(lead = {}) {
   const tags = Array.isArray(lead?.etiquetas) ? lead.etiquetas.map((t) => normalizeForMatch(t)) : [];
   return tags.includes('formlinksent') || Boolean(lead?.formLinkSentAt);
+}
+
+function toMillis(value) {
+  if (!value) return 0;
+  if (value instanceof Date) return value.getTime() || 0;
+  if (typeof value?.toMillis === 'function') return value.toMillis() || 0;
+  if (typeof value?.toDate === 'function') return value.toDate()?.getTime?.() || 0;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function hasActiveSequences(lead = {}) {
+  if (lead?.hasActiveSequences === true) return true;
+  return Array.isArray(lead?.secuenciasActivas)
+    && lead.secuenciasActivas.some((item) => item?.completed !== true);
+}
+
+function hasRecentHumanOrAutomationTouch(lead = {}, refMs = Date.now()) {
+  const lastOutboundMs = Math.max(
+    toMillis(lead?.lastOutboundAt),
+    toMillis(lead?.formLinkSentAt),
+    toMillis(lead?.autoFormLinkReservedAt)
+  );
+  return lastOutboundMs > 0 && (refMs - lastOutboundMs) < AUTO_FORM_RECENT_OUTBOUND_MS;
+}
+
+function hasFreshAutoFormReservation(lead = {}, refMs = Date.now()) {
+  const reservedMs = toMillis(lead?.autoFormLinkReservedAt);
+  if (!reservedMs) return false;
+  if (lead?.autoFormLinkStatus === 'failed') return false;
+  return (refMs - reservedMs) < AUTO_FORM_RESERVATION_TTL_MS;
 }
 
 function buildFormLinkMessage(lead = {}, url = '') {
@@ -40,7 +80,7 @@ function buildFormLinkMessage(lead = {}, url = '') {
 
 // Decide si conviene mandar el formulario de muestra automaticamente.
 function decideAutoFormLink(lead = {}, classification = {}) {
-  if (AUTO_FORM_DISABLED) return null;
+  if (!AUTO_FORM_ENABLED) return null;
   if (classification.automated === true) return null;
   if (classification.interestLevel === 'lost' || classification.intent === 'no_interest') return null;
 
@@ -51,11 +91,41 @@ function decideAutoFormLink(lead = {}, classification = {}) {
 
   if (hasLeadCompletedForm(lead)) return null;
   if (leadAlreadyGotFormLink(lead)) return null;
+  if (hasActiveSequences(lead)) return null;
+  if (hasRecentHumanOrAutomationTouch(lead)) return null;
+  if (hasFreshAutoFormReservation(lead)) return null;
 
   const url = buildSampleFormLink(lead);
   if (!url) return null;
 
   return { url, message: buildFormLinkMessage(lead, url) };
+}
+
+async function reserveAutoFormLink({ leadRef, leadId, leadData = {}, classification = {} } = {}) {
+  const candidate = decideAutoFormLink(leadData, classification);
+  if (!candidate || !leadRef) return null;
+
+  const reserved = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(leadRef);
+    if (!snap.exists) return null;
+    const current = { id: snap.id, ...(snap.data() || {}) };
+    const freshCandidate = decideAutoFormLink(current, classification);
+    if (!freshCandidate) return null;
+
+    tx.set(leadRef, {
+      autoFormLinkReservedAt: FieldValue.serverTimestamp(),
+      autoFormLinkStatus: 'reserved',
+      autoFormLinkUrl: freshCandidate.url,
+      autoFormLinkSourceMessageId: String(classification?.inputMessageId || ''),
+    }, { merge: true });
+
+    return freshCandidate;
+  });
+
+  if (reserved) {
+    console.log(`[auto-form-link] reservado para ${leadId}`);
+  }
+  return reserved;
 }
 
 const HOT_TAG = 'RespuestaCaliente';
@@ -65,6 +135,12 @@ const AUTO_TASK_SOURCE = 'ai_auto_responder';
 const TASK_DEDUPE_HOURS = Math.max(1, Number(process.env.HOT_LEAD_TASK_DEDUPE_HOURS || 12));
 const AI_MODEL = String(process.env.HOT_LEAD_AI_MODEL || 'gpt-4o-mini').trim() || 'gpt-4o-mini';
 const AI_DISABLED = String(process.env.HOT_LEAD_AI || '').trim().toLowerCase() === 'off';
+const HOT_LEAD_AI_ENABLED = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.HOT_LEAD_AI || process.env.SALES_BRAIN_AI || '').trim().toLowerCase()
+);
+const HOT_LEAD_TASKS_ENABLED = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.HOT_LEAD_TASKS || process.env.HOT_LEAD_CREATE_TASKS || '').trim().toLowerCase()
+);
 
 function cleanText(value = '', max = 600) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -264,6 +340,8 @@ export async function classifyLeadReply({ lead = {}, recentMessages = [], latest
 
   const fallback = keywordClassify(text);
   fallback.automated = keywordAuto;
+
+  if (!HOT_LEAD_AI_ENABLED) return fallback;
 
   const analysis = await analyzeConversation({
     lead,
@@ -483,7 +561,7 @@ export async function handleInboundLeadReply({
     let taskResult = { created: false };
     let autoTaskResult = { created: false };
 
-    if (isAutomated) {
+    if (HOT_LEAD_TASKS_ENABLED && isAutomated) {
       // El que contesta es un bot/IA: NO es cliente real, NO marcar caliente.
       // Avisar al usuario para que contacte por otro canal.
       leadPatch.etiquetas = FieldValue.arrayUnion(AUTO_TAG);
@@ -493,20 +571,26 @@ export async function handleInboundLeadReply({
         lastDetectedAt: FieldValue.serverTimestamp(),
       };
       autoTaskResult = await createAutoResponderTask({ leadId, lead: leadData, sample: text });
-    } else if (classification.hot) {
+    } else if (HOT_LEAD_TASKS_ENABLED && classification.hot) {
       leadPatch.etiquetas = FieldValue.arrayUnion(HOT_TAG);
       // Pausar SOLO el agente de reactivacion 24/7 para no pisar el cierre humano.
       leadPatch['aiFollowup.paused'] = true;
       taskResult = await createHotLeadTask({ leadId, lead: leadData, classification });
     }
 
-    // A: ¿conviene mandar el formulario de muestra automaticamente?
-    // (No para bots; el envio real y el tag los hace whatsappService.)
-    const autoFormLink = isAutomated || salesBrainMode === SALES_BRAIN_MODES.COPILOT
-      ? null
-      : decideAutoFormLink(leadData, classification);
-
     await ref.set(leadPatch, { merge: true });
+
+    // A: ¿conviene mandar el formulario de muestra automaticamente?
+    // Se reserva contra el lead fresco para evitar duplicados con mensajes simultaneos.
+    let autoFormLink = null;
+    if (!isAutomated && salesBrainMode !== SALES_BRAIN_MODES.COPILOT) {
+      autoFormLink = await reserveAutoFormLink({
+        leadRef: ref,
+        leadId,
+        leadData,
+        classification: { ...classification, inputMessageId },
+      });
+    }
 
     let salesBrain = { ok: true, skipped: true, reason: 'mode_off' };
     if (salesBrainMode === SALES_BRAIN_MODES.COPILOT) {

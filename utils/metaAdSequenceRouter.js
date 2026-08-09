@@ -98,6 +98,38 @@ function hasIncludes(needles = [], haystack = '') {
   return needles.some((needle) => needle && text.includes(needle));
 }
 
+const INFERRED_META_ROUTES = [
+  {
+    trigger: 'PlanRedes',
+    needles: [
+      'redes sociales',
+      'plan de redes',
+      'manejo de redes',
+      'social media',
+      'contenido para redes',
+      'publicaciones para redes',
+    ],
+  },
+];
+
+function inferTriggerFromAttribution(attribution = {}) {
+  const text = lower([
+    attribution.headline,
+    attribution.body,
+    attribution.campaignName,
+    attribution.sourceUrl,
+    attribution.adName,
+  ].filter(Boolean).join(' '));
+
+  if (!text) return '';
+
+  const route = INFERRED_META_ROUTES.find((item) => (
+    item.needles.some((needle) => text.includes(lower(needle)))
+  ));
+
+  return route?.trigger || '';
+}
+
 function scoreRule(rule, attribution = {}) {
   if (!rule.active || !rule.trigger) return 0;
 
@@ -144,6 +176,17 @@ export function resolveMetaAdRouteFromRules({
       routeId: rule.id || '',
       routeName: rule.name || '',
       matchScore: score,
+    };
+  }
+
+  const inferredTrigger = inferTriggerFromAttribution(attribution);
+  if (inferredTrigger) {
+    return {
+      trigger: inferredTrigger,
+      source: 'meta_ad_inferred',
+      routeId: `inferred:${inferredTrigger}`,
+      routeName: 'Inferido por metadata de anuncio',
+      matchScore: 60,
     };
   }
 

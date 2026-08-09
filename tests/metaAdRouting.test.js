@@ -85,3 +85,18 @@ test('usa fallback cuando no hay regla compatible', () => {
   assert.equal(result.routeId, '');
 });
 
+test('infiere PlanRedes desde metadata del anuncio cuando el mensaje es generico', () => {
+  const result = resolveMetaAdRouteFromRules({
+    attribution: {
+      headline: 'Redes sociales para tu negocio',
+      body: 'Manejo de redes sociales para vender mas',
+      campaignName: 'Plan redes agosto',
+    },
+    fallbackTrigger: 'LeadWhatsapp',
+    rules: [],
+  });
+
+  assert.equal(result.trigger, 'PlanRedes');
+  assert.equal(result.source, 'meta_ad_inferred');
+  assert.equal(result.routeId, 'inferred:PlanRedes');
+});

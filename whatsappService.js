@@ -1919,17 +1919,28 @@ export async function connectToWhatsApp() {
                 if (result.autoFormLink?.message) {
                   try {
                     await sendMessageToLead(leadId, result.autoFormLink.message, {});
+                    const sentAt = now();
                     await leadRef.set(
                       {
-                        formLinkSentAt: now(),
+                        formLinkSentAt: sentAt,
                         formLinkSentUrl: String(result.autoFormLink.url || ''),
                         autoFormLinkSent: true,
+                        autoFormLinkStatus: 'sent',
+                        autoFormLinkSentAt: sentAt,
+                        lastOutboundAt: sentAt,
                         etiquetas: FieldValue.arrayUnion('FormLinkSent'),
                       },
                       { merge: true }
                     ).catch(() => {});
                     console.log(`[auto-form-link] enviado a ${leadId}`);
                   } catch (err) {
+                    await leadRef.set(
+                      {
+                        autoFormLinkStatus: 'failed',
+                        autoFormLinkLastError: String(err?.message || err).slice(0, 240),
+                      },
+                      { merge: true }
+                    ).catch(() => {});
                     console.warn('[auto-form-link] no se pudo enviar:', err?.message || err);
                   }
                 }

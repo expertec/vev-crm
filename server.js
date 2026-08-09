@@ -4770,6 +4770,87 @@ app.get('/api/whatsapp/followup-actions', (_req, res) => {
   }
 });
 
+function compactLeadForCopyPrompt(lead = {}) {
+  return {
+    nombre: String(lead.nombre || lead.name || '').trim().slice(0, 120),
+    telefono: String(lead.telefono || lead.phone || '').trim().slice(0, 40),
+    estado: String(lead.estado || lead.status || '').trim().slice(0, 80),
+    etapa: String(lead.stageName || lead.funnelStageName || lead.etapa || '').trim().slice(0, 80),
+    ultimoMensaje: String(
+      lead.lastMessage ||
+      lead.lastMessageText ||
+      lead.ultimoMensaje ||
+      ''
+    ).trim().slice(0, 500),
+    plan: String(lead.plan || lead.planNombre || '').trim().slice(0, 80),
+    negocio: String(
+      lead.negocioNombre ||
+      lead.businessName ||
+      lead.negocio?.nombre ||
+      ''
+    ).trim().slice(0, 120),
+  };
+}
+
+async function rewriteFollowupMessageWithAi({
+  lead = {},
+  actionKey = '',
+  actionLabel = '',
+  currentMessage = '',
+} = {}) {
+  const safeCurrentMessage = String(currentMessage || '').trim();
+  if (!safeCurrentMessage) {
+    throw new Error('No hay mensaje base para regenerar.');
+  }
+
+  const leadContext = compactLeadForCopyPrompt(lead);
+  const messages = [
+    {
+      role: 'system',
+      content: [
+        'Actua como copywriter senior de WhatsApp para ventas consultivas B2B/B2C.',
+        'Usa principios actuales de neuromarketing, chatmarketing y conversion conversacional: claridad, relevancia, microcompromiso, especificidad, friccion baja, prueba implicita, urgencia honesta y tono humano.',
+        'No uses hype, promesas exageradas, lenguaje corporativo, signos excesivos ni emojis si no aportan.',
+        'Escribe en espanol latino, natural para WhatsApp, con maximo 420 caracteres.',
+        'Debe sentirse como un vendedor profesional que conoce el contexto, no como IA.',
+        'Conserva links, telefonos, CLABE, montos, referencias de pago y datos criticos exactamente si aparecen en el mensaje base.',
+        'Devuelve solo el mensaje final, sin explicaciones ni comillas.',
+      ].join(' '),
+    },
+    {
+      role: 'user',
+      content: JSON.stringify({
+        objetivo: 'Regenera esta respuesta rapida para aumentar probabilidad de respuesta y avance comercial.',
+        actionKey,
+        actionLabel,
+        contextoLead: leadContext,
+        mensajeBase: safeCurrentMessage,
+        criterios: [
+          'Abrir con nombre si existe.',
+          'Ser directo y conversacional.',
+          'Cerrar con una pregunta o siguiente paso facil.',
+          'Evitar sonar insistente o generico.',
+          'Mantener datos sensibles intactos.',
+        ],
+      }),
+    },
+  ];
+
+  const model = process.env.OPENAI_COPY_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  const rewritten = await chatCompletionCompat({
+    model,
+    messages,
+    max_tokens: 180,
+    temperature: 0.72,
+  });
+
+  const finalMessage = String(rewritten || '').trim();
+  if (!finalMessage) {
+    throw new Error('La IA no devolvio una respuesta util.');
+  }
+  return finalMessage;
+}
+
 function normalizePaymentCatalogPrice(item = {}) {
   const centsValue =
     item.priceCents
@@ -4934,6 +5015,44 @@ app.get('/api/whatsapp/payment-catalog', async (req, res) => {
   } catch (error) {
     console.error('[payment-catalog] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/whatsapp/followup-actions/rewrite', async (req, res) => {
+  const {
+    leadId = '',
+    actionKey = '',
+    actionLabel = '',
+    message = '',
+  } = req.body || {};
+  const safeLeadId = String(leadId || '').trim();
+  const safeActionKey = String(actionKey || '').trim();
+  const safeMessage = String(message || '').trim();
+
+  if (!safeLeadId || !safeActionKey || !safeMessage) {
+    return res.status(400).json({ error: 'Faltan leadId, actionKey o message.' });
+  }
+
+  try {
+    const leadDoc = await db.collection('leads').doc(safeLeadId).get();
+    const leadData = leadDoc.exists
+      ? { id: leadDoc.id, ...(leadDoc.data() || {}) }
+      : { id: safeLeadId };
+    const rewritten = await rewriteFollowupMessageWithAi({
+      lead: leadData,
+      actionKey: safeActionKey,
+      actionLabel,
+      currentMessage: safeMessage,
+    });
+
+    return res.json({
+      success: true,
+      actionKey: safeActionKey,
+      message: rewritten,
+    });
+  } catch (error) {
+    console.error('[followup-actions/rewrite] Error:', error);
+    return res.status(500).json({ error: error.message || 'No se pudo regenerar la respuesta con IA.' });
   }
 });
 

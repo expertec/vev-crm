@@ -17,6 +17,9 @@ const STATIC_TEXT_TRIGGER_RULES = [
     includes: [
       'plan de redes sociales',
       'redes sociales para tu negocio',
+      'info de redes sociales',
+      'informacion de redes sociales',
+      'información de redes sociales',
       'info del plan de redes',
       'manejo de redes sociales',
       'servicio de redes sociales',
