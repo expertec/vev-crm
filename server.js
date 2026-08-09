@@ -135,7 +135,11 @@ import {
   recordSellerFeedback,
 } from './services/salesBrain/index.js';
 import { listFollowupActions, buildFollowupMessage } from './services/followupActions.js';
-import { exportWonConversationHistory, generateBiReport } from './services/biReport.js';
+import {
+  exportWonConversationHistory,
+  generateBiReport,
+  generateConversationConversionDataset,
+} from './services/biReport.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
@@ -2970,6 +2974,23 @@ app.get('/api/admin/bi-report/won-conversations', async (req, res) => {
     return res.json({ success: true, data, markdown });
   } catch (error) {
     console.error('[admin/bi-report/won-conversations] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// Dataset crudo para analizar patrones que predicen compra.
+// Devuelve conversations.json + leads.csv en una sola respuesta JSON.
+app.get('/api/admin/bi-report/conversation-dataset', async (req, res) => {
+  try {
+    const { data, leadsCsv } = await generateConversationConversionDataset({
+      nonBuyersPerBuyer: Number(req.query?.nonBuyersPerBuyer || 4),
+      minNonBuyerAgeDays: Number(req.query?.minNonBuyerAgeDays || 30),
+      maxBuyers: Number(req.query?.maxBuyers || 0),
+      maxNonBuyers: Number(req.query?.maxNonBuyers || 220),
+    });
+    return res.json({ success: true, data, leadsCsv });
+  } catch (error) {
+    console.error('[admin/bi-report/conversation-dataset] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
