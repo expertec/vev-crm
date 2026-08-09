@@ -136,6 +136,27 @@ function buildMessagePreview(msgData = {}) {
   return 'Mensaje';
 }
 
+function hasVisibleMessageContent(msgData = {}) {
+  const content = String(msgData?.content || '').trim();
+  if (content) return true;
+
+  const mediaUrl = String(msgData?.mediaUrl || '').trim();
+  if (mediaUrl) return true;
+
+  const mediaType = String(msgData?.mediaType || '').toLowerCase();
+  return [
+    'audio',
+    'audio_ptt',
+    'ptt',
+    'image',
+    'video',
+    'video_note',
+    'ptv',
+    'document',
+    'pdf',
+  ].includes(mediaType);
+}
+
 function buildLeadLastMessagePatch(msgData = {}, { incrementUnread = false } = {}) {
   const preview = buildMessagePreview(msgData);
   const rawType = String(msgData?.mediaType || '').toLowerCase();
@@ -1472,17 +1493,29 @@ export async function connectToWhatsApp() {
           }
 
           const replyContext = extractReplyContextFromIncomingMessage(inner);
+          const parsedMsgData = {
+            content,
+            mediaType,
+            mediaUrl,
+            ...replyContext,
+          };
+          if (!hasVisibleMessageContent(parsedMsgData)) {
+            console.log('[WA] ⏭️ Mensaje sin contenido visible omitido →', leadId, {
+              sender,
+              mediaType,
+              id: msg?.key?.id || 'N/A',
+              keys: Object.keys(inner || {}).join(',') || 'sin-keys',
+            });
+            continue;
+          }
 
           // Mensajes propios (fromMe)
           if (sender === 'business') {
             const tsNow = now();
             const msgData = {
-              content,
-              mediaType,
-              mediaUrl,
+              ...parsedMsgData,
               sender,
               timestamp: tsNow,
-              ...replyContext,
             };
 
             await leadRef.set({
@@ -1854,9 +1887,7 @@ export async function connectToWhatsApp() {
 
           // Guardar mensaje
           const msgData = {
-            content,
-            mediaType,
-            mediaUrl,
+            ...parsedMsgData,
             sender,
             timestamp: now(),
             ...(shouldTreatAsMetaAdInbound
@@ -1868,7 +1899,6 @@ export async function connectToWhatsApp() {
                   }).metaAttribution,
                 }
               : {}),
-            ...replyContext,
           };
           const persistedMessageId = await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
 
