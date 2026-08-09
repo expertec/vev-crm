@@ -93,10 +93,199 @@ function monthKey(ms) {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
+function isArchivedLead(lead = {}) {
+  return lead?.isArchived === true || lead?.archived === true || Boolean(lead?.archivedAt);
+}
+
+function isWonLead(lead = {}, tags = tagSet(lead)) {
+  const status = lower(lead?.estado);
+  return WON_STATUSES.has(status) || tags.has('compro');
+}
+
+function formatDateTime(ms) {
+  if (!ms) return '(sin fecha)';
+  return new Date(ms).toLocaleString('es-MX');
+}
+
+function leadName(lead = {}) {
+  return (
+    safeStr(lead?.nombre)
+    || safeStr(lead?.name)
+    || safeStr(lead?.cliente)
+    || safeStr(lead?.empresa)
+    || safeStr(lead?.businessName)
+    || safeStr(lead?.telefono)
+    || safeStr(lead?.id)
+    || 'Cliente sin nombre'
+  );
+}
+
+function messageSenderLabel(message = {}) {
+  const sender = lower(message?.sender || message?.from || message?.role);
+  if (sender === 'lead' || sender === 'customer' || sender === 'cliente' || sender === 'client') return 'Cliente';
+  if (sender === 'business' || sender === 'owner' || sender === 'agent' || sender === 'user' || sender === 'seller') return 'Negocio';
+  if (sender === 'system' || sender === 'bot') return 'Sistema';
+  if (message?.fromMe === true) return 'Negocio';
+  if (message?.fromMe === false) return 'Cliente';
+  return sender || 'Mensaje';
+}
+
+function messageBody(message = {}) {
+  const content = safeStr(message?.content || message?.text || message?.body || message?.message);
+  const mediaType = safeStr(message?.mediaType || message?.type);
+  const mediaUrl = safeStr(message?.mediaUrl || message?.url);
+
+  const parts = [];
+  if (content) parts.push(content);
+  if (mediaType || mediaUrl) {
+    const mediaLabel = mediaType ? `media: ${mediaType}` : 'media';
+    parts.push(mediaUrl ? `[${mediaLabel}: ${mediaUrl}]` : `[${mediaLabel}]`);
+  }
+  return parts.join('\n').trim();
+}
+
+function renderIndentedMessage(text = '') {
+  return String(text || '')
+    .split('\n')
+    .map((line, index) => (index === 0 ? line : `  ${line}`))
+    .join('\n');
+}
+
 async function getDb(dbOverride) {
   if (dbOverride) return dbOverride;
   const { db } = await import('../firebaseAdmin.js');
   return db;
+}
+
+export async function exportWonConversationHistory({
+  dbOverride = null,
+  now = new Date(),
+  maxLeads = 1000,
+} = {}) {
+  const db = await getDb(dbOverride);
+  const nowMs = now.getTime();
+  const leadLimit = Number.isFinite(Number(maxLeads)) ? Math.max(0, Math.floor(Number(maxLeads))) : 1000;
+  const leadsSnap = await db.collection('leads').get();
+  const wonLeads = [];
+
+  leadsSnap.forEach((doc) => {
+    const lead = { id: doc.id, ...(doc.data() || {}) };
+    if (lead?.mergedInto || isArchivedLead(lead)) return;
+
+    const tags = tagSet(lead);
+    if (!isWonLead(lead, tags)) return;
+
+    const lastActivityMs = Math.max(
+      toMillis(lead?.lastMessageAt),
+      toMillis(lead?.lastInboundAt),
+      toMillis(lead?.lastOutboundAt),
+      toMillis(lead?.fecha_creacion)
+    );
+
+    wonLeads.push({
+      ...lead,
+      _tags: [...tags],
+      _lastActivityMs: lastActivityMs,
+      _createdMs: toMillis(lead?.fecha_creacion),
+    });
+  });
+
+  wonLeads.sort((a, b) => b._lastActivityMs - a._lastActivityMs);
+  const selectedLeads = leadLimit > 0 ? wonLeads.slice(0, leadLimit) : wonLeads;
+
+  const conversations = [];
+  for (const lead of selectedLeads) {
+    const messages = [];
+    let readError = '';
+
+    try {
+      const messagesSnap = await db.collection('leads')
+        .doc(String(lead.id))
+        .collection('messages')
+        .orderBy('timestamp', 'asc')
+        .get();
+
+      messagesSnap.forEach((doc) => {
+        const raw = { id: doc.id, ...(doc.data() || {}) };
+        const body = messageBody(raw);
+        if (!body) return;
+        messages.push({
+          id: raw.id,
+          sender: messageSenderLabel(raw),
+          timestampMs: Math.max(toMillis(raw?.timestamp), toMillis(raw?.createdAt), toMillis(raw?.sentAt)),
+          content: body,
+        });
+      });
+    } catch (error) {
+      readError = error?.message || String(error);
+    }
+
+    messages.sort((a, b) => a.timestampMs - b.timestampMs);
+    conversations.push({
+      lead: {
+        id: String(lead.id || ''),
+        name: leadName(lead),
+        phone: safeStr(lead?.telefono || lead?.phone || lead?.whatsapp),
+        status: safeStr(lead?.estado) || '(sin estado)',
+        stage: safeStr(lead?.etapa || lead?.etapaNombre) || '(sin etapa)',
+        source: safeStr(lead?.source) || '(sin fuente)',
+        tags: Array.isArray(lead?.etiquetas) ? lead.etiquetas.map((t) => safeStr(t)).filter(Boolean) : [],
+        createdAt: lead._createdMs,
+        lastActivityAt: lead._lastActivityMs,
+      },
+      messages,
+      readError,
+    });
+  }
+
+  const lines = [];
+  lines.push('# Historial de conversaciones - Clientes que compraron');
+  lines.push(`Generado: ${formatDateTime(nowMs)}`);
+  lines.push(`Clientes compradores encontrados: ${wonLeads.length}`);
+  lines.push(`Clientes incluidos en este archivo: ${selectedLeads.length}`);
+  lines.push('');
+  lines.push('Filtro usado: leads activos/no archivados con estado de compra (`compro`, `cliente`, `ganado`, `closed_won`, `cerrado_ganado`, `pagado`) o etiqueta `compro`.');
+  lines.push('');
+
+  if (conversations.length === 0) {
+    lines.push('_(No se encontraron clientes marcados como compra.)_');
+  } else {
+    conversations.forEach((item, index) => {
+      const lead = item.lead;
+      lines.push(`## ${index + 1}. ${lead.name}`);
+      lines.push(`- Lead ID: ${lead.id}`);
+      if (lead.phone) lines.push(`- Telefono: ${lead.phone}`);
+      lines.push(`- Estado: ${lead.status}`);
+      lines.push(`- Etapa: ${lead.stage}`);
+      lines.push(`- Fuente: ${lead.source}`);
+      if (lead.tags.length) lines.push(`- Etiquetas: ${lead.tags.join(', ')}`);
+      lines.push(`- Fecha de creacion: ${formatDateTime(lead.createdAt)}`);
+      lines.push(`- Ultima actividad: ${formatDateTime(lead.lastActivityAt)}`);
+      lines.push(`- Mensajes exportados: ${item.messages.length}`);
+      if (item.readError) lines.push(`- Error al leer mensajes: ${item.readError}`);
+      lines.push('');
+      lines.push('### Conversacion');
+
+      if (item.messages.length === 0) {
+        lines.push('_(Sin mensajes visibles en el historial.)_');
+      } else {
+        item.messages.forEach((message) => {
+          lines.push(`- [${formatDateTime(message.timestampMs)}] ${message.sender}: ${renderIndentedMessage(message.content)}`);
+        });
+      }
+      lines.push('');
+    });
+  }
+
+  return {
+    data: {
+      generatedAt: new Date(nowMs).toISOString(),
+      totalWon: wonLeads.length,
+      exported: conversations.length,
+      conversations,
+    },
+    markdown: lines.join('\n'),
+  };
 }
 
 export async function generateBiReport({ dbOverride = null, now = new Date() } = {}) {

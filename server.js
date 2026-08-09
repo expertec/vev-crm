@@ -135,7 +135,7 @@ import {
   recordSellerFeedback,
 } from './services/salesBrain/index.js';
 import { listFollowupActions, buildFollowupMessage } from './services/followupActions.js';
-import { generateBiReport } from './services/biReport.js';
+import { exportWonConversationHistory, generateBiReport } from './services/biReport.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
@@ -2952,6 +2952,24 @@ app.get('/api/admin/bi-report', async (req, res) => {
     return res.json({ success: true, data, markdown });
   } catch (error) {
     console.error('[admin/bi-report] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// Exporta el historial de conversaciones de clientes que compraron.
+// ?format=md devuelve Markdown como texto plano para descarga directa.
+app.get('/api/admin/bi-report/won-conversations', async (req, res) => {
+  try {
+    const maxLeads = Number(req.query?.maxLeads || 1000);
+    const { data, markdown } = await exportWonConversationHistory({ maxLeads });
+    const format = String(req.query?.format || '').toLowerCase();
+    if (format === 'md' || format === 'markdown' || format === 'text') {
+      res.set('Content-Type', 'text/plain; charset=utf-8');
+      return res.send(markdown);
+    }
+    return res.json({ success: true, data, markdown });
+  } catch (error) {
+    console.error('[admin/bi-report/won-conversations] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
