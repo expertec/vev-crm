@@ -132,7 +132,7 @@ function messageSenderLabel(message = {}) {
 
 function messageBody(message = {}) {
   const content = safeStr(message?.content || message?.text || message?.body || message?.message);
-  const mediaType = safeStr(message?.mediaType || message?.type);
+  const mediaType = safeStr(message?.mediaType);
   const mediaUrl = safeStr(message?.mediaUrl || message?.url);
 
   const parts = [];
@@ -184,7 +184,6 @@ export async function exportWonConversationHistory({
 
     wonLeads.push({
       ...lead,
-      _tags: [...tags],
       _lastActivityMs: lastActivityMs,
       _createdMs: toMillis(lead?.fecha_creacion),
     });
