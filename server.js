@@ -134,6 +134,7 @@ import { classifyLeadReply } from './services/hotLeadDetector.js';
 import {
   expireCurrentSuggestion,
   recordSellerFeedback,
+  runSalesBrainForInbound,
 } from './services/salesBrain/index.js';
 import { listFollowupActions, buildFollowupMessage } from './services/followupActions.js';
 import {
@@ -3064,6 +3065,61 @@ app.post('/api/admin/sales-brain/feedback', async (req, res) => {
   } catch (error) {
     console.error('[admin/sales-brain/feedback] Error:', error);
     return res.status(400).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/admin/sales-brain/reanalyze', async (req, res) => {
+  const { leadId = '' } = req.body || {};
+  const safeLeadId = String(leadId || '').trim();
+
+  try {
+    if (!safeLeadId) return res.status(400).json({ error: 'Falta leadId.' });
+
+    const leadRef = db.collection('leads').doc(safeLeadId);
+    const leadSnap = await leadRef.get();
+    if (!leadSnap.exists) return res.status(404).json({ error: 'Lead no encontrado.' });
+
+    const leadData = { id: leadSnap.id, ...(leadSnap.data() || {}) };
+    const msgsSnap = await leadRef
+      .collection('messages')
+      .orderBy('timestamp', 'desc')
+      .limit(12)
+      .get();
+    const recentMessages = msgsSnap.docs
+      .map((doc) => ({ id: doc.id, ...(doc.data() || {}) }))
+      .reverse()
+      .map((msg) => ({
+        id: msg.id,
+        sender: msg.sender === 'lead' ? 'lead' : 'business',
+        content: String(msg.content || '').trim(),
+        mediaType: String(msg.mediaType || '').trim(),
+      }))
+      .filter((msg) => msg.content);
+    const lastLeadMessage = [...recentMessages].reverse().find((msg) => msg.sender === 'lead');
+    const latestText = lastLeadMessage?.content || '';
+    if (!latestText) return res.status(400).json({ error: 'No hay mensaje reciente del cliente para reanalizar.' });
+
+    if (leadData?.salesBrainCurrent?.eventId) {
+      await expireCurrentSuggestion({
+        leadRef,
+        reason: 'manual_context_reanalysis',
+      }).catch(() => {});
+    }
+
+    const result = await runSalesBrainForInbound({
+      db,
+      leadRef,
+      leadId: safeLeadId,
+      leadData,
+      latestText,
+      inputMessageId: `manual-context-${Date.now()}-${lastLeadMessage.id || 'latest'}`,
+      recentMessages,
+    });
+
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('[admin/sales-brain/reanalyze] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
   }
 });
 
