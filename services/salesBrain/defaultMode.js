@@ -2,7 +2,6 @@ import { SALES_BRAIN_MODES } from './catalog.js';
 
 function normalizeDefaultMode(value = '') {
   const safe = String(value || '').trim().toLowerCase();
-  if (safe === SALES_BRAIN_MODES.OFF) return SALES_BRAIN_MODES.OFF;
   if (safe === SALES_BRAIN_MODES.COPILOT) return SALES_BRAIN_MODES.COPILOT;
   return SALES_BRAIN_MODES.COPILOT;
 }

@@ -1,6 +1,9 @@
 const STATIC_HASHTAG_MAP = {
   '#webpro990': 'LeadWeb',
   '#leadweb': 'LeadWeb',
+  '#paginaweb': 'LeadWhatsapp',
+  '#páginaweb': 'LeadWhatsapp',
+  '#web': 'LeadWhatsapp',
   '#nuevolead': 'NuevoLeadWeb',
   '#planredes990': 'PlanRedes',
   '#planredes': 'PlanRedes',

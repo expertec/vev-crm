@@ -437,6 +437,18 @@ function shouldBypassMetaBlock(blockReason = '') {
   return reason === 'estado_compro' || reason === 'form_completed';
 }
 
+function isConfidentMetaTriggerForNoContent({
+  metaRoute = null,
+  preferMessageTrigger = false,
+  messageRule = {},
+} = {}) {
+  if (preferMessageTrigger && ['db', 'hashtag', 'text'].includes(String(messageRule?.source || '').toLowerCase())) {
+    return true;
+  }
+  const routeSource = String(metaRoute?.source || '').trim().toLowerCase();
+  return Boolean(routeSource && routeSource !== 'meta_ad_default' && metaRoute?.trigger);
+}
+
 function resolveSequenceBlockState(leadData, nextTrigger, { isMetaAd = false } = {}) {
   const reason = getSequenceBlockReason(leadData, nextTrigger);
   if (!reason) return { blocked: false, reason: 'none', overridden: false };
@@ -1327,9 +1339,19 @@ export async function connectToWhatsApp() {
               const detectedTrigger = preferPushNameTrigger
                 ? (pushNameRule.trigger || fallbackMetaTrigger)
                 : (metaTriggerResult.trigger || fallbackMetaTrigger);
+              const confidentNoContentTrigger = isConfidentMetaTriggerForNoContent({
+                metaRoute: metaAdRoute,
+                preferMessageTrigger: preferPushNameTrigger,
+                messageRule: pushNameRule,
+              });
               if (preferPushNameTrigger) {
                 console.log(
                   `[WA] 🎯 Meta Ads sin contenido usa trigger '${detectedTrigger}' desde pushName (${pushNameRule.source}) para ${leadId}`
+                );
+              }
+              if (shouldTreatAsMetaAdInbound && !confidentNoContentTrigger) {
+                console.log(
+                  `[WA] ⏸️ Meta Ads sin contenido no programa fallback '${detectedTrigger}' para ${leadId}; esperando mensaje legible o ruta especifica.`
                 );
               }
 
@@ -1379,7 +1401,7 @@ export async function connectToWhatsApp() {
 
                 if (shouldTreatAsMetaAdInbound) {
                   const blocked = shouldBlockSequences({}, detectedTrigger);
-                  if (!blocked && hasReachableTarget) {
+                  if (confidentNoContentTrigger && !blocked && hasReachableTarget) {
                     try {
                       await scheduleSequenceForLead(leadId, detectedTrigger, inboundAt);
                       await leadRef.set(
@@ -1395,6 +1417,8 @@ export async function connectToWhatsApp() {
                     } catch (seqErr) {
                       console.error(`[WA] ❌ Error programando secuencia desde Meta Ads: ${seqErr?.message || seqErr}`);
                     }
+                  } else if (!confidentNoContentTrigger) {
+                    console.log(`[WA] ⏭️ Meta Ads inbound sin contenido: no se programa fallback para ${leadId}.`);
                   } else if (!hasReachableTarget) {
                     console.log(`[WA] ⏭️ Meta Ads inbound sin ruta de envío (${leadId}); secuencia pendiente de resolución de JID.`);
                   } else {
@@ -1424,7 +1448,7 @@ export async function connectToWhatsApp() {
                     );
                   }
 
-                  if (!blocked && !alreadyHas && !metaCooldownActive && hasReachableTarget) {
+                  if (confidentNoContentTrigger && !blocked && !alreadyHas && !metaCooldownActive && hasReachableTarget) {
                     try {
                       const programmed = await scheduleSequenceForLead(leadId, detectedTrigger, inboundAt);
                       if (programmed > 0) {
@@ -1444,6 +1468,8 @@ export async function connectToWhatsApp() {
                     } catch (seqErr) {
                       console.error(`[WA] ❌ Error programando secuencia desde Meta Ads: ${seqErr?.message || seqErr}`);
                     }
+                  } else if (!confidentNoContentTrigger) {
+                    console.log(`[WA] ⏭️ Meta Ads inbound sin contenido: no se reprograma fallback para ${leadId}.`);
                   } else if (!hasReachableTarget) {
                     console.log(`[WA] ⏭️ Meta Ads inbound sin ruta de envío (${leadId}); secuencia pendiente de resolución de JID.`);
                   } else {
@@ -1458,6 +1484,7 @@ export async function connectToWhatsApp() {
                 console.log(`[WA] ✅ Lead actualizado desde mensaje no desencriptado: ${leadId}`);
               }
             }
+            messageHandledOk = false;
             continue;
           }
 
@@ -1528,6 +1555,7 @@ export async function connectToWhatsApp() {
               id: msg?.key?.id || 'N/A',
               keys: Object.keys(inner || {}).join(',') || 'sin-keys',
             });
+            messageHandledOk = false;
             continue;
           }
 

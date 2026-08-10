@@ -56,6 +56,13 @@ test('conserva el default cuando no hay hashtag ni frase conocida', () => {
   assert.equal(result.source, 'default');
 });
 
+test('resuelve #PaginaWeb como trigger explicito de web', () => {
+  const result = resolveStaticTriggerFromMessage('Hola, quiero info #PaginaWeb', 'NuevoLeadWeb');
+
+  assert.equal(result.trigger, 'LeadWhatsapp');
+  assert.equal(result.source, 'hashtag');
+});
+
 test('extrae hashtags sin duplicar y en minusculas', () => {
   assert.deepEqual(extractHashtags('#PlanRedes990 texto #planredes990'), ['#planredes990']);
 });
