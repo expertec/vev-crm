@@ -23,6 +23,7 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 // Cola de secuencias
 import {
   scheduleSequenceForLead,
+  processLeadSequences,
   cancelSequences,
   cancelAllSequences,
   normalizeJid,
@@ -1762,6 +1763,7 @@ export async function connectToWhatsApp() {
           }
 
           const etiquetaUnion = shouldTreatAsMetaAdInbound ? [trigger, 'MetaAds'] : [trigger];
+          let processSequencesAfterPersist = false;
 
           const baseLead = {
             telefono: normNum,
@@ -1803,7 +1805,13 @@ export async function connectToWhatsApp() {
 
             const canSchedule = hasReachableTarget && !shouldBlockSequences({}, trigger);
             if (canSchedule) {
-              await scheduleSequenceForLead(leadId, trigger, inboundAt);
+              const programmed = await scheduleSequenceForLead(leadId, trigger, inboundAt, {
+                debug: true,
+                source: triggerSource,
+              });
+              if (programmed > 0) {
+                processSequencesAfterPersist = true;
+              }
               if (triggerSource === 'meta_ad') {
                 await leadRef.set(
                   {
@@ -1815,7 +1823,13 @@ export async function connectToWhatsApp() {
                   { merge: true }
                 );
               }
-              console.log('[WA] ✅ Lead CREADO + secuencia programada:', { leadId, phone: normNum, trigger, source: triggerSource });
+              console.log('[WA] ✅ Lead CREADO + secuencia programada:', {
+                leadId,
+                phone: normNum,
+                trigger,
+                source: triggerSource,
+                scheduledSteps: programmed,
+              });
             } else if (!hasReachableTarget) {
               console.log('[WA] ⏭️ Lead CREADO sin ruta de envío; secuencia pendiente de resolución:', { leadId, trigger, source: triggerSource });
             } else {
@@ -1871,8 +1885,12 @@ export async function connectToWhatsApp() {
             }
 
             if (!blocked && !alreadyHas && !metaCooldownActive && hasReachableTarget && isSchedulableSource) {
-              const programmed = await scheduleSequenceForLead(leadId, trigger, inboundAt);
+              const programmed = await scheduleSequenceForLead(leadId, trigger, inboundAt, {
+                debug: true,
+                source: triggerSource,
+              });
               if (programmed > 0) {
+                processSequencesAfterPersist = true;
                 if (triggerSource === 'meta_ad') {
                   await leadRef.set(
                     {
@@ -1884,7 +1902,12 @@ export async function connectToWhatsApp() {
                     { merge: true }
                   );
                 }
-                console.log('[WA] ✅ Lead ACTUALIZADO (reprogramado):', { leadId, trigger, source: triggerSource });
+                console.log('[WA] ✅ Lead ACTUALIZADO (reprogramado):', {
+                  leadId,
+                  trigger,
+                  source: triggerSource,
+                  scheduledSteps: programmed,
+                });
               } else {
                 console.log('[WA] Lead ACTUALIZADO (sin reprogramar):', {
                   leadId,
@@ -1932,6 +1955,21 @@ export async function connectToWhatsApp() {
           await leadRef.update(upd);
 
           console.log('[WA] Guardado mensaje →', leadId, { mediaType, hasText: !!content, hasMedia: !!mediaUrl });
+
+          if (processSequencesAfterPersist) {
+            processLeadSequences(leadId)
+              .then((result) => {
+                console.log('[WA] 🚀 Secuencia procesada post-inbound:', {
+                  leadId,
+                  trigger,
+                  processed: result?.processed || 0,
+                  reason: result?.reason || null,
+                });
+              })
+              .catch((err) => {
+                console.warn('[WA] ⚠️ No se pudo procesar secuencia post-inbound:', err?.message || err);
+              });
+          }
 
           // Detector de respuestas: clasifica, y según el resultado actúa
           // (no bloquea el pipeline; nunca lanza)

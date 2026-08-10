@@ -102,6 +102,8 @@ export async function generateReply({
     conversationMemory,
     acquisitionContext,
     salesContext: lead?.salesContext || {},
+    manualContext: lead?.salesBrainManualContext || '',
+    visualContext: lead?.salesBrainVisualContext || '',
     maxChars: MAX_REPLY_CHARS,
   });
 

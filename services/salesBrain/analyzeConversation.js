@@ -263,6 +263,12 @@ function buildBusinessContext(lead = {}) {
   if (lead?.etapaNombre || lead?.etapa) parts.push(`Etapa CRM: ${cleanText(lead.etapaNombre || lead.etapa, 80)}`);
   if (lead?.salesState) parts.push(`SalesState previo: ${JSON.stringify(lead.salesState).slice(0, 800)}`);
   if (lead?.salesContext) parts.push(`Contexto comercial: ${JSON.stringify(lead.salesContext).slice(0, 900)}`);
+  if (lead?.salesBrainManualContext) {
+    parts.push(`Contexto manual para Sales Brain: ${cleanText(lead.salesBrainManualContext, 1200)}`);
+  }
+  if (lead?.salesBrainVisualContext) {
+    parts.push(`Contexto visual descrito por vendedor: ${cleanText(lead.salesBrainVisualContext, 1200)}`);
+  }
   if (lead?.conversationMemory?.summary) parts.push(`Memoria: ${cleanText(lead.conversationMemory.summary, 600)}`);
   const tags = Array.isArray(lead?.etiquetas) ? lead.etiquetas.slice(0, 10).join(', ') : '';
   if (tags) parts.push(`Etiquetas: ${cleanText(tags, 180)}`);
