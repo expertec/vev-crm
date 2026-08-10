@@ -1026,6 +1026,10 @@ export async function archivarNegociosAntiguos() {
 export async function processSequences() {
   let totalProcessed = 0;
 
+  if (typeof Q.hydrateNextSequenceRun === 'function') {
+    await Q.hydrateNextSequenceRun({ limit: 50 });
+  }
+
   if (typeof Q.processSequenceLeadsBatch === 'function') {
     totalProcessed += await Q.processSequenceLeadsBatch({ limit: 25 });
   } else if (typeof Q.processDueSequenceJobs === 'function') {

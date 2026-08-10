@@ -47,6 +47,13 @@ function toDateSafe(v) {
   return isNaN(+d) ? null : d;
 }
 
+function sameMinute(a, b) {
+  const da = toDateSafe(a);
+  const db = toDateSafe(b);
+  if (!da || !db) return false;
+  return Math.abs(da.getTime() - db.getTime()) < 1000;
+}
+
 function getSampleSiteBaseUrl() {
   return String(
     process.env.SAMPLE_SITE_BASE_URL ||
@@ -1123,6 +1130,7 @@ export async function hydrateNextSequenceRun({ limit = 50 } = {}) {
     }
     const nextAt = computeNextRunForLead(secuencias);
     if (!nextAt) continue;
+    if (sameMinute(data.nextSequenceRunAt, nextAt)) continue;
     await doc.ref.set({ nextSequenceRunAt: nextAt }, { merge: true });
     updated += 1;
   }
