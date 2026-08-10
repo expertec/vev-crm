@@ -21,6 +21,7 @@ import {
   resolveSalesBrainMode,
 } from './salesBrain/index.js';
 import { SALES_BRAIN_MODES } from './salesBrain/catalog.js';
+import { ROUTING_STATUSES, updateRoutingAfterInbound } from './salesQueue/index.js';
 
 const { FieldValue } = admin.firestore;
 
@@ -54,6 +55,68 @@ function hasActiveSequences(lead = {}) {
   if (lead?.hasActiveSequences === true) return true;
   return Array.isArray(lead?.secuenciasActivas)
     && lead.secuenciasActivas.some((item) => item?.completed !== true);
+}
+
+function cleanSavePath(value = '') {
+  const path = String(value || '').trim();
+  if (!path || path.length > 160) return '';
+  if (!/^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(path)) return '';
+  return path;
+}
+
+async function applyPendingSequenceQuestionReply({ leadRef, leadData = {}, latestText = '', routing = null } = {}) {
+  const latestSnap = await leadRef.get().catch(() => null);
+  const currentLead = latestSnap?.exists ? { ...(latestSnap.data() || {}) } : leadData;
+  const pending = currentLead?.sequenceQuestionPending && typeof currentLead.sequenceQuestionPending === 'object'
+    ? currentLead.sequenceQuestionPending
+    : null;
+  if (!pending || pending.status !== 'waiting_for_reply') return { applied: false };
+
+  const saveTo = cleanSavePath(pending.saveTo || '');
+  const rawSaveTo = saveTo.startsWith('salesContext.')
+    ? `salesContextRaw.${saveTo.slice('salesContext.'.length)}`
+    : '';
+  const requiresAgent = routing?.status === ROUTING_STATUSES.READY_FOR_AGENT || routing?.status === ROUTING_STATUSES.FOLLOWUP;
+  const trigger = String(pending.trigger || '').trim();
+  const index = Number.isFinite(Number(pending.index)) ? Number(pending.index) : null;
+
+  const secuencias = Array.isArray(currentLead.secuenciasActivas)
+    ? currentLead.secuenciasActivas.map((seq) => ({ ...seq }))
+    : [];
+  const nextSequences = secuencias.map((seq) => {
+    if (String(seq?.trigger || '') !== trigger || Number(seq?.index) !== index) return seq;
+    if (requiresAgent) return { ...seq, status: 'paused_for_agent', pausedAt: new Date().toISOString() };
+    return {
+      ...seq,
+      status: 'running',
+      index: Number(index || 0) + 1,
+      startTime: new Date().toISOString(),
+    };
+  });
+
+  const patch = {
+    sequenceQuestionPending: FieldValue.delete(),
+    secuenciasActivas: nextSequences,
+    hasActiveSequences: nextSequences.some((seq) => seq?.completed !== true && seq?.status !== 'paused_for_agent'),
+  };
+  if (saveTo) {
+    const pathParts = saveTo.split('.');
+    const existingValue = pathParts.reduce((acc, key) => (
+      acc && typeof acc === 'object' ? acc[key] : undefined
+    ), currentLead);
+    if (existingValue === undefined || existingValue === null || existingValue === '') {
+      patch[saveTo] = latestText;
+    }
+  }
+  if (rawSaveTo) patch[rawSaveTo] = latestText;
+  if (requiresAgent) {
+    patch.nextSequenceRunAt = FieldValue.delete();
+  } else {
+    patch.nextSequenceRunAt = new Date();
+  }
+
+  await leadRef.update(patch);
+  return { applied: true, continued: !requiresAgent, saveTo };
 }
 
 function hasRecentHumanOrAutomationTouch(lead = {}, refMs = Date.now()) {
@@ -605,6 +668,25 @@ export async function handleInboundLeadReply({
       });
     }
 
+    const routingResult = await updateRoutingAfterInbound({
+      leadRef: ref,
+      leadId,
+      leadData,
+      latestText: text,
+      analysis: classification.salesBrainAnalysis || salesBrain.analysis || {},
+      salesBrain,
+    });
+
+    const sequenceQuestion = await applyPendingSequenceQuestionReply({
+      leadRef: ref,
+      leadData,
+      latestText: text,
+      routing: routingResult.routing,
+    }).catch((sequenceError) => {
+      console.warn('[hot-lead] sequence question reply error:', sequenceError?.message || sequenceError);
+      return { applied: false, error: String(sequenceError?.message || sequenceError) };
+    });
+
     return {
       ok: true,
       classification,
@@ -613,6 +695,8 @@ export async function handleInboundLeadReply({
       autoResponderTaskCreated: autoTaskResult.created === true,
       autoFormLink,
       salesBrain,
+      routing: routingResult,
+      sequenceQuestion,
     };
   } catch (error) {
     console.warn('[hot-lead] handleInboundLeadReply error:', error?.message || error);

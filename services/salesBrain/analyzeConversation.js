@@ -70,6 +70,7 @@ async function getOpenAi() {
 
 const STOP_RE = /\b(no me interesa|ya no me interesa|no gracias|no quiero|deja de|dejen de|dejar de escribir|no insistas|elimina|dar de baja|stop)\b/i;
 const PRICE_RE = /(precio|costo|cuanto cuesta|cuanto vale|cuanto seria|cuanto es|cu[aá]nto|cotiza|cotizar|presupuesto|pagar|pago)/i;
+const PAYMENT_RE = /(pagar|pago|transferencia|deposito|dep[oó]sito|anticipo|tarjeta|link de pago|datos de pago|clabe|cuenta)/i;
 const EXAMPLES_RE = /(ejemplo|ejemplos|muestra|portafolio|trabajos|casos|ver paginas|ver webs)/i;
 const START_RE = /(como empiezo|como empezamos|como inicio|quiero empezar|quiero avanzar|lo quiero|contratar|anticipo|deposito|transferencia|datos de pago|link de pago)/i;
 const INFO_RE = /(info|informacion|informaci[oó]n|que incluye|como funciona|me interesa saber|dudas|pregunta)/i;
@@ -99,6 +100,16 @@ function detectPrimaryNeed(text = '') {
   if (/(pagina web|sitio web|web|landing)/.test(t)) return 'website';
   if (/(publicidad|anuncios|facebook ads|meta ads|campana|campaña)/.test(t)) return 'advertising';
   if (/(sistema|software|crm|automatizar|automatizacion)/.test(t)) return 'software';
+  return null;
+}
+
+function detectCustomerAcquisition(text = '') {
+  const t = normalizeForMatch(text);
+  if (/(recomendacion|recomendado|boca en boca|referido|clientes de siempre)/.test(t)) return 'recommendations';
+  if (/(facebook|instagram|redes|tiktok|whatsapp)/.test(t)) return 'social_media';
+  if (/(google|maps|busqueda)/.test(t)) return 'google';
+  if (/(anuncios|publicidad|ads|campana|campaña)/.test(t)) return 'paid_ads';
+  if (/(volante|lonas|local|calle)/.test(t)) return 'offline';
   return null;
 }
 
@@ -149,6 +160,9 @@ function buildFallbackAnalysis({ lead = {}, latestText = '' } = {}) {
     awareness = 'problem_aware';
   }
 
+  if (PAYMENT_RE.test(normalized)) signals.push('asked_payment_method');
+  if (intent === 'question' || /\?/.test(text)) signals.push('commercial_question');
+
   if (TRUST_RE.test(normalized)) {
     objection = normalized.includes('agencia') || normalized.includes('experiencia') ? 'bad_previous_experience' : 'trust';
     sentiment = 'skeptical';
@@ -165,8 +179,10 @@ function buildFallbackAnalysis({ lead = {}, latestText = '' } = {}) {
 
   const businessType = detectBusinessType(text) || lead?.salesState?.businessType || null;
   const primaryNeed = detectPrimaryNeed(text) || lead?.salesState?.primaryNeed || null;
+  const customerAcquisition = detectCustomerAcquisition(text);
   if (businessType) signals.push('business_identified');
   if (primaryNeed) signals.push('primary_need_identified');
+  if (customerAcquisition) signals.push('customer_acquisition_identified');
   if (String(lead?.source || '').toLowerCase() === 'meta_ads' || lead?.lastMetaAttribution) signals.push('meta_ad');
 
   const facts = {};
@@ -175,6 +191,10 @@ function buildFallbackAnalysis({ lead = {}, latestText = '' } = {}) {
   }
   if (primaryNeed && detectPrimaryNeed(text)) {
     facts.primaryNeed = { value: primaryNeed, confidence: 0.8, source: 'explicit' };
+    facts.primaryGoal = { value: primaryNeed, confidence: 0.8, source: 'explicit' };
+  }
+  if (customerAcquisition) {
+    facts.customerAcquisition = { value: customerAcquisition, confidence: 0.75, source: 'explicit' };
   }
   if (signals.includes('previous_bad_agency_experience')) {
     facts.previousAgency = { value: true, confidence: 0.85, source: 'explicit' };
@@ -292,6 +312,8 @@ async function aiAnalyze({ lead = {}, recentMessages = [], latestText = '', acqu
     `signals permitidas: ${SIGNALS.join(', ')}`,
     `facts permitidos: ${FACT_KEYS.join(', ')}`,
     'facts solo para hechos objetivos. Usa {"value":X,"confidence":0-1,"source":"explicit|inferred"}.',
+    'Extrae contexto de dueños de negocio local en lenguaje simple: businessType, customerAcquisition, currentSituation, primaryGoal, painPoint, hasWebsite, runsAds, previousExperience.',
+    'No uses jerga como funnel, ROAS, CAC, conversion o pipeline en el resumen ni en hechos.',
     'No guardes opiniones como facts. Objeciones y sentimiento van en objection/sentiment.',
     'automated=true si parece bot, asistente automatico, menu u horario.',
   ].join('\n');

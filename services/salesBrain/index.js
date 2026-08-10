@@ -15,6 +15,13 @@ import {
   findSalesBrainEventByInput,
 } from './events.js';
 import { SALES_BRAIN_MODES } from './catalog.js';
+import {
+  buildCommercialSignals,
+  calculateQueuePriority,
+} from '../salesQueue/priority.js';
+import {
+  decideRouting,
+} from '../salesQueue/routing.js';
 
 const { FieldValue } = admin.firestore;
 
@@ -103,6 +110,34 @@ function serializeForEvent(value) {
   }));
 }
 
+function factValue(memory = {}, analysis = {}, key = '') {
+  const direct = analysis?.facts?.[key]?.value;
+  if (direct !== undefined && direct !== null && direct !== '') return direct;
+  const memoryValue = memory?.facts?.[key]?.value;
+  if (memoryValue !== undefined && memoryValue !== null && memoryValue !== '') return memoryValue;
+  return null;
+}
+
+function buildSalesContextPatch(previous = {}, analysis = {}, memory = {}, latestText = '') {
+  const text = cleanText(latestText, 500);
+  const next = {
+    businessType: analysis?.businessType || factValue(memory, analysis, 'businessType') || previous?.businessType || null,
+    currentSituation: factValue(memory, analysis, 'currentSituation') || previous?.currentSituation || null,
+    primaryGoal: factValue(memory, analysis, 'primaryGoal') || analysis?.primaryNeed || factValue(memory, analysis, 'primaryNeed') || previous?.primaryGoal || null,
+    painPoint: factValue(memory, analysis, 'painPoint') || previous?.painPoint || null,
+    hasWebsite: factValue(memory, analysis, 'hasWebsite') ?? previous?.hasWebsite ?? null,
+    runsAds: factValue(memory, analysis, 'runsAds') ?? factValue(memory, analysis, 'currentlyAdvertising') ?? previous?.runsAds ?? null,
+    previousExperience: factValue(memory, analysis, 'previousExperience') || previous?.previousExperience || null,
+    customerAcquisition: factValue(memory, analysis, 'customerAcquisition') || previous?.customerAcquisition || null,
+  };
+  const raw = {};
+  if (next.businessType && !previous?.businessType) raw.businessType = text;
+  if (next.primaryGoal && !previous?.primaryGoal) raw.primaryGoal = text;
+  if (next.customerAcquisition && !previous?.customerAcquisition) raw.customerAcquisition = text;
+  if (next.previousExperience && !previous?.previousExperience) raw.previousExperience = text;
+  return { salesContext: next, salesContextRaw: raw };
+}
+
 export async function runSalesBrainForInbound({
   db = defaultDb,
   leadRef = null,
@@ -188,6 +223,29 @@ export async function runSalesBrainForInbound({
       score: score.total,
       decision,
     });
+    const commercialSignals = buildCommercialSignals({
+      lead: { ...currentLead, salesState: nextSalesState },
+      analysis: finalAnalysis,
+      latestText,
+    });
+    const routing = decideRouting({
+      lead: { ...currentLead, salesState: nextSalesState },
+      analysis: finalAnalysis,
+      latestText,
+      commercialSignals,
+    });
+    const queuePriority = calculateQueuePriority({
+      lead: { ...currentLead, salesState: nextSalesState },
+      analysis: finalAnalysis,
+      latestText,
+      commercialSignals,
+    });
+    const salesContextPatch = buildSalesContextPatch(
+      currentLead.salesContext && typeof currentLead.salesContext === 'object' ? currentLead.salesContext : {},
+      finalAnalysis,
+      nextMemory,
+      latestText
+    );
 
     let reply;
     try {
@@ -219,6 +277,12 @@ export async function runSalesBrainForInbound({
       leadScore: score.total,
       nextBestAction: decision.nextBestAction,
       reason: decision.reason,
+      routing: {
+        status: routing.status,
+        priority: queuePriority.priority,
+        reason: routing.reason,
+      },
+      commercialSignals,
       suggestedReply: reply.message,
       replyGenerationStatus: reply.replyGenerationStatus,
       model: finalAnalysis.model,
@@ -234,6 +298,11 @@ export async function runSalesBrainForInbound({
       {
         salesState: nextSalesState,
         conversationMemory: nextMemory,
+        commercialSignals,
+        salesContext: salesContextPatch.salesContext,
+        ...(Object.keys(salesContextPatch.salesContextRaw).length
+          ? { salesContextRaw: salesContextPatch.salesContextRaw }
+          : {}),
         salesScoreState: {
           appliedSignals: score.appliedSignals,
           updatedAt: FieldValue.serverTimestamp(),
@@ -242,6 +311,12 @@ export async function runSalesBrainForInbound({
           eventId,
           nextBestAction: decision.nextBestAction,
           status: eventPayload.status,
+          routing: {
+            status: routing.status,
+            priority: queuePriority.priority,
+            reason: routing.reason,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
           replyGenerationStatus: eventPayload.replyGenerationStatus,
           updatedAt: FieldValue.serverTimestamp(),
         },

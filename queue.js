@@ -247,7 +247,8 @@ const TYPE_MAP = {
   videonota: 'videonota',
   videonote: 'videonota',
   videoptv: 'videonota',
-  ptv: 'videonota'
+  ptv: 'videonota',
+  question: 'texto'
 };
 function resolveType(raw) {
   const k = normType(raw);
@@ -355,6 +356,7 @@ function computeNextRunForLead(secuencias = []) {
   let nextAt = null;
   for (const seq of secuencias) {
     if (!seq || seq.completed) continue;
+    if (seq.status === 'waiting_for_reply' || seq.status === 'paused_for_agent') continue;
     const runAt = computeSequenceStepRun(seq.trigger, seq.startTime, Number(seq.index || 0));
     if (!runAt) continue;
     if (!nextAt || runAt < nextAt) nextAt = runAt;
@@ -551,7 +553,7 @@ async function deliverPayload(leadId, payload) {
 
   const rawType = (payload?.type || 'texto');
   const type = resolveType(rawType); // ⬅️ normalizado
-  const contenido = payload?.contenido || '';
+  const contenido = payload?.contenido || payload?.message || '';
   const seconds = Number.isFinite(+payload?.seconds) ? +payload.seconds : null;
 
   const sock = getWhatsAppSock();
@@ -836,9 +838,37 @@ function normalizeSecuencias(raw) {
       trigger: s?.trigger,
       startTime: s?.startTime || s?.start_time || s?.startedAt || s?.start || s?.createdAt,
       index: Number.isFinite(+s?.index) ? +s.index : 0,
-      completed: !!s?.completed
+      completed: !!s?.completed,
+      status: String(s?.status || (s?.waitingForReply ? 'waiting_for_reply' : 'running')).trim() || 'running'
     }))
     .filter(s => !!s.trigger);
+}
+
+function shouldPauseAutomationForSales(lead = {}) {
+  const queueStatus = String(lead?.queue?.status || '').trim();
+  const routingStatus = String(lead?.routing?.status || lead?.salesBrainCurrent?.routing?.status || '').trim();
+  const status = String(lead?.estado || '').trim().toLowerCase();
+  const tags = Array.isArray(lead?.etiquetas) ? lead.etiquetas.map((tag) => String(tag || '').trim().toLowerCase()) : [];
+  return queueStatus === 'claimed'
+    || routingStatus === 'ready_for_agent'
+    || status === 'compro'
+    || status === 'cliente'
+    || status === 'no interesado'
+    || lead?.stopSequences === true
+    || lead?.salesBrainHumanControl === true
+    || lead?.humanControl === true
+    || tags.includes('detenersecuencia')
+    || tags.includes('stopsequences');
+}
+
+async function recordSequencePausedForAgent(leadRef, leadId, reason = 'sales_queue') {
+  await leadRef.collection('salesActivity').add({
+    type: 'sequence_paused',
+    agentId: String((await leadRef.get()).data()?.salesOwner || ''),
+    createdAt: FieldValue.serverTimestamp(),
+    metadata: { reason },
+  }).catch(() => {});
+  await persistSystemMessage(leadId, `[sequence] pausada por atencion comercial: ${reason}`).catch(() => {});
 }
 
 async function takeSequenceLock(leadRef) {
@@ -909,6 +939,23 @@ export async function processLeadSequences(leadId) {
       : [];
     const formCompleted = hasLeadCompletedForm(data);
 
+    if (shouldPauseAutomationForSales(data)) {
+      const paused = secuencias.map((seq) => (
+        seq.completed || seq.status === 'waiting_for_reply'
+          ? seq
+          : { ...seq, status: 'paused_for_agent', pausedAt: new Date().toISOString() }
+      ));
+      await leadRef.set({
+        secuenciasActivas: paused,
+        hasActiveSequences: paused.some((seq) => seq?.completed !== true && seq?.status !== 'paused_for_agent'),
+        nextSequenceRunAt: FieldValue.delete(),
+        sequencePausedReason: 'sales_queue',
+        sequencePausedAt: Timestamp.now(),
+      }, { merge: true });
+      await recordSequencePausedForAgent(leadRef, leadId, 'sales_queue');
+      return { processed: 0, reason: 'paused_for_agent' };
+    }
+
     if (!secuencias.length) {
       await leadRef.set({
         secuenciasActivas: [],
@@ -937,6 +984,7 @@ export async function processLeadSequences(leadId) {
 
     for (const seq of secuencias) {
       if (seq.completed) continue;
+      if (seq.status === 'waiting_for_reply' || seq.status === 'paused_for_agent') continue;
       if (formCompleted && shouldStopTriggerAfterForm(seq.trigger)) {
         seq.completed = true;
         continue;
@@ -965,13 +1013,33 @@ export async function processLeadSequences(leadId) {
       }
 
       const msg = def.messages[seq.index] || {};
-      await deliverPayload(leadId, msg);
+      const stepType = normType(msg?.type || '');
+      const isQuestionStep = stepType === 'question';
+      const payload = isQuestionStep
+        ? { ...msg, type: 'texto', contenido: msg.contenido || msg.message || '' }
+        : msg;
+      await deliverPayload(leadId, payload);
       processed += 1;
       sentSteps[stepKey] = Timestamp.now();
       if (!hasTriggerInHistory(deliveredHistory, seq.trigger)) {
         deliveredHistory.push(seq.trigger);
       }
       await persistSystemMessage(leadId, `[sequence:${seq.trigger}] step ${seq.index} enviado`);
+
+      if (isQuestionStep && msg.waitForReply === true) {
+        seq.status = 'waiting_for_reply';
+        await leadRef.set({
+          sequenceQuestionPending: {
+            status: 'waiting_for_reply',
+            trigger: seq.trigger,
+            index: seq.index,
+            saveTo: String(msg.saveTo || '').trim() || null,
+            objective: String(msg.objective || '').trim() || null,
+            askedAt: Timestamp.now(),
+          },
+        }, { merge: true });
+        break;
+      }
 
       seq.index += 1;
       if (seq.index >= def.messages.length) seq.completed = true;
