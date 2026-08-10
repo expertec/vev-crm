@@ -136,6 +136,7 @@ import {
   recordSellerFeedback,
   runSalesBrainForInbound,
 } from './services/salesBrain/index.js';
+import { updateRoutingAfterInbound } from './services/salesQueue/index.js';
 import { listFollowupActions, buildFollowupMessage } from './services/followupActions.js';
 import {
   exportWonConversationHistory,
@@ -3116,7 +3117,17 @@ app.post('/api/admin/sales-brain/reanalyze', async (req, res) => {
       recentMessages,
     });
 
-    return res.json({ success: true, ...result });
+    const routing = await updateRoutingAfterInbound({
+      db,
+      leadRef,
+      leadId: safeLeadId,
+      leadData,
+      latestText,
+      analysis: result?.analysis || {},
+      salesBrain: result,
+    });
+
+    return res.json({ success: true, ...result, routing });
   } catch (error) {
     console.error('[admin/sales-brain/reanalyze] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
@@ -5509,7 +5520,14 @@ app.post(
   '/api/whatsapp/send-audio',
   upload.single('audio'),
   async (req, res) => {
-    const { phone, leadId, forwarded, ptt } = req.body;
+    const {
+      phone,
+      leadId,
+      forwarded,
+      ptt,
+      salesBrainEventId = '',
+      salesBrainSuggestedReply = '',
+    } = req.body;
     if (!req.file) {
       return res
         .status(400)
@@ -5600,6 +5618,19 @@ app.post(
         forwarded: shouldForward,
         mimetype: sourceMime,
       });
+      const safeSalesBrainEventId = String(salesBrainEventId || '').trim();
+      if (leadId && safeSalesBrainEventId) {
+        await recordSellerFeedback({
+          leadId: String(leadId || '').trim(),
+          eventId: safeSalesBrainEventId,
+          decision: 'spoken',
+          finalReply: '[Enviado por audio]',
+          suggestedReply: String(salesBrainSuggestedReply || ''),
+          actor: String(req.headers['x-user-email'] || req.headers['x-user-id'] || 'crm'),
+        }).catch((feedbackError) => {
+          console.warn('[send-audio] salesBrain feedback:', feedbackError?.message || feedbackError);
+        });
+      }
       console.log('[send-audio] Audio enviado OK', { target: String(target) });
 
       try {

@@ -76,14 +76,26 @@ async function loadCandidateDocs(db, constraints = []) {
   return snap.docs.map(serializeLead).filter(Boolean);
 }
 
+function dedupeLeads(rows = []) {
+  const map = new Map();
+  rows.filter(Boolean).forEach((lead) => map.set(lead.id, lead));
+  return Array.from(map.values());
+}
+
+async function loadGeneralOpportunityCandidates(db) {
+  const batches = await Promise.all([
+    loadCandidateDocs(db, [(ref) => ref.where('queue.status', '==', QUEUE_STATUSES.WAITING)]),
+    loadCandidateDocs(db, [(ref) => ref.where('routing.status', '==', ROUTING_STATUSES.READY_FOR_AGENT)]).catch(() => []),
+    loadCandidateDocs(db, [(ref) => ref.where('salesBrainCurrent.routing.status', '==', ROUTING_STATUSES.READY_FOR_AGENT)]).catch(() => []),
+    loadCandidateDocs(db, [(ref) => ref.where('salesState.leadScore', '>=', 70)]).catch(() => []),
+  ]);
+  return dedupeLeads(batches.flat()).filter(canClaimGeneralLead);
+}
+
 export async function getAgentQueueStats({ db = null, firestore = null, agentUid = '' } = {}) {
   const deps = await resolveDeps({ db, firestore });
   db = deps.db;
-  const waitingSnap = await db.collection('leads')
-    .where('queue.status', '==', QUEUE_STATUSES.WAITING)
-    .limit(200)
-    .get();
-  const waiting = waitingSnap.docs.map(serializeLead).filter(canClaimGeneralLead);
+  const waiting = await loadGeneralOpportunityCandidates(db);
 
   let mine = [];
   const safeAgent = cleanText(agentUid, 180);
@@ -93,8 +105,7 @@ export async function getAgentQueueStats({ db = null, firestore = null, agentUid
       .limit(200)
       .get()
       .catch(() => ({ docs: [] }));
-    const statuses = new Set([QUEUE_STATUSES.WAITING, QUEUE_STATUSES.FOLLOWUP, QUEUE_STATUSES.CLAIMED]);
-    mine = personalWaiting.docs.map(serializeLead).filter((lead) => lead && statuses.has(lead.queue.status));
+    mine = personalWaiting.docs.map(serializeLead).filter((lead) => lead && canShowPersonalWork(lead, safeAgent));
   }
 
   return {
@@ -114,10 +125,8 @@ export async function claimNextLead({ db = null, firestore = null, recordActivit
     throw error;
   }
 
-  const candidates = await loadCandidateDocs(db, [
-    (ref) => ref.where('queue.status', '==', QUEUE_STATUSES.WAITING),
-  ]);
-  const sorted = candidates.filter(canClaimGeneralLead).sort(sortByWorkPriority).slice(0, 12);
+  const candidates = await loadGeneralOpportunityCandidates(db);
+  const sorted = candidates.sort(sortByWorkPriority).slice(0, 12);
 
   for (const lead of sorted) {
     const leadRef = db.collection('leads').doc(lead.id);

@@ -8,6 +8,7 @@ import {
 } from '../services/salesQueue/routing.js';
 import {
   claimNextLead,
+  getAgentQueueStats,
   getNextAgentWork,
   registerAgentOutcome,
 } from '../services/salesQueue/agentQueue.js';
@@ -118,6 +119,7 @@ class MemoryQuery {
       const actual = getPath(snap.data(), filter.field);
       if (filter.op === '==') return actual === filter.value;
       if (filter.op === 'in') return Array.isArray(filter.value) && filter.value.includes(actual);
+      if (filter.op === '>=') return Number(actual) >= Number(filter.value);
       return false;
     }));
     return { empty: docs.length === 0, docs: docs.slice(0, this.max) };
@@ -321,6 +323,39 @@ test('propiedad: lead sin salesOwner puede entrar a cola general', async () => {
   assert.equal(result.lead.id, 'leadA');
 });
 
+test('cola general incluye lead ready_for_agent aunque queue siga en automation', async () => {
+  const db = new MemoryDb({
+    leadA: waitingLead(40, {
+      queue: { status: QUEUE_STATUSES.AUTOMATION, priority: 40 },
+      routing: { status: ROUTING_STATUSES.READY_FOR_AGENT, reason: 'high_intent' },
+    }),
+  });
+
+  const stats = await getAgentQueueStats({ db, firestore: fakeFirestore });
+  const result = await claimNextLead({ db, firestore: fakeFirestore, recordActivity: noActivity, agentUid: 'agent-a' });
+
+  assert.equal(stats.waiting, 1);
+  assert.equal(result.claimed, true);
+  assert.equal(result.lead.id, 'leadA');
+  assert.equal(db.lead('leadA').queue.status, QUEUE_STATUSES.CLAIMED);
+});
+
+test('cola general incluye lead con score alto aunque queue siga en automation', async () => {
+  const db = new MemoryDb({
+    leadA: waitingLead(100, {
+      queue: { status: QUEUE_STATUSES.AUTOMATION, priority: 0 },
+      salesState: { leadScore: 100 },
+    }),
+  });
+
+  const stats = await getAgentQueueStats({ db, firestore: fakeFirestore });
+  const result = await claimNextLead({ db, firestore: fakeFirestore, recordActivity: noActivity, agentUid: 'agent-a' });
+
+  assert.equal(stats.waiting, 1);
+  assert.equal(result.claimed, true);
+  assert.equal(result.lead.id, 'leadA');
+});
+
 test('propiedad: lead con salesOwner no puede ser reclamado por otro agente', async () => {
   const db = new MemoryDb({
     leadA: waitingLead(90, { salesOwner: 'owner-a', assignedTo: 'owner-a' }),
@@ -329,6 +364,24 @@ test('propiedad: lead con salesOwner no puede ser reclamado por otro agente', as
   const result = await claimNextLead({ db, firestore: fakeFirestore, recordActivity: noActivity, agentUid: 'agent-b' });
 
   assert.equal(result.claimed, false);
+});
+
+test('propiedad: lead propio con score alto vuelve al trabajo personal aunque queue siga en automation', async () => {
+  const db = new MemoryDb({
+    leadA: waitingLead(100, {
+      salesOwner: 'owner-a',
+      assignedTo: 'owner-a',
+      queue: { status: QUEUE_STATUSES.AUTOMATION, priority: 0 },
+      salesState: { leadScore: 100 },
+    }),
+  });
+
+  const stats = await getAgentQueueStats({ db, firestore: fakeFirestore, agentUid: 'owner-a' });
+  const ownerWork = await getNextAgentWork({ db, firestore: fakeFirestore, recordActivity: noActivity, agentUid: 'owner-a' });
+
+  assert.equal(stats.personal, 1);
+  assert.equal(ownerWork.source, 'personal');
+  assert.equal(ownerWork.lead.id, 'leadA');
 });
 
 test('propiedad: lead con propietario vuelve al trabajo personal del propietario', async () => {

@@ -31,7 +31,12 @@ export function isTerminalLead(lead = {}) {
 
 export function canClaimGeneralLead(lead = {}) {
   const safe = withLeadDefaults(lead);
-  return safe.queue.status === QUEUE_STATUSES.WAITING
+  const routingStatus = clean(safe.routing?.status || safe.salesBrainCurrent?.routing?.status || '');
+  const score = Number(safe.salesState?.leadScore || safe.leadScore || 0);
+  const queueReady = safe.queue.status === QUEUE_STATUSES.WAITING;
+  const routingReady = routingStatus === ROUTING_STATUSES.READY_FOR_AGENT;
+  const scoreReady = score >= 70 && safe.queue.status === QUEUE_STATUSES.AUTOMATION;
+  return (queueReady || routingReady || scoreReady)
     && !safe.salesOwner
     && !safe.assignedTo
     && !isTerminalLead(safe);
@@ -41,7 +46,11 @@ export function canShowPersonalWork(lead = {}, agentUid = '') {
   const safe = withLeadDefaults(lead);
   const owner = String(safe.salesOwner || safe.assignedTo || '').trim();
   const statuses = new Set([QUEUE_STATUSES.WAITING, QUEUE_STATUSES.FOLLOWUP, QUEUE_STATUSES.CLAIMED]);
+  const routingStatus = clean(safe.routing?.status || safe.salesBrainCurrent?.routing?.status || '');
+  const score = Number(safe.salesState?.leadScore || safe.leadScore || 0);
+  const routingReady = routingStatus === ROUTING_STATUSES.READY_FOR_AGENT;
+  const scoreReady = score >= 70 && safe.queue.status === QUEUE_STATUSES.AUTOMATION;
   return owner === String(agentUid || '').trim()
-    && statuses.has(safe.queue.status)
+    && (statuses.has(safe.queue.status) || routingReady || scoreReady)
     && !isTerminalLead(safe);
 }

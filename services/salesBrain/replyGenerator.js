@@ -45,22 +45,22 @@ function fallbackReply({ action, lead = {}, analysis = {}, conversationMemory = 
   const primaryGoal = salesContext.primaryGoal || analysis?.primaryNeed || conversationMemory?.facts?.primaryNeed?.value || '';
 
   const templates = {
-    ASK_BUSINESS_TYPE: `${prefix}para orientarte mejor, que tipo de negocio tienes?`,
-    ASK_PRIMARY_GOAL: `${prefix}que te gustaria mejorar mas en este momento: recibir mas clientes, vender mas o que mas personas conozcan tu negocio?`,
-    ASK_CURRENT_SITUATION: `${prefix}hoy como estas consiguiendo clientes y que te gustaria mejorar?`,
-    EXPLAIN_SERVICE: `${prefix}te explico rapido: la idea es darte una pagina clara para que tus clientes entiendan que ofreces, vean confianza y puedan contactarte facil por WhatsApp.`,
-    PRESENT_OFFER: `${prefix}te puedo pasar las opciones. Para recomendarte bien, primero dime si buscas algo sencillo para presentarte o una pagina mas completa para captar clientes.`,
-    SEND_EXAMPLES: `${prefix}claro. Te puedo mandar ejemplos similares para que veas el estilo y como quedaria aplicado a ${businessType}.`,
-    SEND_RELEVANT_CASE: `${prefix}entiendo. Antes de hablarte de contratar, prefiero mostrarte un caso parecido para que veas como trabajamos y que puedes esperar.`,
-    SEND_TESTIMONIAL: `${prefix}te comparto una referencia para que veas la experiencia de otros clientes antes de decidir.`,
-    HANDLE_PRICE_OBJECTION: `${prefix}lo entiendo. Para cuidar tu presupuesto, podemos empezar con lo esencial y dejar listo lo que realmente te ayude a conseguir clientes.`,
-    HANDLE_TRUST_OBJECTION: `${prefix}te entiendo. Si ya tuviste una mala experiencia, lo mejor es avanzar con claridad: primero te muestro ejemplos y te explico exactamente que se entrega.`,
-    HANDLE_TIME_OBJECTION: `${prefix}sin problema. Para hacerlo facil, puedo resumirte las opciones y cuando tengas un momento retomamos con la que mejor te convenga.`,
-    SEND_FORM: `${prefix}para prepararte una muestra aterrizada a tu negocio, te puedo pasar un formulario corto. Toma unos minutos y con eso la armamos mejor.`,
-    SEND_PAYMENT_LINK: `${prefix}si ya quieres avanzar, te paso los datos de pago y dejamos iniciado tu proyecto.`,
-    START_CLOSING: `${prefix}perfecto. ${primaryGoal === 'more_customers' ? 'Lo enfocamos en ayudarte a recibir mas clientes. ' : ''}Para arrancar, confirmame el nombre de tu negocio y te paso el siguiente paso para dejarlo iniciado.`,
-    START_FOLLOWUP: `${prefix}queda pendiente. Te doy seguimiento por aqui para que no se nos pase.`,
-    HANDOFF_HUMAN: `${prefix}prefiero revisarlo personalmente para darte una respuesta correcta. Te contacto por aqui en breve.`,
+    ASK_BUSINESS_TYPE: `${prefix}para ubicar bien la estrategia, dime de que giro es tu negocio y que vendes principalmente.`,
+    ASK_PRIMARY_GOAL: `${prefix}para recomendarte algo concreto: buscas mas clientes, mas confianza al presentarte o vender mas por WhatsApp?`,
+    ASK_CURRENT_SITUATION: `${prefix}hoy de donde te llegan clientes: recomendaciones, redes, Google o anuncios? Con eso te digo donde conviene atacar primero.`,
+    EXPLAIN_SERVICE: `${prefix}la idea es convertir tu presencia digital en una herramienta de venta: que la gente entienda rapido que haces, confie y te escriba por WhatsApp con menos friccion.`,
+    PRESENT_OFFER: `${prefix}con lo que me dices, lo mas util seria enfocarlo a captar prospectos y generar confianza rapido. Te puedo manejar una opcion inicial y una mas completa; dime si quieres arrancar con algo ligero o con una presencia mas fuerte.`,
+    SEND_EXAMPLES: `${prefix}si buscas ejemplos, te mando referencias parecidas a ${businessType}. Fijate sobre todo en claridad, confianza y llamada a WhatsApp; eso es lo que hace que el cliente avance.`,
+    SEND_RELEVANT_CASE: `${prefix}te muestro un caso parecido para que aterrices el resultado. La meta no es solo que se vea bonito: es que el prospecto entienda, confie y pregunte.`,
+    SEND_TESTIMONIAL: `${prefix}te comparto una referencia para que veas como trabajamos y que tipo de resultado buscamos antes de que tomes una decision.`,
+    HANDLE_PRICE_OBJECTION: `${prefix}si el presupuesto importa, conviene empezar por lo que mas impacto tiene: una presencia clara, prueba de confianza y contacto directo. Asi no pagas por adornos que no venden.`,
+    HANDLE_TRUST_OBJECTION: `${prefix}si lo que buscas es confianza, lo correcto es mostrar proceso, entregables y ejemplos antes de avanzar. Asi sabes que vas a recibir y evitas sorpresas.`,
+    HANDLE_TIME_OBJECTION: `${prefix}lo hacemos simple: te paso una opcion concreta y tu decides si lo retomamos hoy o lo dejamos agendado. No necesitas revisar mil cosas para avanzar.`,
+    SEND_FORM: `${prefix}para aterrizarlo a tu negocio, llena este formulario corto. Con eso te preparo una muestra con mejor enfoque comercial, no algo generico.`,
+    SEND_PAYMENT_LINK: `${prefix}si quieres avanzar, te paso los datos de pago y dejamos iniciado el proyecto hoy.`,
+    START_CLOSING: `${prefix}${primaryGoal === 'more_customers' ? 'lo enfocamos a generar mas prospectos. ' : ''}Para arrancar bien, confirmame el nombre del negocio y el servicio principal que quieres impulsar; con eso te paso el siguiente paso.`,
+    START_FOLLOWUP: `${prefix}lo dejo ubicado y te doy seguimiento con una propuesta concreta para que no quede en el aire.`,
+    HANDOFF_HUMAN: `${prefix}esto conviene revisarlo directo para darte una respuesta precisa. Te atiendo por aqui y lo cerramos bien.`,
     WAIT: '',
   };
 
@@ -87,11 +87,13 @@ export async function generateReply({
   }
 
   const system = [
-    'Eres redactor comercial para WhatsApp en Mexico.',
+    'Eres closer consultivo de ventas por WhatsApp en Mexico para servicios digitales.',
     'NO decidas la estrategia. La accion ya esta decidida y no puedes cambiarla.',
-    'Escribe una respuesta breve, natural y conversacional.',
-    'Maximo 1 a 3 parrafos cortos, una pregunta principal cuando aplique.',
-    'No uses lenguaje tecnico ni bloques largos. No inventes links, precios ni casos especificos.',
+    'Escribe con tono seguro, concreto y orientado a avance comercial.',
+    'Evita frases complacientes o blandas como "que bueno", "me encanta", "espero tu respuesta", "para poder ayudarte mejor".',
+    'Usa neuromarketing practico: claridad, confianza, beneficio tangible, reduccion de riesgo y siguiente paso simple.',
+    'Maximo 1 o 2 parrafos cortos. Haz una sola pregunta de avance cuando aplique.',
+    'No uses lenguaje tecnico ni bloques largos. No inventes links, precios, descuentos ni casos especificos.',
   ].join('\n');
 
   const user = JSON.stringify({

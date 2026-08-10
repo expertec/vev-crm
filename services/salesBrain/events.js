@@ -102,7 +102,7 @@ export async function recordSellerFeedback({
   const safeEventId = cleanText(eventId, 220);
   const safeDecision = cleanText(decision, 40);
   if (!safeLeadId || !safeEventId) throw new Error('Faltan leadId o eventId.');
-  if (!['accepted', 'edited', 'rejected', 'expired', 'superseded'].includes(safeDecision)) {
+  if (!['accepted', 'edited', 'spoken', 'rejected', 'expired', 'superseded'].includes(safeDecision)) {
     throw new Error('Decision de vendedor invalida.');
   }
 
@@ -112,7 +112,7 @@ export async function recordSellerFeedback({
   if (!eventSnap.exists) throw new Error('Evento Sales Brain no encontrado.');
   const eventData = eventSnap.data() || {};
   const currentDecision = cleanText(eventData?.sellerDecision || eventData?.status || '', 40);
-  const finalDecisions = new Set(['accepted', 'edited', 'rejected', 'expired', 'superseded']);
+  const finalDecisions = new Set(['accepted', 'edited', 'spoken', 'rejected', 'expired', 'superseded']);
   if (finalDecisions.has(currentDecision)) {
     if (currentDecision === safeDecision) {
       return {
