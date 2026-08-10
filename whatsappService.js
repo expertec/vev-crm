@@ -33,6 +33,7 @@ import { extractMetaAdAttribution } from './utils/metaAdDetector.js';
 import { resolveMetaAdSequenceRoute } from './utils/metaAdSequenceRouter.js';
 import { extractHashtags, resolveStaticTriggerFromMessage } from './utils/messageTriggerRouter.js';
 import { handleInboundLeadReply } from './services/hotLeadDetector.js';
+import { buildNewInboundLeadSalesBrainDefaults } from './services/salesBrain/index.js';
 import { getWhatsAppWebVersion } from './baileysVersion.js';
 
 
@@ -1348,6 +1349,7 @@ export async function connectToWhatsApp() {
               if (!leadSnap.exists) {
                 // Crear lead nuevo sin mensaje
                 await leadRef.set({
+                  ...buildNewInboundLeadSalesBrainDefaults(),
                   ...leadPayload,
                   fecha_creacion: inboundAt,
                   estado: 'nuevo',
@@ -1765,6 +1767,7 @@ export async function connectToWhatsApp() {
           // Lead nuevo
           if (!leadSnap.exists) {
             await leadRef.set({
+              ...buildNewInboundLeadSalesBrainDefaults(),
               ...baseLead,
               fecha_creacion: inboundAt,
               estado: 'nuevo',

@@ -1,4 +1,5 @@
 import { db } from '../firebaseAdmin.js'; // Asegúrate de tener Firebase Admin configurado
+import { buildNewInboundLeadSalesBrainDefaults } from '../services/salesBrain/index.js';
 
 /**
  * Función para manejar la recepción de mensajes y guardar la conversación en Firebase
@@ -18,6 +19,7 @@ export async function receiveMessage(message) {
     if (!leadDoc.exists) {
       const telefono = jid.split('@')[0];  // Extraemos el número de teléfono del JID
       const newLead = {
+        ...buildNewInboundLeadSalesBrainDefaults(),
         telefono,
         nombre: message.pushName || 'Desconocido',
         fecha_creacion: new Date(),

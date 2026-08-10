@@ -337,6 +337,11 @@ export {
 } from './analyzeConversation.js';
 
 export {
+  buildNewInboundLeadSalesBrainDefaults,
+  getDefaultSalesBrainMode,
+} from './defaultMode.js';
+
+export {
   calculateLeadScore,
 } from './leadScore.js';
 
