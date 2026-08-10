@@ -14,6 +14,7 @@ const { Timestamp } = admin.firestore;
 
 const SEQUENCE_LOCK_TTL_MS = 2 * 60 * 1000; // 2 minutos
 const MAX_SEQUENCE_BATCH = 25;
+const MAX_DUE_SEQUENCE_STEPS_PER_RUN = Math.max(1, Number(process.env.MAX_DUE_SEQUENCE_STEPS_PER_RUN || 8));
 
 /* ----------------------------- utilidades ------------------------------ */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -1063,7 +1064,11 @@ export async function processLeadSequences(leadId) {
 
     const now = new Date();
 
+    let stopProcessingSequences = false;
+    let dueStepsProcessedThisRun = 0;
+
     for (const seq of secuencias) {
+      if (stopProcessingSequences) break;
       if (seq.completed) continue;
       if (seq.status === 'waiting_for_reply' || seq.status === 'paused_for_agent') continue;
       if (formCompleted && shouldStopTriggerAfterForm(seq.trigger)) {
@@ -1079,55 +1084,71 @@ export async function processLeadSequences(leadId) {
         continue;
       }
 
-      const runAt = computeSequenceStepRun(seq.trigger, seq.startTime, seq.index);
-      if (!runAt) {
-        seq.completed = true;
-        continue;
-      }
-      if (runAt > now) continue; // aún no vence
+      while (
+        !seq.completed
+        && seq.status !== 'waiting_for_reply'
+        && seq.status !== 'paused_for_agent'
+        && dueStepsProcessedThisRun < MAX_DUE_SEQUENCE_STEPS_PER_RUN
+      ) {
+        const runAt = computeSequenceStepRun(seq.trigger, seq.startTime, seq.index);
+        if (!runAt) {
+          seq.completed = true;
+          break;
+        }
+        if (runAt > now) break; // aún no vence
 
-      const stepKey = `${seq.trigger}:${seq.index}`;
-      if (sentSteps[stepKey]) {
+        const stepKey = `${seq.trigger}:${seq.index}`;
+        if (sentSteps[stepKey]) {
+          seq.index += 1;
+          if (seq.index >= def.messages.length) seq.completed = true;
+          continue;
+        }
+
+        const msg = def.messages[seq.index] || {};
+        const payloadMeta = {
+          sequenceTrigger: seq.trigger,
+          sequenceStep: seq.index,
+        };
+        const stepType = normType(msg?.type || '');
+        const isQuestionStep = stepType === 'question';
+        const payload = isQuestionStep
+          ? { ...msg, ...payloadMeta, type: 'texto', contenido: msg.contenido || msg.message || '' }
+          : { ...msg, ...payloadMeta };
+        await deliverPayload(leadId, payload);
+        processed += 1;
+        dueStepsProcessedThisRun += 1;
+        sentSteps[stepKey] = Timestamp.now();
+        if (!hasTriggerInHistory(deliveredHistory, seq.trigger)) {
+          deliveredHistory.push(seq.trigger);
+        }
+        await persistSystemMessage(leadId, `[sequence:${seq.trigger}] step ${seq.index} enviado`);
+
+        if (isQuestionStep && msg.waitForReply === true) {
+          seq.status = 'waiting_for_reply';
+          await leadRef.set({
+            sequenceQuestionPending: {
+              status: 'waiting_for_reply',
+              trigger: seq.trigger,
+              index: seq.index,
+              saveTo: String(msg.saveTo || '').trim() || null,
+              objective: String(msg.objective || '').trim() || null,
+              askedAt: Timestamp.now(),
+            },
+          }, { merge: true });
+          stopProcessingSequences = true;
+          break;
+        }
+
         seq.index += 1;
         if (seq.index >= def.messages.length) seq.completed = true;
-        continue;
       }
 
-      const msg = def.messages[seq.index] || {};
-      const payloadMeta = {
-        sequenceTrigger: seq.trigger,
-        sequenceStep: seq.index,
-      };
-      const stepType = normType(msg?.type || '');
-      const isQuestionStep = stepType === 'question';
-      const payload = isQuestionStep
-        ? { ...msg, ...payloadMeta, type: 'texto', contenido: msg.contenido || msg.message || '' }
-        : { ...msg, ...payloadMeta };
-      await deliverPayload(leadId, payload);
-      processed += 1;
-      sentSteps[stepKey] = Timestamp.now();
-      if (!hasTriggerInHistory(deliveredHistory, seq.trigger)) {
-        deliveredHistory.push(seq.trigger);
-      }
-      await persistSystemMessage(leadId, `[sequence:${seq.trigger}] step ${seq.index} enviado`);
-
-      if (isQuestionStep && msg.waitForReply === true) {
-        seq.status = 'waiting_for_reply';
-        await leadRef.set({
-          sequenceQuestionPending: {
-            status: 'waiting_for_reply',
-            trigger: seq.trigger,
-            index: seq.index,
-            saveTo: String(msg.saveTo || '').trim() || null,
-            objective: String(msg.objective || '').trim() || null,
-            askedAt: Timestamp.now(),
-          },
-        }, { merge: true });
+      if (dueStepsProcessedThisRun >= MAX_DUE_SEQUENCE_STEPS_PER_RUN) {
+        console.warn(
+          `[processLeadSequences] limite de pasos vencidos alcanzado lead=${leadId} max=${MAX_DUE_SEQUENCE_STEPS_PER_RUN}`
+        );
         break;
       }
-
-      seq.index += 1;
-      if (seq.index >= def.messages.length) seq.completed = true;
     }
 
     // limpiar completados
