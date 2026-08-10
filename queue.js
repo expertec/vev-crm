@@ -7,6 +7,7 @@ import {
   sendAudioMessage,
 } from './whatsappService.js';
 import { getBuiltinSequenceDefinition } from './services/salesQueue/welcomeSequence.js';
+import { shouldBlockSequenceByLeadContext } from './utils/sequenceTriggerGuards.js';
 
 const { FieldValue } = admin.firestore;
 const { Timestamp } = admin.firestore;
@@ -409,6 +410,9 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
 
     // No duplicar trigger activo aunque lleguen múltiples eventos en paralelo.
     const secAct = Array.isArray(leadData.secuenciasActivas) ? [...leadData.secuenciasActivas] : [];
+    const contextBlock = shouldBlockSequenceByLeadContext(leadData, normalizedTrigger);
+    if (contextBlock.blocked) return `blocked:${contextBlock.reason}`;
+
     if (hasSameTrigger(secAct, normalizedTrigger)) return 'already-active';
 
     // Regla global: cada trigger se ejecuta una sola vez por lead (histórico).
@@ -460,6 +464,10 @@ export async function scheduleSequenceForLead(leadId, trigger, startAt = new Dat
   });
 
   if (scheduleResult !== 'scheduled') {
+    if (String(scheduleResult || '').startsWith('blocked:')) {
+      console.log(`[scheduleSequenceForLead] trigger '${normalizedTrigger}' bloqueado en ${leadId}: ${scheduleResult}`);
+      return 0;
+    }
     if (scheduleResult === 'already-scheduled') {
       console.log(`[scheduleSequenceForLead] trigger '${normalizedTrigger}' ya fue programado antes en ${leadId}, se omite.`);
       return 0;
@@ -951,6 +959,33 @@ export async function processLeadSequences(leadId) {
       ? [...data.sequenceDeliveredTriggers]
       : [];
     const formCompleted = hasLeadCompletedForm(data);
+    const blockedByContext = [];
+    secuencias = secuencias.filter((seq) => {
+      if (!seq || seq.completed) return false;
+      const contextBlock = shouldBlockSequenceByLeadContext(data, seq.trigger);
+      if (!contextBlock.blocked) return true;
+      blockedByContext.push({ trigger: seq.trigger, reason: contextBlock.reason });
+      return false;
+    });
+
+    if (blockedByContext.length > 0) {
+      const nextAtAfterBlock = computeNextRunForLead(secuencias);
+      const blockPatch = {
+        secuenciasActivas: secuencias,
+        hasActiveSequences: secuencias.length > 0,
+        sequenceBlockedReason: blockedByContext[0]?.reason || 'sequence_context_block',
+        sequenceBlockedAt: Timestamp.now(),
+      };
+      if (nextAtAfterBlock) blockPatch.nextSequenceRunAt = nextAtAfterBlock;
+      else blockPatch.nextSequenceRunAt = FieldValue.delete();
+      await leadRef.set(blockPatch, { merge: true });
+      for (const blocked of blockedByContext) {
+        await persistSystemMessage(
+          leadId,
+          `[sequence] bloqueada por contexto: ${blocked.trigger} (${blocked.reason})`
+        ).catch(() => {});
+      }
+    }
 
     if (shouldPauseAutomationForSales(data)) {
       const paused = secuencias.map((seq) => (

@@ -12,6 +12,15 @@ const STATIC_HASHTAG_MAP = {
 
 const STATIC_CANCEL_BY_TRIGGER = {
   LeadWeb: ['NuevoLeadWeb', 'NuevoLead'],
+  PlanRedes: [
+    'LeadWeb',
+    'LeadWhatsapp',
+    'LeadPaginaWeb',
+    'NuevoLead',
+    'NuevoLeadWeb',
+    'WebPromo',
+    'WebEnviada',
+  ],
 };
 
 const STATIC_TEXT_TRIGGER_RULES = [

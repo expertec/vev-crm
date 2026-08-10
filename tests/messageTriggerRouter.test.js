@@ -35,6 +35,8 @@ test('resuelve PlanRedes desde #RedesSociales', () => {
 
   assert.equal(result.trigger, 'PlanRedes');
   assert.equal(result.source, 'hashtag');
+  assert.ok(result.cancel.includes('NuevoLeadWeb'));
+  assert.ok(result.cancel.includes('WebPromo'));
 });
 
 test('resuelve PlanRedes desde texto directo de redes sociales', () => {

@@ -37,6 +37,7 @@ import {
   resolveStaticTriggerFromMessage,
   shouldPreferMessageTriggerOverMetaRoute,
 } from './utils/messageTriggerRouter.js';
+import { shouldBlockSequenceByLeadContext } from './utils/sequenceTriggerGuards.js';
 import { handleInboundLeadReply } from './services/hotLeadDetector.js';
 import { buildNewInboundLeadSalesBrainDefaults } from './services/salesBrain/index.js';
 import { getWhatsAppWebVersion } from './baileysVersion.js';
@@ -421,6 +422,8 @@ function getSequenceBlockReason(leadData, nextTrigger) {
   if (hasCompletedForm) {
     if (FORM_COMPLETED_BLOCKED_TRIGGERS.has(trigger)) return 'form_completed';
   }
+  const contextBlock = shouldBlockSequenceByLeadContext(leadData, nextTrigger);
+  if (contextBlock.blocked) return contextBlock.reason;
   return '';
 }
 
