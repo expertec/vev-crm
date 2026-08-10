@@ -1,6 +1,8 @@
 import { ROUTING_REASONS, ROUTING_STATUSES, QUEUE_STATUSES } from './config.js';
 import { buildCommercialSignals, calculateQueuePriority } from './priority.js';
 import { withLeadDefaults } from './leadDefaults.js';
+import { getTerminalLeadReason } from './eligibility.js';
+import { humanQueueReason } from './reasons.js';
 
 function cleanText(value = '', max = 500) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -20,8 +22,7 @@ function hasSignal(analysis = {}, signal = '') {
 }
 
 function isClosedLead(lead = {}, analysis = {}) {
-  const status = cleanText(lead.estado || '', 80).toLowerCase();
-  if (['compro', 'cliente', 'ganado', 'won'].includes(status)) return true;
+  if (getTerminalLeadReason(lead)) return true;
   if (analysis?.intent === 'no_interest' || hasSignal(analysis, 'stop_requested')) return true;
   return false;
 }
@@ -107,6 +108,12 @@ export async function updateRoutingAfterInbound({
           ? QUEUE_STATUSES.CLOSED
           : QUEUE_STATUSES.AUTOMATION;
 
+  const humanReason = humanQueueReason({
+    reasonCode: routing.reason,
+    lead: currentLead,
+    analysis: effectiveAnalysis,
+  });
+
   const patch = {
     salesOwner: ownerId,
     commercialSignals,
@@ -119,7 +126,8 @@ export async function updateRoutingAfterInbound({
     },
     'queue.status': queueStatus,
     'queue.priority': priorityResult.priority,
-    'queue.reason': routing.reason,
+    'queue.reasonCode': routing.reason,
+    'queue.reason': humanReason,
     'queue.priorityFactors': priorityResult.factors,
     'queue.updatedAt': FieldValue.serverTimestamp(),
   };
@@ -167,7 +175,8 @@ export async function updateRoutingAfterInbound({
     queue: {
       status: queueStatus,
       priority: priorityResult.priority,
-      reason: routing.reason,
+      reasonCode: routing.reason,
+      reason: humanReason,
       ownerId,
     },
     commercialSignals,

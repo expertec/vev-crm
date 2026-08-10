@@ -6,6 +6,7 @@ import {
   sendVideoNote,
   sendAudioMessage,
 } from './whatsappService.js';
+import { getBuiltinSequenceDefinition } from './services/salesQueue/welcomeSequence.js';
 
 const { FieldValue } = admin.firestore;
 const { Timestamp } = admin.firestore;
@@ -321,6 +322,11 @@ async function getSequenceDefinition(trigger) {
     if (!q.empty) seqDoc = q.docs[0];
   }
   if (!seqDoc.exists) {
+    const builtin = getBuiltinSequenceDefinition(key);
+    if (builtin) {
+      console.warn(`[getSequenceDefinition] No existe secuencias/${key}. Usando definicion integrada.`);
+      return setSeqCache(key, builtin);
+    }
     const fallback = TRIGGER_FALLBACK[key];
     if (fallback) {
       console.warn(`[getSequenceDefinition] No existe secuencias/${key}. Usando fallback → ${fallback}`);

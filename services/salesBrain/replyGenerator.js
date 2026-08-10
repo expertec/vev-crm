@@ -40,11 +40,13 @@ async function getOpenAi() {
 function fallbackReply({ action, lead = {}, analysis = {}, conversationMemory = {} } = {}) {
   const nombre = firstName(lead?.nombre || '');
   const prefix = nombre ? `${nombre}, ` : '';
-  const businessType = analysis?.businessType || conversationMemory?.facts?.businessType?.value || 'tu negocio';
+  const salesContext = lead?.salesContext && typeof lead.salesContext === 'object' ? lead.salesContext : {};
+  const businessType = analysis?.businessType || salesContext.businessType || conversationMemory?.facts?.businessType?.value || 'tu negocio';
+  const primaryGoal = salesContext.primaryGoal || analysis?.primaryNeed || conversationMemory?.facts?.primaryNeed?.value || '';
 
   const templates = {
     ASK_BUSINESS_TYPE: `${prefix}para orientarte mejor, que tipo de negocio tienes?`,
-    ASK_PRIMARY_GOAL: `${prefix}que te gustaria lograr primero: mas clientes, verte mas profesional o vender un servicio especifico?`,
+    ASK_PRIMARY_GOAL: `${prefix}que te gustaria mejorar mas en este momento: recibir mas clientes, vender mas o que mas personas conozcan tu negocio?`,
     ASK_CURRENT_SITUATION: `${prefix}hoy como estas consiguiendo clientes y que te gustaria mejorar?`,
     EXPLAIN_SERVICE: `${prefix}te explico rapido: la idea es darte una pagina clara para que tus clientes entiendan que ofreces, vean confianza y puedan contactarte facil por WhatsApp.`,
     PRESENT_OFFER: `${prefix}te puedo pasar las opciones. Para recomendarte bien, primero dime si buscas algo sencillo para presentarte o una pagina mas completa para captar clientes.`,
@@ -56,7 +58,7 @@ function fallbackReply({ action, lead = {}, analysis = {}, conversationMemory = 
     HANDLE_TIME_OBJECTION: `${prefix}sin problema. Para hacerlo facil, puedo resumirte las opciones y cuando tengas un momento retomamos con la que mejor te convenga.`,
     SEND_FORM: `${prefix}para prepararte una muestra aterrizada a tu negocio, te puedo pasar un formulario corto. Toma unos minutos y con eso la armamos mejor.`,
     SEND_PAYMENT_LINK: `${prefix}si ya quieres avanzar, te paso los datos de pago y dejamos iniciado tu proyecto.`,
-    START_CLOSING: `${prefix}perfecto. Para arrancar, confirmame el nombre de tu negocio y te paso el siguiente paso para dejarlo iniciado.`,
+    START_CLOSING: `${prefix}perfecto. ${primaryGoal === 'more_customers' ? 'Lo enfocamos en ayudarte a recibir mas clientes. ' : ''}Para arrancar, confirmame el nombre de tu negocio y te paso el siguiente paso para dejarlo iniciado.`,
     START_FOLLOWUP: `${prefix}queda pendiente. Te doy seguimiento por aqui para que no se nos pase.`,
     HANDOFF_HUMAN: `${prefix}prefiero revisarlo personalmente para darte una respuesta correcta. Te contacto por aqui en breve.`,
     WAIT: '',
@@ -99,6 +101,7 @@ export async function generateReply({
     salesState,
     conversationMemory,
     acquisitionContext,
+    salesContext: lead?.salesContext || {},
     maxChars: MAX_REPLY_CHARS,
   });
 

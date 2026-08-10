@@ -99,15 +99,6 @@ async function applyPendingSequenceQuestionReply({ leadRef, leadData = {}, lates
     secuenciasActivas: nextSequences,
     hasActiveSequences: nextSequences.some((seq) => seq?.completed !== true && seq?.status !== 'paused_for_agent'),
   };
-  if (saveTo) {
-    const pathParts = saveTo.split('.');
-    const existingValue = pathParts.reduce((acc, key) => (
-      acc && typeof acc === 'object' ? acc[key] : undefined
-    ), currentLead);
-    if (existingValue === undefined || existingValue === null || existingValue === '') {
-      patch[saveTo] = latestText;
-    }
-  }
   if (rawSaveTo) patch[rawSaveTo] = latestText;
   if (requiresAgent) {
     patch.nextSequenceRunAt = FieldValue.delete();

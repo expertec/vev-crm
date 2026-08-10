@@ -51,8 +51,10 @@ export function decideNextAction({
 } = {}) {
   const signals = new Set(Array.isArray(analysis?.signals) ? analysis.signals : []);
   const guards = guardrails || buildSalesBrainGuardrails({ lead, analysis });
-  const businessType = analysis?.businessType || salesState?.businessType || getFactValue(conversationMemory, 'businessType');
-  const primaryNeed = analysis?.primaryNeed || salesState?.primaryNeed || getFactValue(conversationMemory, 'primaryNeed');
+  const salesContext = lead?.salesContext && typeof lead.salesContext === 'object' ? lead.salesContext : {};
+  const businessType = analysis?.businessType || salesState?.businessType || salesContext.businessType || getFactValue(conversationMemory, 'businessType');
+  const primaryNeed = analysis?.primaryNeed || salesState?.primaryNeed || salesContext.primaryGoal || getFactValue(conversationMemory, 'primaryNeed');
+  const previousExperience = salesContext.previousExperience || getFactValue(conversationMemory, 'previousExperience');
 
   const result = (action, reason, extra = {}) => ({
     nextBestAction: normalizeNextBestAction(action),
@@ -90,6 +92,9 @@ export function decideNextAction({
   // PRIORIDAD 4: objeciones.
   if (analysis?.objection === 'trust' || analysis?.objection === 'bad_previous_experience' || signals.has('trust_objection') || signals.has('previous_bad_agency_experience')) {
     return result('HANDLE_TRUST_OBJECTION', 'Hay objecion de confianza o mala experiencia previa.');
+  }
+  if (previousExperience === 'bad_experience' || previousExperience === 'no_results') {
+    return result('HANDLE_TRUST_OBJECTION', 'Tuvo una mala experiencia previa o no vio resultados.');
   }
   if (analysis?.objection === 'price' || signals.has('price_objection')) {
     return result('HANDLE_PRICE_OBJECTION', 'Hay objecion de precio.');

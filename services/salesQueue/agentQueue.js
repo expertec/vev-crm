@@ -1,10 +1,41 @@
-import { admin, db as defaultDb } from '../../firebaseAdmin.js';
 import { OUTCOME_TYPES, QUEUE_STATUSES, ROUTING_STATUSES } from './config.js';
 import { calculateQueuePriority } from './priority.js';
 import { withLeadDefaults } from './leadDefaults.js';
-import { recordSalesActivity } from './activity.js';
+import {
+  canClaimGeneralLead,
+  canShowPersonalWork,
+  isTerminalLead,
+} from './eligibility.js';
+import { humanQueueReason } from './reasons.js';
 
-const { FieldValue, Timestamp } = admin.firestore;
+let firebaseDeps = null;
+
+async function resolveDeps({ db = null, firestore = null, recordActivity = null } = {}) {
+  if (db && firestore) {
+    return {
+      db,
+      FieldValue: firestore.FieldValue,
+      Timestamp: firestore.Timestamp,
+      recordActivity: recordActivity || (async () => null),
+    };
+  }
+  if (!firebaseDeps) {
+    const firebase = await import('../../firebaseAdmin.js');
+    const activity = await import('./activity.js');
+    firebaseDeps = {
+      db: firebase.db,
+      FieldValue: firebase.admin.firestore.FieldValue,
+      Timestamp: firebase.admin.firestore.Timestamp,
+      recordActivity: activity.recordSalesActivity,
+    };
+  }
+  return {
+    db: db || firebaseDeps.db,
+    FieldValue: firestore?.FieldValue || firebaseDeps.FieldValue,
+    Timestamp: firestore?.Timestamp || firebaseDeps.Timestamp,
+    recordActivity: recordActivity || firebaseDeps.recordActivity,
+  };
+}
 
 function cleanText(value = '', max = 500) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -19,7 +50,7 @@ function toMillis(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function timestampFromInput(value) {
+function timestampFromInput(value, Timestamp) {
   if (!value) return null;
   if (typeof value?.toDate === 'function') return value;
   const date = value instanceof Date ? value : new Date(value);
@@ -39,34 +70,20 @@ function sortByWorkPriority(a, b) {
   return toMillis(a?.queue?.enteredAt || a?.lastMessageAt) - toMillis(b?.queue?.enteredAt || b?.lastMessageAt);
 }
 
-function isClosedOrStopped(lead = {}) {
-  const status = cleanText(lead.estado || '', 80).toLowerCase();
-  return ['compro', 'cliente', 'ganado', 'won', 'no interesado', 'not_interested'].includes(status)
-    || lead.stopSequences === true
-    || lead.queue.status === QUEUE_STATUSES.CLOSED
-    || lead.routing?.status === ROUTING_STATUSES.CLOSED;
-}
-
-function canClaimGeneralLead(lead = {}) {
-  const safe = withLeadDefaults(lead);
-  return safe.queue.status === QUEUE_STATUSES.WAITING
-    && !safe.salesOwner
-    && !safe.assignedTo
-    && !isClosedOrStopped(safe);
-}
-
 async function loadCandidateDocs(db, constraints = []) {
   const query = constraints.reduce((ref, constraint) => constraint(ref), db.collection('leads'));
   const snap = await query.limit(60).get();
   return snap.docs.map(serializeLead).filter(Boolean);
 }
 
-export async function getAgentQueueStats({ db = defaultDb, agentUid = '' } = {}) {
+export async function getAgentQueueStats({ db = null, firestore = null, agentUid = '' } = {}) {
+  const deps = await resolveDeps({ db, firestore });
+  db = deps.db;
   const waitingSnap = await db.collection('leads')
     .where('queue.status', '==', QUEUE_STATUSES.WAITING)
     .limit(200)
     .get();
-  const waiting = waitingSnap.docs.map(serializeLead).filter((lead) => !lead.salesOwner && !lead.assignedTo);
+  const waiting = waitingSnap.docs.map(serializeLead).filter(canClaimGeneralLead);
 
   let mine = [];
   const safeAgent = cleanText(agentUid, 180);
@@ -86,7 +103,10 @@ export async function getAgentQueueStats({ db = defaultDb, agentUid = '' } = {})
   };
 }
 
-export async function claimNextLead({ db = defaultDb, agentUid = '', agentName = '' } = {}) {
+export async function claimNextLead({ db = null, firestore = null, recordActivity = null, agentUid = '', agentName = '' } = {}) {
+  const deps = await resolveDeps({ db, firestore, recordActivity });
+  db = deps.db;
+  const { FieldValue } = deps;
   const safeAgent = cleanText(agentUid, 180);
   if (!safeAgent) {
     const error = new Error('Falta agentUid.');
@@ -108,6 +128,8 @@ export async function claimNextLead({ db = defaultDb, agentUid = '', agentName =
       if (!canClaimGeneralLead(latest)) return null;
 
       const priority = calculateQueuePriority({ lead: latest }).priority || Number(latest.queue.priority || 0);
+      const reasonCode = latest.queue.reasonCode || latest.queue.reason || 'manual_claim';
+      const reason = humanQueueReason({ reasonCode, lead: latest });
       tx.set(leadRef, {
         assignedTo: safeAgent,
         assignedToName: cleanText(agentName, 180) || safeAgent,
@@ -116,15 +138,18 @@ export async function claimNextLead({ db = defaultDb, agentUid = '', agentName =
         salesOwner: safeAgent,
         'queue.status': QUEUE_STATUSES.CLAIMED,
         'queue.priority': priority,
+        'queue.reasonCode': reasonCode,
+        'queue.reason': reason,
         'queue.claimedAt': FieldValue.serverTimestamp(),
+        'queue.firstAgentActionAt': FieldValue.serverTimestamp(),
         'queue.lastAgentId': safeAgent,
       }, { merge: true });
 
-      return { ...latest, assignedTo: safeAgent, salesOwner: safeAgent, queue: { ...latest.queue, status: QUEUE_STATUSES.CLAIMED, priority } };
+      return { ...latest, assignedTo: safeAgent, salesOwner: safeAgent, queue: { ...latest.queue, status: QUEUE_STATUSES.CLAIMED, priority, reasonCode, reason } };
     });
 
     if (claimed) {
-      await recordSalesActivity({
+      await deps.recordActivity({
         db,
         leadRef,
         type: 'queue_claimed',
@@ -138,7 +163,10 @@ export async function claimNextLead({ db = defaultDb, agentUid = '', agentName =
   return { claimed: false, lead: null };
 }
 
-export async function getNextAgentWork({ db = defaultDb, agentUid = '', agentName = '' } = {}) {
+export async function getNextAgentWork({ db = null, firestore = null, recordActivity = null, agentUid = '', agentName = '' } = {}) {
+  const deps = await resolveDeps({ db, firestore, recordActivity });
+  db = deps.db;
+  const { FieldValue } = deps;
   const safeAgent = cleanText(agentUid, 180);
   if (!safeAgent) {
     const error = new Error('Falta agentUid.');
@@ -146,8 +174,6 @@ export async function getNextAgentWork({ db = defaultDb, agentUid = '', agentNam
     throw error;
   }
 
-  const statuses = [QUEUE_STATUSES.WAITING, QUEUE_STATUSES.FOLLOWUP, QUEUE_STATUSES.CLAIMED];
-  const statusSet = new Set(statuses);
   const personalSnap = await db.collection('leads')
     .where('salesOwner', '==', safeAgent)
     .limit(80)
@@ -155,7 +181,7 @@ export async function getNextAgentWork({ db = defaultDb, agentUid = '', agentNam
     .catch(() => ({ docs: [] }));
   const personal = personalSnap.docs
     .map(serializeLead)
-    .filter((lead) => lead && statusSet.has(lead.queue.status) && !isClosedOrStopped(lead))
+    .filter((lead) => lead && canShowPersonalWork(lead, safeAgent))
     .map((lead) => ({
       ...lead,
       queue: {
@@ -167,7 +193,12 @@ export async function getNextAgentWork({ db = defaultDb, agentUid = '', agentNam
 
   if (personal[0]) {
     const leadRef = db.collection('leads').doc(personal[0].id);
-    await recordSalesActivity({
+    if (!personal[0].queue?.firstAgentActionAt) {
+      await leadRef.set({
+        'queue.firstAgentActionAt': FieldValue.serverTimestamp(),
+      }, { merge: true }).catch(() => {});
+    }
+    await deps.recordActivity({
       db,
       leadRef,
       type: 'agent_opened',
@@ -177,9 +208,9 @@ export async function getNextAgentWork({ db = defaultDb, agentUid = '', agentNam
     return { source: 'personal', lead: personal[0] };
   }
 
-  const claimed = await claimNextLead({ db, agentUid: safeAgent, agentName });
+  const claimed = await claimNextLead({ db, firestore, recordActivity: deps.recordActivity, agentUid: safeAgent, agentName });
   if (claimed.claimed && claimed.lead) {
-    await recordSalesActivity({
+    await deps.recordActivity({
       db,
       leadRef: db.collection('leads').doc(claimed.lead.id),
       type: 'agent_opened',
@@ -193,7 +224,9 @@ export async function getNextAgentWork({ db = defaultDb, agentUid = '', agentNam
 }
 
 export async function registerAgentOutcome({
-  db = defaultDb,
+  db = null,
+  firestore = null,
+  recordActivity = null,
   leadId = '',
   agentUid = '',
   agentName = '',
@@ -202,6 +235,9 @@ export async function registerAgentOutcome({
   followUpAt = null,
   followUpReason = '',
 } = {}) {
+  const deps = await resolveDeps({ db, firestore, recordActivity });
+  db = deps.db;
+  const { FieldValue, Timestamp } = deps;
   const safeLeadId = cleanText(leadId, 220);
   const safeAgent = cleanText(agentUid, 180);
   const safeOutcome = cleanText(outcome, 80);
@@ -222,7 +258,7 @@ export async function registerAgentOutcome({
   }
 
   const leadRef = db.collection('leads').doc(safeLeadId);
-  const followUpTimestamp = timestampFromInput(followUpAt);
+  const followUpTimestamp = timestampFromInput(followUpAt, Timestamp);
   const result = await db.runTransaction(async (tx) => {
     const snap = await tx.get(leadRef);
     if (!snap.exists) {
@@ -250,8 +286,12 @@ export async function registerAgentOutcome({
         createdAt: FieldValue.serverTimestamp(),
       },
       'queue.lastOutcome': safeOutcome,
+      'queue.outcomeAt': FieldValue.serverTimestamp(),
       'queue.updatedAt': FieldValue.serverTimestamp(),
     };
+    if (!lead.queue?.firstAgentActionAt) {
+      patch['queue.firstAgentActionAt'] = FieldValue.serverTimestamp();
+    }
 
     if (safeOutcome === 'followup') {
       if (!followUpTimestamp) {
@@ -265,27 +305,44 @@ export async function registerAgentOutcome({
         reason: cleanText(followUpReason || notes, 500) || 'agent_followup',
       };
       patch['queue.status'] = QUEUE_STATUSES.FOLLOWUP;
-      patch['queue.reason'] = 'agent_followup';
+      patch['queue.reasonCode'] = 'agent_followup';
+      patch['queue.reason'] = 'Seguimiento programado por el vendedor';
       patch['routing.status'] = ROUTING_STATUSES.FOLLOWUP;
     } else if (safeOutcome === 'sale') {
       patch.followUp = { status: 'completed', nextAt: null, reason: null };
       patch['queue.status'] = QUEUE_STATUSES.CLOSED;
-      patch['queue.reason'] = 'sale';
+      patch['queue.reasonCode'] = 'sale';
+      patch['queue.reason'] = 'Venta registrada';
       patch['routing.status'] = ROUTING_STATUSES.CLOSED;
-      patch.estado = lead.estado || 'Compro';
+      patch.estado = 'compro';
+      patch.wonAt = FieldValue.serverTimestamp();
+      patch.hasActiveSequences = false;
+      patch.stopSequences = true;
+      patch.secuenciasActivas = [];
+      patch.nextSequenceRunAt = FieldValue.delete();
+      patch.etiquetas = FieldValue.arrayUnion('Compro');
     } else if (safeOutcome === 'not_interested') {
       patch.followUp = { status: 'completed', nextAt: null, reason: null };
       patch['queue.status'] = QUEUE_STATUSES.CLOSED;
-      patch['queue.reason'] = 'not_interested';
+      patch['queue.reasonCode'] = 'not_interested';
+      patch['queue.reason'] = 'Marcado como no interesado';
       patch['routing.status'] = ROUTING_STATUSES.CLOSED;
-      patch.estado = lead.estado || 'No interesado';
+      patch.estado = 'No interesado';
+      patch.lostAt = FieldValue.serverTimestamp();
+      patch.hasActiveSequences = false;
+      patch.stopSequences = true;
+      patch.secuenciasActivas = [];
+      patch.nextSequenceRunAt = FieldValue.delete();
+      patch.etiquetas = FieldValue.arrayUnion('No interesado');
     } else if (safeOutcome === 'no_response') {
       patch['queue.status'] = QUEUE_STATUSES.AUTOMATION;
-      patch['queue.reason'] = 'agent_no_response';
+      patch['queue.reasonCode'] = 'agent_no_response';
+      patch['queue.reason'] = 'Sin respuesta: vuelve a automatizacion y reactivacion';
       patch['routing.status'] = ROUTING_STATUSES.AUTOMATION;
     } else {
       patch['queue.status'] = QUEUE_STATUSES.AUTOMATION;
-      patch['queue.reason'] = 'agent_interested';
+      patch['queue.reasonCode'] = 'agent_interested';
+      patch['queue.reason'] = 'Atendido: mantiene propietario para futuras respuestas';
       patch['routing.status'] = ROUTING_STATUSES.AUTOMATION;
     }
 

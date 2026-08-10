@@ -31,7 +31,10 @@ test('usa contexto de muestra para variar el mensaje', () => {
 
   assert.match(variant.message, /muestra/i);
   assert.equal(variant.contextKey, 'sample_sent');
-  assert.match(variant.variationKey, /^o\d-b\d-c\d-x\d$/);
+  // La implementacion actual identifica variantes por angulo, toque e indice
+  // para que BI pueda leer el origen del copy sin decodificar una clave opaca.
+  assert.match(variant.variationKey, /^[a-z_]+-t\d+-v\d+$/);
+  assert.equal(variant.angleKey, 'reintro');
 });
 
 test('omite leads con mensajes no leidos', () => {

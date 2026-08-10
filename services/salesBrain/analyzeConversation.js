@@ -103,16 +103,6 @@ function detectPrimaryNeed(text = '') {
   return null;
 }
 
-function detectCustomerAcquisition(text = '') {
-  const t = normalizeForMatch(text);
-  if (/(recomendacion|recomendado|boca en boca|referido|clientes de siempre)/.test(t)) return 'recommendations';
-  if (/(facebook|instagram|redes|tiktok|whatsapp)/.test(t)) return 'social_media';
-  if (/(google|maps|busqueda)/.test(t)) return 'google';
-  if (/(anuncios|publicidad|ads|campana|campaña)/.test(t)) return 'paid_ads';
-  if (/(volante|lonas|local|calle)/.test(t)) return 'offline';
-  return null;
-}
-
 function buildFallbackAnalysis({ lead = {}, latestText = '' } = {}) {
   const text = cleanText(latestText, 1000);
   const normalized = normalizeForMatch(text);
@@ -179,10 +169,8 @@ function buildFallbackAnalysis({ lead = {}, latestText = '' } = {}) {
 
   const businessType = detectBusinessType(text) || lead?.salesState?.businessType || null;
   const primaryNeed = detectPrimaryNeed(text) || lead?.salesState?.primaryNeed || null;
-  const customerAcquisition = detectCustomerAcquisition(text);
   if (businessType) signals.push('business_identified');
   if (primaryNeed) signals.push('primary_need_identified');
-  if (customerAcquisition) signals.push('customer_acquisition_identified');
   if (String(lead?.source || '').toLowerCase() === 'meta_ads' || lead?.lastMetaAttribution) signals.push('meta_ad');
 
   const facts = {};
@@ -192,9 +180,6 @@ function buildFallbackAnalysis({ lead = {}, latestText = '' } = {}) {
   if (primaryNeed && detectPrimaryNeed(text)) {
     facts.primaryNeed = { value: primaryNeed, confidence: 0.8, source: 'explicit' };
     facts.primaryGoal = { value: primaryNeed, confidence: 0.8, source: 'explicit' };
-  }
-  if (customerAcquisition) {
-    facts.customerAcquisition = { value: customerAcquisition, confidence: 0.75, source: 'explicit' };
   }
   if (signals.includes('previous_bad_agency_experience')) {
     facts.previousAgency = { value: true, confidence: 0.85, source: 'explicit' };
@@ -277,6 +262,7 @@ function buildBusinessContext(lead = {}) {
   if (lead?.estado) parts.push(`Estado CRM: ${cleanText(lead.estado, 60)}`);
   if (lead?.etapaNombre || lead?.etapa) parts.push(`Etapa CRM: ${cleanText(lead.etapaNombre || lead.etapa, 80)}`);
   if (lead?.salesState) parts.push(`SalesState previo: ${JSON.stringify(lead.salesState).slice(0, 800)}`);
+  if (lead?.salesContext) parts.push(`Contexto comercial: ${JSON.stringify(lead.salesContext).slice(0, 900)}`);
   if (lead?.conversationMemory?.summary) parts.push(`Memoria: ${cleanText(lead.conversationMemory.summary, 600)}`);
   const tags = Array.isArray(lead?.etiquetas) ? lead.etiquetas.slice(0, 10).join(', ') : '';
   if (tags) parts.push(`Etiquetas: ${cleanText(tags, 180)}`);
@@ -313,7 +299,9 @@ async function aiAnalyze({ lead = {}, recentMessages = [], latestText = '', acqu
     `facts permitidos: ${FACT_KEYS.join(', ')}`,
     'facts solo para hechos objetivos. Usa {"value":X,"confidence":0-1,"source":"explicit|inferred"}.',
     'Extrae contexto de dueños de negocio local en lenguaje simple: businessType, customerAcquisition, currentSituation, primaryGoal, painPoint, hasWebsite, runsAds, previousExperience.',
+    'Valores sugeridos: customerAcquisition puede ser referrals|social_media|google|paid_ads|walk_ins|offline|unknown. primaryGoal puede ser more_customers|sell_more|brand_awareness|look_professional|other. previousExperience puede ser successful|no_results|bad_experience|never_tried|unclear.',
     'No uses jerga como funnel, ROAS, CAC, conversion o pipeline en el resumen ni en hechos.',
+    'No inventes contexto: si la respuesta no da evidencia suficiente, deja el fact ausente.',
     'No guardes opiniones como facts. Objeciones y sentimiento van en objection/sentiment.',
     'automated=true si parece bot, asistente automatico, menu u horario.',
   ].join('\n');

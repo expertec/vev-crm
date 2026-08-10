@@ -15,8 +15,11 @@ export function normalizeQueue(queue = {}) {
     status: String(safe.status || QUEUE_STATUSES.AUTOMATION),
     priority: numberOr(safe.priority, 0),
     reason: safe.reason || null,
+    reasonCode: safe.reasonCode || null,
     enteredAt: safe.enteredAt || null,
     claimedAt: safe.claimedAt || null,
+    firstAgentActionAt: safe.firstAgentActionAt || null,
+    outcomeAt: safe.outcomeAt || null,
   };
 }
 
