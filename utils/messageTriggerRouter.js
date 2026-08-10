@@ -3,6 +3,9 @@ const STATIC_HASHTAG_MAP = {
   '#leadweb': 'LeadWeb',
   '#nuevolead': 'NuevoLeadWeb',
   '#planredes990': 'PlanRedes',
+  '#planredes': 'PlanRedes',
+  '#redessociales': 'PlanRedes',
+  '#redes': 'PlanRedes',
   '#info': 'LeadWeb',
   '#infoweb': 'NuevoLead',
 };
@@ -67,4 +70,13 @@ export function resolveStaticTriggerFromMessage(text, defaultTrigger = 'NuevoLea
   }
 
   return { trigger: defaultTrigger, cancel: [], source: 'default' };
+}
+
+export function shouldPreferMessageTriggerOverMetaRoute(messageRule = {}, metaRoute = null) {
+  const source = String(messageRule?.source || '').toLowerCase();
+  if (source === 'db' || source === 'hashtag') return true;
+  if (source !== 'text') return false;
+
+  const routeSource = String(metaRoute?.source || '').toLowerCase();
+  return !routeSource || routeSource === 'meta_ad_default';
 }

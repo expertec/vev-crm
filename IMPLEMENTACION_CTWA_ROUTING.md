@@ -103,6 +103,25 @@ Si ese campo no existe, usa:
 
 `LeadWhatsapp`
 
+## Hashtags en el mensaje inicial
+
+Si el mensaje entrante de Click-to-WhatsApp trae un hashtag explicito, el CRM
+lo respeta antes de caer al fallback de Meta. Para la campana de redes sociales
+puedes usar:
+
+`#RedesSociales`
+
+Ese hashtag activa el trigger:
+
+`PlanRedes`
+
+Tambien se aceptan `#PlanRedes990`, `#PlanRedes` y `#Redes`.
+
+Una regla especifica en `metaAdSequenceRoutes` sigue siendo la opcion mas
+precisa cuando quieres enrutar por anuncio, conjunto o campana. El hashtag es
+util para distinguir el mensaje inicial cuando Meta no entrega metadata
+suficiente o cuando no hay una regla creada todavia.
+
 ## Flujo recomendado para configurar un anuncio
 
 1. Crea la secuencia en el CRM con un trigger claro, por ejemplo
@@ -113,4 +132,3 @@ Si ese campo no existe, usa:
 5. Crea una regla en `metaAdSequenceRoutes` con ese ID y el trigger deseado.
 6. Repite la prueba. El log debe mostrar `route=<id-del-documento>` y el lead
    debe quedar con `lastMetaSequenceTrigger`.
-

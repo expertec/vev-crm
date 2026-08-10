@@ -31,7 +31,11 @@ import {
 } from './queue.js';
 import { extractMetaAdAttribution } from './utils/metaAdDetector.js';
 import { resolveMetaAdSequenceRoute } from './utils/metaAdSequenceRouter.js';
-import { extractHashtags, resolveStaticTriggerFromMessage } from './utils/messageTriggerRouter.js';
+import {
+  extractHashtags,
+  resolveStaticTriggerFromMessage,
+  shouldPreferMessageTriggerOverMetaRoute,
+} from './utils/messageTriggerRouter.js';
 import { handleInboundLeadReply } from './services/hotLeadDetector.js';
 import { buildNewInboundLeadSalesBrainDefaults } from './services/salesBrain/index.js';
 import { getWhatsAppWebVersion } from './baileysVersion.js';
@@ -1303,6 +1307,9 @@ export async function connectToWhatsApp() {
               const cfg = cfgSnap.exists ? cfgSnap.data() : {};
               const inboundAt = now();
               const fallbackMetaTrigger = cfg.defaultTriggerMetaAds || WEBPROMO_TRIGGER;
+              const pushNameRule = shouldTreatAsMetaAdInbound
+                ? await resolveTriggerFromMessage(msg.pushName || '', fallbackMetaTrigger)
+                : { trigger: fallbackMetaTrigger, source: 'default' };
               const metaTriggerResult = shouldTreatAsMetaAdInbound
                 ? await resolveMetaTriggerForInbound({
                     attribution: metaAdAttribution,
@@ -1310,8 +1317,17 @@ export async function connectToWhatsApp() {
                     fallbackTrigger: fallbackMetaTrigger,
                   })
                 : { trigger: fallbackMetaTrigger, route: null };
-              const detectedTrigger = metaTriggerResult.trigger || fallbackMetaTrigger;
               const metaAdRoute = metaTriggerResult.route;
+              const preferPushNameTrigger = shouldTreatAsMetaAdInbound
+                && shouldPreferMessageTriggerOverMetaRoute(pushNameRule, metaAdRoute);
+              const detectedTrigger = preferPushNameTrigger
+                ? (pushNameRule.trigger || fallbackMetaTrigger)
+                : (metaTriggerResult.trigger || fallbackMetaTrigger);
+              if (preferPushNameTrigger) {
+                console.log(
+                  `[WA] 🎯 Meta Ads sin contenido usa trigger '${detectedTrigger}' desde pushName (${pushNameRule.source}) para ${leadId}`
+                );
+              }
 
               const baseEtiquetas = [];
               if (shouldTreatAsMetaAdInbound) baseEtiquetas.push('MetaAds', detectedTrigger);
@@ -1727,14 +1743,21 @@ export async function connectToWhatsApp() {
               config: cfg,
               fallbackTrigger: metaAdTrigger,
             });
-            trigger = metaTriggerResult.trigger || metaAdTrigger;
             metaAdRoute = metaTriggerResult.route;
-            triggerSource = 'meta_ad';
-            toCancel = [];
+            const preferMessageTrigger = shouldPreferMessageTriggerOverMetaRoute(rule, metaAdRoute);
+            if (preferMessageTrigger) {
+              trigger = rule.trigger || metaAdTrigger;
+              triggerSource = rule.source;
+            } else {
+              trigger = metaTriggerResult.trigger || metaAdTrigger;
+              triggerSource = 'meta_ad';
+              toCancel = [];
+            }
             const metaReason = inboundFromMetaAd ? 'signal' : metaAdDecision.reason;
             console.log(
               `[WA] 🎯 Inbound tratado como Meta Ads (${metaReason}): trigger interno '${trigger}' para ${leadId}`
               + (metaAdRoute?.routeId ? ` route=${metaAdRoute.routeId}` : ' route=fallback')
+              + (preferMessageTrigger ? ` messageSource=${rule.source}` : '')
             );
           }
 
