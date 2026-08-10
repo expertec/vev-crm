@@ -2936,4 +2936,6 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
     await persistLeadMessage(leadRef, msgData, sentMsg?.key?.id || null);
     await leadRef.update(buildLeadLastMessagePatch(msgData));
   }
+
+  return sentMsg;
 }

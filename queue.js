@@ -265,15 +265,46 @@ function resolveType(raw) {
 }
 
 /* ---------------- persistencia uniforme de salientes ------------------- */
-async function persistOutgoing(leadId, { content = '', mediaType = 'text', mediaUrl = null }) {
+function messageDocIdFromWaId(waMessageId) {
+  const clean = String(waMessageId || '')
+    .trim()
+    .replace(/[^\w.-]/g, '_');
+  if (!clean) return null;
+  return `wa_${clean}`;
+}
+
+async function persistOutgoing(leadId, {
+  content = '',
+  mediaType = 'text',
+  mediaUrl = null,
+  waMessageId = '',
+  sequenceTrigger = '',
+  sequenceStep = null,
+}) {
   const now = new Date();
-  await db.collection('leads').doc(leadId).collection('messages').add({
+  const payload = {
     content,
     mediaType,
     mediaUrl,
     sender: 'business',
-    timestamp: now
-  });
+    timestamp: now,
+    automationType: 'sequence',
+    ...(waMessageId ? { waMessageId: String(waMessageId) } : {}),
+    ...(sequenceTrigger ? { sequenceTrigger: String(sequenceTrigger) } : {}),
+    ...(sequenceStep !== null && sequenceStep !== undefined ? { sequenceStep: Number(sequenceStep) } : {}),
+  };
+
+  const messagesRef = db.collection('leads').doc(leadId).collection('messages');
+  const docId = messageDocIdFromWaId(waMessageId);
+  if (docId) {
+    await messagesRef.doc(docId).set(payload, { merge: true });
+  } else if (sequenceTrigger && sequenceStep !== null && sequenceStep !== undefined) {
+    const fallbackDocId = `seq_${String(sequenceTrigger).replace(/[^\w.-]/g, '_')}_${Number(sequenceStep)}`;
+    await messagesRef.doc(fallbackDocId).set(payload, { merge: true });
+  } else {
+    await messagesRef.add(payload);
+  }
+
   await db.collection('leads').doc(leadId).set(
     { lastMessageAt: now },
     { merge: true }
@@ -576,6 +607,10 @@ async function deliverPayload(leadId, payload) {
   const type = resolveType(rawType); // ⬅️ normalizado
   const contenido = payload?.contenido || payload?.message || '';
   const seconds = Number.isFinite(+payload?.seconds) ? +payload.seconds : null;
+  const sequenceMeta = {
+    sequenceTrigger: String(payload?.sequenceTrigger || '').trim(),
+    sequenceStep: payload?.sequenceStep ?? null,
+  };
 
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('Socket de WhatsApp no está conectado');
@@ -585,8 +620,8 @@ async function deliverPayload(leadId, payload) {
     case 'texto': {
       const text = replacePlaceholders(contenido, lead).trim();
       if (text) {
-        await sendWithRetry(sock, jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
-        await persistOutgoing(leadId, { content: text, mediaType: 'text' });
+        const sent = await sendWithRetry(sock, jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
+        await persistOutgoing(leadId, { content: text, mediaType: 'text', waMessageId: sent?.key?.id || '', ...sequenceMeta });
       }
       break;
     }
@@ -594,8 +629,8 @@ async function deliverPayload(leadId, payload) {
     case 'formulario': {
       const text = replacePlaceholders(contenido, lead).trim();
       if (text) {
-        await sendWithRetry(sock, jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
-        await persistOutgoing(leadId, { content: text, mediaType: 'text' });
+        const sent = await sendWithRetry(sock, jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
+        await persistOutgoing(leadId, { content: text, mediaType: 'text', waMessageId: sent?.key?.id || '', ...sequenceMeta });
       }
       break;
     }
@@ -613,8 +648,7 @@ async function deliverPayload(leadId, payload) {
         let lastErr = null;
         for (let i = 0; i < 3 && !sent; i++) {
           try {
-            await sendAudioMessage(jid, audioSource, { ptt, forwarded });
-            sent = true;
+            sent = await sendAudioMessage(jid, audioSource, { ptt, forwarded });
           } catch (err) {
             lastErr = err;
             const msg = String(err?.message || err || '');
@@ -623,7 +657,7 @@ async function deliverPayload(leadId, payload) {
             await sleep((i + 1) * 3000);
           }
         }
-        await persistOutgoing(leadId, { content: '', mediaType: 'audio', mediaUrl: src });
+        await persistOutgoing(leadId, { content: '', mediaType: 'audio', mediaUrl: src, waMessageId: sent?.key?.id || '', ...sequenceMeta });
       }
       break;
     }
@@ -633,8 +667,8 @@ async function deliverPayload(leadId, payload) {
     case 'imagen': {
       const url = replacePlaceholders(contenido, lead).trim();
       if (url) {
-        await sendWithRetry(sock, jid, { image: { url } }, { timeoutMs: 120_000 });
-        await persistOutgoing(leadId, { content: '', mediaType: 'image', mediaUrl: url });
+        const sent = await sendWithRetry(sock, jid, { image: { url } }, { timeoutMs: 120_000 });
+        await persistOutgoing(leadId, { content: '', mediaType: 'image', mediaUrl: url, waMessageId: sent?.key?.id || '', ...sequenceMeta });
       }
       break;
     }
@@ -642,8 +676,8 @@ async function deliverPayload(leadId, payload) {
     case 'video': {
       const url = replacePlaceholders(contenido, lead).trim();
       if (url) {
-        await sendWithRetry(sock, jid, { video: { url } }, { timeoutMs: 120_000 });
-        await persistOutgoing(leadId, { content: '', mediaType: 'video', mediaUrl: url });
+        const sent = await sendWithRetry(sock, jid, { video: { url } }, { timeoutMs: 120_000 });
+        await persistOutgoing(leadId, { content: '', mediaType: 'video', mediaUrl: url, waMessageId: sent?.key?.id || '', ...sequenceMeta });
       }
       break;
     }
@@ -656,8 +690,7 @@ async function deliverPayload(leadId, payload) {
         let lastErr = null;
         for (let i = 0; i < 3 && !sent; i++) {
           try {
-            await sendVideoNote(phone || jid, url, seconds);
-            sent = true;
+            sent = await sendVideoNote(phone || jid, url, seconds);
           } catch (err) {
             lastErr = err;
             const msg = String(err?.message || err || '');
@@ -666,7 +699,7 @@ async function deliverPayload(leadId, payload) {
             await sleep((i + 1) * 3000);
           }
         }
-        await persistOutgoing(leadId, { content: '', mediaType: 'video_note', mediaUrl: url });
+        await persistOutgoing(leadId, { content: '', mediaType: 'video_note', mediaUrl: url, waMessageId: sent?.key?.id || '', ...sequenceMeta });
       }
       break;
     }
@@ -675,8 +708,8 @@ async function deliverPayload(leadId, payload) {
       // fallback a texto
       const text = replacePlaceholders(contenido, lead).trim();
       if (text) {
-        await sendWithRetry(sock, jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
-        await persistOutgoing(leadId, { content: text, mediaType: 'text' });
+        const sent = await sendWithRetry(sock, jid, { text, linkPreview: false }, { timeoutMs: 120_000 });
+        await persistOutgoing(leadId, { content: text, mediaType: 'text', waMessageId: sent?.key?.id || '', ...sequenceMeta });
       } else {
         console.warn(`[SEQ] tipo no soportado: ${rawType} (normalizado=${type})`);
       }
@@ -1061,11 +1094,15 @@ export async function processLeadSequences(leadId) {
       }
 
       const msg = def.messages[seq.index] || {};
+      const payloadMeta = {
+        sequenceTrigger: seq.trigger,
+        sequenceStep: seq.index,
+      };
       const stepType = normType(msg?.type || '');
       const isQuestionStep = stepType === 'question';
       const payload = isQuestionStep
-        ? { ...msg, type: 'texto', contenido: msg.contenido || msg.message || '' }
-        : msg;
+        ? { ...msg, ...payloadMeta, type: 'texto', contenido: msg.contenido || msg.message || '' }
+        : { ...msg, ...payloadMeta };
       await deliverPayload(leadId, payload);
       processed += 1;
       sentSteps[stepKey] = Timestamp.now();
