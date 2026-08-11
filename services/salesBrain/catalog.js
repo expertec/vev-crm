@@ -1,7 +1,7 @@
 export const SALES_BRAIN_AGENT_VERSION = 'sales-brain-mvp-v1';
 export const SALES_BRAIN_ANALYSIS_VERSION = 'v1';
-export const SALES_BRAIN_DECISION_VERSION = 'v2';
-export const SALES_BRAIN_REPLY_PROMPT_VERSION = 'v2';
+export const SALES_BRAIN_DECISION_VERSION = 'plan-redes-v2';
+export const SALES_BRAIN_REPLY_PROMPT_VERSION = 'plan-redes-v2';
 
 export const SALES_BRAIN_MODES = Object.freeze({
   OFF: 'off',
@@ -59,8 +59,11 @@ export const CONVERSATION_OBJECTIVES = Object.freeze([
   'DEMONSTRATE_UNDERSTANDING',
   'DELIVER_MICRO_VALUE',
   'SHOW_RELEVANT_PROOF',
+  'DELIVER_PERSONALIZED_IDEA',
   'CREATE_PERSONALIZED_IDEA',
+  'EXPLAIN_OFFER',
   'EXPLAIN_METHOD',
+  'PRESENT_PRICE',
   'PRESENT_OFFER',
   'TEST_PURCHASE_INTENT',
   'HANDLE_OBJECTION',
@@ -110,9 +113,13 @@ export const NEXT_BEST_ACTIONS = Object.freeze([
   'ASK_CURRENT_SITUATION',
   'DEMONSTRATE_UNDERSTANDING',
   'DELIVER_MICRO_VALUE',
+  'DELIVER_PERSONALIZED_IDEA',
   'CREATE_PERSONALIZED_IDEA',
+  'SHOW_RELEVANT_PROOF',
   'EXPLAIN_SERVICE',
+  'EXPLAIN_OFFER',
   'EXPLAIN_METHOD',
+  'PRESENT_PRICE',
   'PRESENT_OFFER',
   'TEST_PURCHASE_INTENT',
   'SEND_EXAMPLES',
@@ -170,6 +177,9 @@ export const FACT_KEYS = Object.freeze([
   'previousAgency',
   'previousBadExperience',
   'interestedService',
+  'targetAudience',
+  'productsServices',
+  'mainOffer',
   'sawPrice',
   'receivedExamples',
   'receivedSample',

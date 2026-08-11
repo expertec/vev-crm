@@ -7,6 +7,7 @@ import { mergeConversationMemory } from '../services/salesBrain/memory.js';
 import { eventIdForInputMessage } from '../services/salesBrain/catalog.js';
 import { buildSalesBrainEventPayload } from '../services/salesBrain/eventPayload.js';
 import { generateReply } from '../services/salesBrain/replyGenerator.js';
+import { progressFieldForDeliveredAction } from '../services/salesBrain/commercialProgress.js';
 
 test('Sales Brain decision respeta prioridad: cierre gana sobre precio', () => {
   const decision = decideNextAction({
@@ -98,7 +99,7 @@ test('PlanRedes demuestra entendimiento despues de conocer objetivo', () => {
   assert.equal(decision.nextBestAction, 'DEMONSTRATE_UNDERSTANDING');
 });
 
-test('PlanRedes no repite objetivo y pregunta situacion actual tras entregar entendimiento', () => {
+test('PlanRedes no repite entendimiento y entrega idea personalizada con contexto suficiente', () => {
   const decision = decideNextAction({
     lead: { telefono: '5215551112233', etiquetas: ['PlanRedes'] },
     analysis: {
@@ -107,6 +108,7 @@ test('PlanRedes no repite objetivo y pregunta situacion actual tras entregar ent
       objection: 'none',
     },
     salesState: {
+      commercialProgress: { understandingDemonstrated: true },
       qualification: {
         productStrategy: 'redes_sociales',
         delivered: { understanding: true },
@@ -120,11 +122,11 @@ test('PlanRedes no repite objetivo y pregunta situacion actual tras entregar ent
     },
   });
 
-  assert.equal(decision.conversationObjective, 'DISCOVER_CURRENT_SITUATION');
-  assert.equal(decision.nextBestAction, 'ASK_CURRENT_SITUATION');
+  assert.equal(decision.conversationObjective, 'DELIVER_PERSONALIZED_IDEA');
+  assert.equal(decision.nextBestAction, 'DELIVER_PERSONALIZED_IDEA');
 });
 
-test('PlanRedes con contexto completo y pregunta de precio presenta oferta sin marcar ready_for_sales si no recibio valor', () => {
+test('PlanRedes con pregunta de precio presenta precio sin marcar ready_for_sales', () => {
   const decision = decideNextAction({
     lead: { telefono: '5215551112233', etiquetas: ['PlanRedes'] },
     analysis: {
@@ -142,9 +144,31 @@ test('PlanRedes con contexto completo y pregunta de precio presenta oferta sin m
     },
   });
 
-  assert.equal(decision.conversationObjective, 'PRESENT_OFFER');
-  assert.equal(decision.nextBestAction, 'PRESENT_OFFER');
+  assert.equal(decision.conversationObjective, 'PRESENT_PRICE');
+  assert.equal(decision.nextBestAction, 'PRESENT_PRICE');
   assert.equal(decision.readyForSales, false);
+});
+
+test('PlanRedes buying intent fuerte salta a ready_for_sales', () => {
+  const decision = decideNextAction({
+    lead: { telefono: '5215551112233', etiquetas: ['PlanRedes'] },
+    analysis: {
+      intent: 'asks_how_to_start',
+      signals: ['answered', 'asks_how_to_start'],
+      objection: 'none',
+    },
+    conversationMemory: {
+      facts: {
+        businessType: { value: 'travel_agency' },
+        primaryNeed: { value: 'more_customers' },
+      },
+    },
+  });
+
+  assert.equal(decision.conversationObjective, 'QUALIFY_FOR_SALES');
+  assert.equal(decision.nextBestAction, 'START_CLOSING');
+  assert.equal(decision.readyForSales, true);
+  assert.equal(decision.humanRequired, true);
 });
 
 test('PlanRedes genera pregunta natural de objetivo por template sin API', async () => {
@@ -161,6 +185,92 @@ test('PlanRedes genera pregunta natural de objetivo por template sin API', async
   assert.equal(reply.model, 'template');
   assert.match(reply.message, /cotizaciones|informacion/i);
   assert.doesNotMatch(reply.message, /nuestro plan|diseñado|disenado/i);
+});
+
+test('Caso Grace: despues de comprension enviada genera microidea con servicios reales', async () => {
+  const memory = mergeConversationMemory({
+    facts: {
+      businessType: { value: 'despacho contable-administrativo' },
+      targetAudience: { value: 'personas fisicas' },
+    },
+  }, {
+    summary: 'Grace enumero servicios del despacho.',
+    facts: {
+      productsServices: {
+        value: 'nominas, facturacion, administracion, declaraciones SAT, movimientos IMSS',
+        confidence: 0.94,
+        source: 'explicit',
+      },
+    },
+  }, { inputMessageId: 'grace_services', now: new Date('2026-08-11T12:00:00.000Z') });
+
+  const decision = decideNextAction({
+    lead: { telefono: '5215551112233', etiquetas: ['PlanRedes'] },
+    analysis: { intent: 'other', signals: ['answered'], objection: 'none' },
+    salesState: {
+      commercialProgress: { understandingDemonstrated: true },
+      qualification: { productStrategy: 'redes_sociales' },
+    },
+    conversationMemory: memory,
+  });
+
+  assert.equal(decision.nextBestAction, 'DELIVER_PERSONALIZED_IDEA');
+
+  const reply = await generateReply({
+    action: decision.nextBestAction,
+    conversationObjective: decision.conversationObjective,
+    productStrategy: decision.productStrategy,
+    qualification: decision.qualification,
+    conversationMemory: memory,
+  });
+
+  assert.equal(reply.model, 'template');
+  assert.match(reply.message, /nominas|facturacion|declaraciones SAT|IMSS/i);
+  assert.match(reply.message, /personas fisicas/i);
+  assert.doesNotMatch(reply.message, /devoluciones/i);
+});
+
+test('Caso viajes: despues de comprension enviada entrega idea sin inventar destinos', async () => {
+  const decision = decideNextAction({
+    lead: { telefono: '5215551112233', etiquetas: ['PlanRedes'] },
+    analysis: { intent: 'other', signals: ['answered'], objection: 'none' },
+    salesState: {
+      commercialProgress: { understandingDemonstrated: true },
+      qualification: { productStrategy: 'redes_sociales' },
+    },
+    conversationMemory: {
+      facts: {
+        businessType: { value: 'travel_agency' },
+        primaryNeed: { value: 'more_customers' },
+      },
+    },
+  });
+
+  assert.equal(decision.nextBestAction, 'DELIVER_PERSONALIZED_IDEA');
+
+  const reply = await generateReply({
+    action: decision.nextBestAction,
+    conversationObjective: decision.conversationObjective,
+    productStrategy: decision.productStrategy,
+    qualification: decision.qualification,
+    conversationMemory: {
+      facts: {
+        businessType: { value: 'travel_agency' },
+        primaryNeed: { value: 'more_customers' },
+      },
+    },
+  });
+
+  assert.match(reply.message, /viajes concretos|ofertas atractivas/i);
+  assert.doesNotMatch(reply.message, /Canc[uú]n|Europa|Disney|playa del carmen/i);
+});
+
+test('commercialProgress mapea acciones entregadas', () => {
+  assert.equal(progressFieldForDeliveredAction('DEMONSTRATE_UNDERSTANDING'), 'understandingDemonstrated');
+  assert.equal(progressFieldForDeliveredAction('DELIVER_PERSONALIZED_IDEA'), 'personalizedIdeaDelivered');
+  assert.equal(progressFieldForDeliveredAction('SHOW_RELEVANT_PROOF'), 'proofDelivered');
+  assert.equal(progressFieldForDeliveredAction('EXPLAIN_OFFER'), 'offerExplained');
+  assert.equal(progressFieldForDeliveredAction('PRESENT_PRICE'), 'pricePresented');
 });
 
 test('Sales Brain score devuelve breakdown auditable y normalizado', () => {
@@ -269,8 +379,8 @@ test('Sales Brain event payload conserva scoreBreakdown y versiones', () => {
   assert.equal(event.scoreBreakdown.answered, 5);
   assert.equal(event.leadScore, 15);
   assert.equal(event.analysisVersion, 'v1');
-  assert.equal(event.decisionVersion, 'v2');
-  assert.equal(event.replyPromptVersion, 'v2');
+  assert.equal(event.decisionVersion, 'plan-redes-v2');
+  assert.equal(event.replyPromptVersion, 'plan-redes-v2');
   assert.equal(event.agentVersion, 'sales-brain-mvp-v1');
 });
 

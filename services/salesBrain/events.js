@@ -1,7 +1,11 @@
 import { admin, db as defaultDb } from '../../firebaseAdmin.js';
 import { eventIdForInputMessage, normalizeInputMessageId } from './catalog.js';
 import { buildSalesBrainEventPayload } from './eventPayload.js';
-import { deliveredPatchForObjective } from './qualification.js';
+import {
+  commercialProgressFromLead,
+  progressFieldForDeliveredAction,
+  qualificationDeliveredFieldForProgress,
+} from './commercialProgress.js';
 
 const { FieldValue } = admin.firestore;
 
@@ -127,6 +131,8 @@ export async function recordSellerFeedback({
     throw new Error(`El evento ya fue finalizado como ${currentDecision}.`);
   }
 
+  const executed = ['accepted', 'edited', 'spoken'].includes(safeDecision);
+  const deliveredAction = executed ? cleanText(eventData?.nextBestAction || '', 80) : '';
   const payload = {
     sellerDecision: safeDecision,
     status: safeDecision,
@@ -135,21 +141,41 @@ export async function recordSellerFeedback({
     decidedBy: cleanText(actor, 160) || 'crm',
     decidedAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
+    ...(deliveredAction ? {
+      deliveredAction,
+      deliveredAt: FieldValue.serverTimestamp(),
+    } : {}),
   };
 
   const leadSnap = await leadRef.get();
-  const current = leadSnap.exists ? (leadSnap.data()?.salesBrainCurrent || null) : null;
+  const leadData = leadSnap.exists ? (leadSnap.data() || {}) : {};
+  const current = leadData?.salesBrainCurrent || null;
   const batch = db.batch();
-  batch.set(eventRef, payload, { merge: true });
-  const deliveredField = ['accepted', 'edited', 'spoken'].includes(safeDecision)
-    ? deliveredPatchForObjective(eventData?.conversationObjective || '')
-    : '';
+  const progressField = deliveredAction ? progressFieldForDeliveredAction(deliveredAction) : '';
+  const previousProgress = commercialProgressFromLead(leadData, leadData?.salesState || {});
   const leadPatch = {};
-  if (deliveredField) {
-    leadPatch[`salesState.qualification.delivered.${deliveredField}`] = true;
+  let nextProgress = previousProgress;
+  if (progressField) {
+    nextProgress = {
+      ...previousProgress,
+      [progressField]: true,
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+    leadPatch.commercialProgress = nextProgress;
+    leadPatch['salesState.commercialProgress'] = nextProgress;
+    const deliveredField = qualificationDeliveredFieldForProgress(progressField);
+    if (deliveredField) leadPatch[`salesState.qualification.delivered.${deliveredField}`] = true;
     leadPatch['salesState.qualification.lastDeliveredObjective'] = cleanText(eventData?.conversationObjective || '', 80);
+    leadPatch['salesState.qualification.lastDeliveredAction'] = deliveredAction;
     leadPatch['salesState.qualification.lastDeliveredAt'] = FieldValue.serverTimestamp();
   }
+  batch.set(eventRef, {
+    ...payload,
+    ...(progressField ? {
+      previousCommercialProgress: previousProgress,
+      newCommercialProgress: nextProgress,
+    } : {}),
+  }, { merge: true });
   if (current?.eventId === safeEventId) {
     leadPatch.salesBrainCurrent = {
       ...current,

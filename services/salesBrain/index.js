@@ -23,6 +23,7 @@ import {
 import {
   decideRouting,
 } from '../salesQueue/routing.js';
+import { commercialProgressFromLead } from './commercialProgress.js';
 
 const { FieldValue } = admin.firestore;
 
@@ -257,6 +258,8 @@ export async function runSalesBrainForInbound({
       newSalesState: serializeForEvent(nextSalesState),
       previousConversationMemory: serializeForEvent(previousConversationMemory),
       newConversationMemory: serializeForEvent(nextMemory),
+      previousCommercialProgress: serializeForEvent(commercialProgressFromLead(currentLead, previousSalesState)),
+      newCommercialProgress: serializeForEvent(nextSalesState.commercialProgress || decision.commercialProgress || null),
       scoreBreakdown: score.breakdown,
       leadScore: score.total,
       qualificationBefore: serializeForEvent(previousSalesState?.qualification || null),
@@ -292,6 +295,7 @@ export async function runSalesBrainForInbound({
       targetRef,
       {
         salesState: nextSalesState,
+        commercialProgress: nextSalesState.commercialProgress || decision.commercialProgress || null,
         conversationMemory: nextMemory,
         commercialSignals,
         salesContext: salesContextPatch.salesContext,

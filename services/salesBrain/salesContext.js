@@ -64,12 +64,15 @@ export function buildSalesContextPatch({
   setIfBetter({ next, confidence, field: 'hasWebsite', entry: factEntry(analysis, memory, 'hasWebsite') });
   setIfBetter({ next, confidence, field: 'runsAds', entry: factEntry(analysis, memory, 'runsAds') || factEntry(analysis, memory, 'currentlyAdvertising') });
   setIfBetter({ next, confidence, field: 'previousExperience', entry: factEntry(analysis, memory, 'previousExperience') });
+  setIfBetter({ next, confidence, field: 'targetAudience', entry: factEntry(analysis, memory, 'targetAudience') });
+  setIfBetter({ next, confidence, field: 'productsServices', entry: factEntry(analysis, memory, 'productsServices') });
+  setIfBetter({ next, confidence, field: 'mainOffer', entry: factEntry(analysis, memory, 'mainOffer') });
 
   const rawKey = rawKeyFromSaveTo(saveTo);
   if (rawKey && cleanText(latestText, 1200)) {
     raw[rawKey] = cleanText(latestText, 1200);
   } else {
-    for (const field of ['businessType', 'customerAcquisition', 'primaryGoal', 'previousExperience']) {
+    for (const field of ['businessType', 'customerAcquisition', 'primaryGoal', 'previousExperience', 'targetAudience', 'productsServices']) {
       if (next[field] && !raw[field] && cleanText(latestText, 1200)) raw[field] = cleanText(latestText, 1200);
     }
   }

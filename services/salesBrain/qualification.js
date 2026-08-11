@@ -3,6 +3,7 @@ import {
   normalizeProductStrategy,
   normalizeQualificationStatus,
 } from './catalog.js';
+import { commercialProgressFromLead } from './commercialProgress.js';
 
 function cleanText(value = '', max = 500) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -82,6 +83,10 @@ function normalizeDelivered(previous = {}) {
   };
 }
 
+function factOrContext({ salesContext = {}, memory = {}, key = '' } = {}) {
+  return firstValue(salesContext[key], getFactValue(memory, key));
+}
+
 export function buildQualificationSnapshot({
   lead = {},
   analysis = {},
@@ -91,7 +96,15 @@ export function buildQualificationSnapshot({
 } = {}) {
   const salesContext = objectOr(lead?.salesContext);
   const previousQualification = objectOr(salesState?.qualification);
-  const delivered = normalizeDelivered(previousQualification.delivered);
+  const commercialProgress = commercialProgressFromLead(lead, salesState);
+  const delivered = {
+    ...normalizeDelivered(previousQualification.delivered),
+    understanding: commercialProgress.understandingDemonstrated,
+    proof: commercialProgress.proofDelivered,
+    personalizedIdea: commercialProgress.personalizedIdeaDelivered,
+    methodExplained: commercialProgress.offerExplained,
+    offer: commercialProgress.pricePresented,
+  };
   const productStrategy = normalizeProductStrategy(
     previousQualification.productStrategy
       || salesState.productStrategy
@@ -122,6 +135,9 @@ export function buildQualificationSnapshot({
     getFactValue(conversationMemory, 'runsAds'),
     getFactValue(conversationMemory, 'currentlyAdvertising')
   );
+  const targetAudience = factOrContext({ salesContext, memory: conversationMemory, key: 'targetAudience' });
+  const productsServices = factOrContext({ salesContext, memory: conversationMemory, key: 'productsServices' });
+  const mainOffer = factOrContext({ salesContext, memory: conversationMemory, key: 'mainOffer' });
   const painOrNeed = firstValue(
     salesContext.painPoint,
     getFactValue(conversationMemory, 'painPoint'),
@@ -148,6 +164,15 @@ export function buildQualificationSnapshot({
   const goalKnown = Boolean(primaryGoal);
   const currentSituationKnown = Boolean(currentSituation);
   const enoughContext = businessKnown && goalKnown;
+  const personalizedIdeaSignals = [
+    primaryGoal,
+    targetAudience,
+    productsServices,
+    mainOffer,
+    painOrNeed,
+    currentSituation,
+  ].filter((item) => item !== undefined && item !== null && item !== '').length;
+  const hasContextForPersonalizedIdea = businessKnown && personalizedIdeaSignals >= 1;
   const valueDelivered = delivered.understanding
     || delivered.microValue
     || delivered.proof
@@ -171,8 +196,13 @@ export function buildQualificationSnapshot({
     business: { known: businessKnown, value: cleanText(business || '', 160) || null },
     primaryGoal: { known: goalKnown, value: cleanText(primaryGoal || '', 160) || null },
     currentSituation: { known: currentSituationKnown, value: currentSituation ?? null },
+    targetAudience: { known: Boolean(targetAudience), value: targetAudience ?? null },
+    productsServices: { known: Boolean(productsServices), value: productsServices ?? null },
+    mainOffer: { known: Boolean(mainOffer), value: mainOffer ?? null },
     painOrNeed: { known: Boolean(painOrNeed), value: painOrNeed ?? null },
     delivered,
+    commercialProgress,
+    hasContextForPersonalizedIdea,
     commercialIntentDetected,
     purchaseIntentDetected,
     priceIntentDetected,
@@ -190,8 +220,11 @@ export function deliveredPatchForObjective(conversationObjective = '') {
   if (objective === 'DEMONSTRATE_UNDERSTANDING') return 'understanding';
   if (objective === 'DELIVER_MICRO_VALUE') return 'microValue';
   if (objective === 'SHOW_RELEVANT_PROOF') return 'proof';
+  if (objective === 'DELIVER_PERSONALIZED_IDEA') return 'personalizedIdea';
   if (objective === 'CREATE_PERSONALIZED_IDEA') return 'personalizedIdea';
+  if (objective === 'EXPLAIN_OFFER') return 'methodExplained';
   if (objective === 'EXPLAIN_METHOD') return 'methodExplained';
+  if (objective === 'PRESENT_PRICE') return 'offer';
   if (objective === 'PRESENT_OFFER') return 'offer';
   return '';
 }

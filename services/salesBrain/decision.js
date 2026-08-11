@@ -93,6 +93,7 @@ export function decideNextAction({
       reason,
       productStrategy: qualification.productStrategy,
       qualification,
+      commercialProgress: qualification.commercialProgress || {},
       readyForSales: Boolean(extra.readyForSales ?? qualification.readyForSales),
       humanRequired: Boolean(extra.humanRequired ?? qualification.humanRequired),
       automationPaused: Boolean(extra.automationPaused),
@@ -113,6 +114,69 @@ export function decideNextAction({
   if (guards.reasons.includes('human_control')) return result('HANDOFF_SALES', 'HANDOFF_HUMAN', 'La conversacion esta marcada bajo control humano.', { humanRequired: true, automationPaused: true, actionRisk: 'handoff' });
   if (guards.reasons.includes('automated_reply')) {
     return result('HANDOFF_SALES', 'HANDOFF_HUMAN', 'La respuesta parece automatica; conviene contactar por otro canal.', { humanRequired: true, automationPaused: true, actionRisk: 'handoff' });
+  }
+
+  const isPlanRedes = qualification.productStrategy === 'redes_sociales';
+  const progress = qualification.commercialProgress || {};
+
+  if (isPlanRedes) {
+    // PLANREDES POLICY V2: guardrails ya corrieron, ahora progresion comercial.
+    if (analysis?.intent === 'ready_to_buy' || analysis?.intent === 'asks_how_to_start' || signals.has('ready_to_buy') || signals.has('asks_how_to_start') || signals.has('asked_payment_method')) {
+      return result('QUALIFY_FOR_SALES', 'START_CLOSING', 'El lead muestra intencion fuerte de avanzar o pagar.', {
+        humanRequired: true,
+        readyForSales: true,
+        actionRisk: 'handoff',
+      });
+    }
+
+    if (analysis?.intent === 'wants_price' || signals.has('asked_price')) {
+      return result('PRESENT_PRICE', 'PRESENT_PRICE', 'El lead pidio precio de forma explicita.', { actionRisk: 'restricted' });
+    }
+
+    if (analysis?.objection === 'trust' || analysis?.objection === 'bad_previous_experience' || signals.has('trust_objection') || signals.has('previous_bad_agency_experience')) {
+      return result('HANDLE_OBJECTION', 'HANDLE_TRUST_OBJECTION', 'Hay objecion de confianza o mala experiencia previa.', { actionRisk: 'restricted' });
+    }
+    if (previousExperience === 'bad_experience' || previousExperience === 'no_results') {
+      return result('HANDLE_OBJECTION', 'HANDLE_TRUST_OBJECTION', 'Tuvo una mala experiencia previa o no vio resultados.', { actionRisk: 'restricted' });
+    }
+    if (analysis?.objection === 'price' || signals.has('price_objection')) {
+      return result('HANDLE_OBJECTION', 'HANDLE_PRICE_OBJECTION', 'Hay objecion de precio.', { actionRisk: 'restricted' });
+    }
+    if (analysis?.objection === 'time' || signals.has('time_objection')) {
+      return result('HANDLE_OBJECTION', 'HANDLE_TIME_OBJECTION', 'Hay objecion de tiempo.');
+    }
+
+    if (!businessType) return result('DISCOVER_BUSINESS', 'ASK_BUSINESS_TYPE', 'Aun no conocemos el tipo de negocio.');
+    if (!primaryNeed && !qualification.targetAudience.known && !qualification.productsServices.known && !qualification.painOrNeed.known && !currentSituation) {
+      return result('DISCOVER_GOAL', 'ASK_PRIMARY_GOAL', 'Falta una pieza minima de contexto para orientar PlanRedes.');
+    }
+
+    if (!progress.understandingDemonstrated) {
+      return result('DEMONSTRATE_UNDERSTANDING', 'DEMONSTRATE_UNDERSTANDING', 'Ya hay contexto suficiente; toca demostrar entendimiento antes de avanzar.');
+    }
+    if (!progress.personalizedIdeaDelivered && qualification.hasContextForPersonalizedIdea) {
+      return result('DELIVER_PERSONALIZED_IDEA', 'DELIVER_PERSONALIZED_IDEA', 'Ya se demostro entendimiento y hay contexto para aportar una idea personalizada.');
+    }
+    if (!progress.proofDelivered) {
+      return result('SHOW_RELEVANT_PROOF', 'SHOW_RELEVANT_PROOF', 'Despues de la idea conviene mostrar prueba o ejemplos aprobados sin inventar assets.', {
+        selectedAsset: null,
+        actionRisk: 'restricted',
+      });
+    }
+    if (!progress.offerExplained) {
+      return result('EXPLAIN_OFFER', 'EXPLAIN_OFFER', 'El lead ya recibio idea y prueba; toca explicar brevemente que compra con PlanRedes.', { actionRisk: 'restricted' });
+    }
+    if (!progress.pricePresented) {
+      return result('PRESENT_PRICE', 'PRESENT_PRICE', 'Ya entiende el enfoque; toca presentar precio real o pedir confirmacion del precio vigente.', { actionRisk: 'restricted' });
+    }
+    if (!qualification.readyForSales) {
+      return result('TEST_PURCHASE_INTENT', 'TEST_PURCHASE_INTENT', 'Ya recibio contexto suficiente; toca validar si quiere avanzar.');
+    }
+    return result('QUALIFY_FOR_SALES', 'START_CLOSING', 'El lead ya esta listo para ventas.', {
+      humanRequired: true,
+      readyForSales: true,
+      actionRisk: 'handoff',
+    });
   }
 
   // PRIORIDAD 2: cierre.
@@ -216,6 +280,7 @@ export function buildNextSalesState({ previous = {}, analysis = {}, score = 0, d
     productStrategy: decision?.productStrategy || previous?.productStrategy || qualification?.productStrategy || null,
     conversationObjective: decision?.conversationObjective || previous?.conversationObjective || null,
     lastAction: decision?.nextBestAction || previous?.lastAction || null,
+    commercialProgress: decision?.commercialProgress || previous?.commercialProgress || null,
     qualification,
     readyForSales: Boolean(decision?.readyForSales),
     humanRequired: Boolean(decision?.humanRequired),

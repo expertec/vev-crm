@@ -107,6 +107,18 @@ function detectPrimaryNeed(text = '') {
 function detectFallbackFacts(text = '') {
   const t = normalizeForMatch(text);
   const facts = {};
+  const serviceHits = [];
+  if (/(nomina|nominas|n[oó]mina|n[oó]minas)/.test(t)) serviceHits.push('nominas');
+  if (/(facturacion|facturaci[oó]n|facturas?)/.test(t)) serviceHits.push('facturacion');
+  if (/(declaraciones?|sat|impuestos?)/.test(t)) serviceHits.push('declaraciones SAT');
+  if (/(imss|movimientos imss)/.test(t)) serviceHits.push('movimientos IMSS');
+  if (/(administracion|administraci[oó]n)/.test(t)) serviceHits.push('administracion');
+  if (serviceHits.length) {
+    facts.productsServices = { value: serviceHits.join(', '), confidence: 0.86, source: 'explicit' };
+  }
+  if (/(personas fisicas|personas f[ií]sicas)/.test(t)) {
+    facts.targetAudience = { value: 'personas fisicas', confidence: 0.88, source: 'explicit' };
+  }
   if (/(recomendacion|recomendaciones|referido|referidos|boca en boca)/.test(t)) {
     facts.customerAcquisition = { value: 'referrals', confidence: 0.85, source: 'explicit' };
     facts.currentSituation = { value: 'referrals', confidence: 0.8, source: 'explicit' };
@@ -326,8 +338,9 @@ async function aiAnalyze({ lead = {}, recentMessages = [], latestText = '', acqu
     `signals permitidas: ${SIGNALS.join(', ')}`,
     `facts permitidos: ${FACT_KEYS.join(', ')}`,
     'facts solo para hechos objetivos. Usa {"value":X,"confidence":0-1,"source":"explicit|inferred"}.',
-    'Extrae contexto de dueños de negocio local en lenguaje simple: businessType, customerAcquisition, currentSituation, primaryGoal, painPoint, hasWebsite, runsAds, previousExperience.',
+    'Extrae contexto de duenos de negocio local en lenguaje simple: businessType, customerAcquisition, currentSituation, primaryGoal, painPoint, hasWebsite, runsAds, previousExperience, targetAudience, productsServices, mainOffer.',
     'Valores sugeridos: customerAcquisition puede ser referrals|social_media|google|paid_ads|walk_ins|offline|unknown. primaryGoal puede ser more_customers|sell_more|brand_awareness|look_professional|other. previousExperience puede ser successful|no_results|bad_experience|never_tried|unclear.',
+    'productsServices debe contener solo productos o servicios mencionados por el lead. targetAudience solo si el lead dice a quien atiende.',
     'No uses jerga como funnel, ROAS, CAC, conversion o pipeline en el resumen ni en hechos.',
     'No inventes contexto: si la respuesta no da evidencia suficiente, deja el fact ausente.',
     'No guardes opiniones como facts. Objeciones y sentimiento van en objection/sentiment.',

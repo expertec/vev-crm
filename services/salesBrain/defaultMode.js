@@ -38,8 +38,20 @@ export function buildNewInboundLeadSalesBrainDefaults() {
       runsAds: null,
       previousExperience: null,
       customerAcquisition: null,
+      targetAudience: null,
+      productsServices: null,
+      mainOffer: null,
     },
     salesContextRaw: {},
     salesContextConfidence: {},
+    commercialProgress: {
+      understandingDemonstrated: false,
+      personalizedIdeaDelivered: false,
+      proofDelivered: false,
+      offerExplained: false,
+      pricePresented: false,
+      offerReaction: null,
+      updatedAt: null,
+    },
   };
 }

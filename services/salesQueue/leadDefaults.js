@@ -43,6 +43,9 @@ export function normalizeSalesContext(salesContext = {}) {
     runsAds: safe.runsAds ?? safe.currentlyAdvertising ?? null,
     previousExperience: safe.previousExperience || null,
     customerAcquisition: safe.customerAcquisition || null,
+    targetAudience: safe.targetAudience || null,
+    productsServices: safe.productsServices || null,
+    mainOffer: safe.mainOffer || null,
   };
 }
 
