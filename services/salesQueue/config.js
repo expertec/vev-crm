@@ -43,6 +43,7 @@ export const QUEUE_PRIORITY_WEIGHTS = Object.freeze({
 });
 
 export const ROUTING_REASONS = Object.freeze({
+  READY_FOR_SALES: 'ready_for_sales',
   READY_TO_BUY: 'ready_to_buy',
   ASKED_PAYMENT_METHOD: 'asked_payment_method',
   ASKED_PRICE: 'asked_price',

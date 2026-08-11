@@ -340,11 +340,30 @@ test('cola general incluye lead ready_for_agent aunque queue siga en automation'
   assert.equal(db.lead('leadA').queue.status, QUEUE_STATUSES.CLAIMED);
 });
 
-test('cola general incluye lead con score alto aunque queue siga en automation', async () => {
+test('cola general no incluye lead solo por score alto si no esta ready_for_sales', async () => {
   const db = new MemoryDb({
     leadA: waitingLead(100, {
       queue: { status: QUEUE_STATUSES.AUTOMATION, priority: 0 },
       salesState: { leadScore: 100 },
+    }),
+  });
+
+  const stats = await getAgentQueueStats({ db, firestore: fakeFirestore });
+  const result = await claimNextLead({ db, firestore: fakeFirestore, recordActivity: noActivity, agentUid: 'agent-a' });
+
+  assert.equal(stats.waiting, 0);
+  assert.equal(result.claimed, false);
+  assert.equal(result.lead, null);
+});
+
+test('cola general incluye lead con qualification ready_for_sales aunque queue siga en automation', async () => {
+  const db = new MemoryDb({
+    leadA: waitingLead(100, {
+      queue: { status: QUEUE_STATUSES.AUTOMATION, priority: 0 },
+      salesState: {
+        leadScore: 100,
+        qualification: { readyForSales: true, qualificationStatus: 'ready_for_sales' },
+      },
     }),
   });
 
@@ -366,13 +385,16 @@ test('propiedad: lead con salesOwner no puede ser reclamado por otro agente', as
   assert.equal(result.claimed, false);
 });
 
-test('propiedad: lead propio con score alto vuelve al trabajo personal aunque queue siga en automation', async () => {
+test('propiedad: lead propio ready_for_sales vuelve al trabajo personal aunque queue siga en automation', async () => {
   const db = new MemoryDb({
     leadA: waitingLead(100, {
       salesOwner: 'owner-a',
       assignedTo: 'owner-a',
       queue: { status: QUEUE_STATUSES.AUTOMATION, priority: 0 },
-      salesState: { leadScore: 100 },
+      salesState: {
+        leadScore: 100,
+        qualification: { readyForSales: true, qualificationStatus: 'ready_for_sales' },
+      },
     }),
   });
 

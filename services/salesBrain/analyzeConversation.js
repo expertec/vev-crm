@@ -79,6 +79,7 @@ const TIME_RE = /(luego|despues|despu[eé]s|no tengo tiempo|mas tarde|la otra se
 const AUTO_REPLY_RE = /(mensaje automatico|respuesta automatica|asistente virtual|soy (el|un|una|tu) asistente|soy una ia|soy un bot|gracias por contactar|hemos recibido|en breve|horario de atencion|menu principal|selecciona una opcion)/i;
 
 const BUSINESS_PATTERNS = [
+  ['travel_agency', /(viaje|viajes|agencia de viajes|turismo|vacaciones|tours?|excursiones|paquetes de viaje)/i],
   ['restaurant', /(restaurante|comida|taqueria|taquería|cafeteria|cafetería|bar|cocina|pizzeria|pizza)/i],
   ['barbershop', /(barberia|barbería|barbero|salon|salón|estetica|estética)/i],
   ['clinic', /(clinica|clínica|consultorio|doctor|dentista|medico|m[eé]dico|terapia)/i],
@@ -101,6 +102,27 @@ function detectPrimaryNeed(text = '') {
   if (/(publicidad|anuncios|facebook ads|meta ads|campana|campaña)/.test(t)) return 'advertising';
   if (/(sistema|software|crm|automatizar|automatizacion)/.test(t)) return 'software';
   return null;
+}
+
+function detectFallbackFacts(text = '') {
+  const t = normalizeForMatch(text);
+  const facts = {};
+  if (/(recomendacion|recomendaciones|referido|referidos|boca en boca)/.test(t)) {
+    facts.customerAcquisition = { value: 'referrals', confidence: 0.85, source: 'explicit' };
+    facts.currentSituation = { value: 'referrals', confidence: 0.8, source: 'explicit' };
+  }
+  if (/(instagram|facebook|redes)/.test(t) && /(llegan|consigo|clientes|vendo|publico)/.test(t)) {
+    facts.customerAcquisition = facts.customerAcquisition || { value: 'social_media', confidence: 0.75, source: 'explicit' };
+  }
+  if (/(hago publicidad|ya hago anuncios|corro anuncios|pago anuncios|facebook ads|meta ads|campana|campaña|publicidad)/.test(t)) {
+    facts.runsAds = { value: true, confidence: 0.8, source: 'explicit' };
+    facts.currentlyAdvertising = { value: true, confidence: 0.8, source: 'explicit' };
+  }
+  if (/(no me funciona|no funciona|no me sirvio|no me sirvió|sin resultados|no vendo|no llegan clientes)/.test(t)) {
+    facts.painPoint = { value: 'no_results', confidence: 0.82, source: 'explicit' };
+    facts.previousExperience = { value: 'no_results', confidence: 0.78, source: 'explicit' };
+  }
+  return facts;
 }
 
 function buildFallbackAnalysis({ lead = {}, latestText = '' } = {}) {
@@ -173,7 +195,7 @@ function buildFallbackAnalysis({ lead = {}, latestText = '' } = {}) {
   if (primaryNeed) signals.push('primary_need_identified');
   if (String(lead?.source || '').toLowerCase() === 'meta_ads' || lead?.lastMetaAttribution) signals.push('meta_ad');
 
-  const facts = {};
+  const facts = detectFallbackFacts(text);
   if (businessType && detectBusinessType(text)) {
     facts.businessType = { value: businessType, confidence: 0.9, source: 'explicit' };
   }
@@ -335,7 +357,10 @@ async function aiAnalyze({ lead = {}, recentMessages = [], latestText = '', acqu
     const parsed = parseAiJson(content);
     if (!parsed) return null;
     console.log('[SalesBrain] analysis:complete');
-    return coerceAnalysis({ ...parsed, source: 'ai', model: AI_MODEL });
+    return {
+      ...coerceAnalysis({ ...parsed, source: 'ai', model: AI_MODEL }),
+      usage: response?.data?.usage || null,
+    };
   } catch (error) {
     console.warn('[SalesBrain] analysis:error', error?.response?.data?.error?.message || error?.message || error);
     return null;

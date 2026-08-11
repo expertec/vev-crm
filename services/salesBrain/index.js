@@ -187,8 +187,9 @@ export async function runSalesBrainForInbound({
       salesState: previousSalesState,
       conversationMemory: nextMemory,
       guardrails,
+      acquisitionContext,
     });
-    console.log(`[SalesBrain] decision:${decision.nextBestAction}`);
+    console.log(`[SalesBrain] decision:${decision.conversationObjective}:${decision.nextBestAction}`);
 
     const nextSalesState = buildNextSalesState({
       previous: previousSalesState,
@@ -230,6 +231,10 @@ export async function runSalesBrainForInbound({
     try {
       reply = await generateReply({
         action: decision.nextBestAction,
+        conversationObjective: decision.conversationObjective,
+        productStrategy: decision.productStrategy,
+        qualification: nextSalesState.qualification || decision.qualification,
+        selectedAsset: decision.selectedAsset,
         lead: currentLead,
         analysis: finalAnalysis,
         salesState: nextSalesState,
@@ -254,8 +259,17 @@ export async function runSalesBrainForInbound({
       newConversationMemory: serializeForEvent(nextMemory),
       scoreBreakdown: score.breakdown,
       leadScore: score.total,
+      qualificationBefore: serializeForEvent(previousSalesState?.qualification || null),
+      qualificationAfter: serializeForEvent(nextSalesState?.qualification || null),
+      conversationObjective: decision.conversationObjective,
       nextBestAction: decision.nextBestAction,
       reason: decision.reason,
+      productStrategy: decision.productStrategy,
+      actionRisk: decision.actionRisk,
+      selectedAsset: decision.selectedAsset,
+      assetRequired: decision.assetRequired,
+      readyForSales: decision.readyForSales,
+      humanRequired: decision.humanRequired,
       routing: {
         status: routing.status,
         priority: queuePriority.priority,
@@ -264,6 +278,8 @@ export async function runSalesBrainForInbound({
       commercialSignals,
       suggestedReply: reply.message,
       replyGenerationStatus: reply.replyGenerationStatus,
+      analysisUsage: finalAnalysis?.usage || null,
+      replyUsage: reply.usage || null,
       model: finalAnalysis.model,
       replyModel: reply.model,
       createdAt: new Date(),
@@ -287,7 +303,10 @@ export async function runSalesBrainForInbound({
         },
         salesBrainCurrent: {
           eventId,
+          conversationObjective: decision.conversationObjective,
           nextBestAction: decision.nextBestAction,
+          readyForSales: decision.readyForSales,
+          humanRequired: decision.humanRequired,
           status: eventPayload.status,
           routing: {
             status: routing.status,

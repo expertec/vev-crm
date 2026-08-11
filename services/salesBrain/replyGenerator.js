@@ -20,6 +20,33 @@ function firstName(value = '') {
   return raw ? raw.split(' ')[0] : '';
 }
 
+function labelBusiness(value = '') {
+  const raw = cleanText(value, 120);
+  const map = {
+    travel_agency: 'viajes',
+    restaurant: 'tu restaurante',
+    barbershop: 'tu barberia',
+    clinic: 'tu consultorio',
+    real_estate: 'tu inmobiliaria',
+    store: 'tu tienda',
+    service_business: 'tu negocio de servicios',
+  };
+  return map[raw] || raw || 'tu negocio';
+}
+
+function goalText(value = '') {
+  const raw = cleanText(value, 120);
+  const map = {
+    more_customers: 'conseguir mas clientes',
+    sell_more: 'vender mas',
+    brand_awareness: 'darle mas presencia a la marca',
+    look_professional: 'verse mas profesional',
+    advertising: 'hacer que la publicidad funcione mejor',
+    website: 'mejorar su presencia web',
+  };
+  return map[raw] || raw || 'atraer mas clientes';
+}
+
 async function getOpenAi() {
   if (AI_DISABLED || openAiUnavailable) return null;
   if (cachedOpenAi) return cachedOpenAi;
@@ -37,19 +64,57 @@ async function getOpenAi() {
   }
 }
 
-function fallbackReply({ action, lead = {}, analysis = {}, conversationMemory = {} } = {}) {
+function fallbackReply({
+  action,
+  conversationObjective = '',
+  productStrategy = 'unknown',
+  lead = {},
+  analysis = {},
+  conversationMemory = {},
+  qualification = {},
+} = {}) {
   const nombre = firstName(lead?.nombre || '');
   const prefix = nombre ? `${nombre}, ` : '';
   const salesContext = lead?.salesContext && typeof lead.salesContext === 'object' ? lead.salesContext : {};
-  const businessType = analysis?.businessType || salesContext.businessType || conversationMemory?.facts?.businessType?.value || 'tu negocio';
-  const primaryGoal = salesContext.primaryGoal || analysis?.primaryNeed || conversationMemory?.facts?.primaryNeed?.value || '';
+  const businessType = qualification?.business?.value || analysis?.businessType || salesContext.businessType || conversationMemory?.facts?.businessType?.value || 'tu negocio';
+  const primaryGoal = qualification?.primaryGoal?.value || salesContext.primaryGoal || analysis?.primaryNeed || conversationMemory?.facts?.primaryNeed?.value || '';
+  const businessLabel = labelBusiness(businessType);
+  const goalLabel = goalText(primaryGoal);
+  const isRedes = productStrategy === 'redes_sociales';
+
+  if (isRedes && conversationObjective === 'DISCOVER_GOAL') {
+    return cleanText(`${prefix}perfecto. Buscas principalmente conseguir personas nuevas que te pidan informacion de ${businessLabel}, o darle mas movimiento y presencia a tus redes?`);
+  }
+  if (isRedes && conversationObjective === 'DEMONSTRATE_UNDERSTANDING') {
+    return cleanText(`${prefix}entonces el enfoque no seria publicar por publicar. La idea seria usar tus redes para generar consultas de personas interesadas en ${businessLabel} y llevarlas a WhatsApp para pedir informacion o cotizacion.`);
+  }
+  if (isRedes && conversationObjective === 'DISCOVER_CURRENT_SITUATION') {
+    return cleanText(`${prefix}hoy esos clientes te llegan mas por recomendacion, por tus redes actuales o ya estas pagando publicidad en Facebook/Instagram?`);
+  }
+  if (isRedes && conversationObjective === 'CREATE_PERSONALIZED_IDEA') {
+    return cleanText(`${prefix}yo probaria primero una campaña simple enfocada en ${goalLabel}: una oferta o tema concreto de ${businessLabel}, publicaciones que expliquen facil el beneficio y mensajes directos a WhatsApp para cotizar.`);
+  }
+  if (isRedes && conversationObjective === 'EXPLAIN_METHOD') {
+    return cleanText(`${prefix}trabajamos primero entendiendo que vendes y que quieres lograr; despues armamos contenido y anuncios alrededor de una accion clara: que la persona te escriba, pregunte o cotice.`);
+  }
+  if (isRedes && conversationObjective === 'PRESENT_OFFER') {
+    return cleanText(`${prefix}con lo que me cuentas, lo logico seria empezar con un plan enfocado en ${goalLabel}, no solo en subir posts. Si quieres, te explico la opcion inicial para arrancarlo sin hacerlo pesado.`);
+  }
+  if (isRedes && conversationObjective === 'TEST_PURCHASE_INTENT') {
+    return cleanText(`${prefix}si este enfoque te hace sentido, el siguiente paso seria aterrizarlo a tu negocio y ver si conviene arrancarlo este mes. Te gustaria revisarlo?`);
+  }
 
   const templates = {
-    ASK_BUSINESS_TYPE: `${prefix}para ubicar bien la estrategia, dime de que giro es tu negocio y que vendes principalmente.`,
-    ASK_PRIMARY_GOAL: `${prefix}para recomendarte algo concreto: buscas mas clientes, mas confianza al presentarte o vender mas por WhatsApp?`,
+    ASK_BUSINESS_TYPE: `${prefix}claro. A que se dedica tu negocio o que vendes principalmente?`,
+    ASK_PRIMARY_GOAL: `${prefix}buscas principalmente conseguir nuevos clientes, vender mas a los que ya te conocen o darle mas presencia a tu negocio?`,
     ASK_CURRENT_SITUATION: `${prefix}hoy de donde te llegan clientes: recomendaciones, redes, Google o anuncios? Con eso te digo donde conviene atacar primero.`,
+    DEMONSTRATE_UNDERSTANDING: `${prefix}entonces el punto no es hacer publicidad por hacerla, sino usarla para ${goalLabel} de forma mas clara y medible.`,
+    DELIVER_MICRO_VALUE: `${prefix}lo importante es que el primer mensaje no se vea generico: debe decir rapido que haces, para quien es y cual es el siguiente paso para contactarte.`,
+    CREATE_PERSONALIZED_IDEA: `${prefix}yo empezaria con una idea simple para ${businessLabel}: enfocar el mensaje en ${goalLabel} y llevar las consultas a WhatsApp con una oferta o motivo claro para escribir.`,
     EXPLAIN_SERVICE: `${prefix}la idea es convertir tu presencia digital en una herramienta de venta: que la gente entienda rapido que haces, confie y te escriba por WhatsApp con menos friccion.`,
+    EXPLAIN_METHOD: `${prefix}primero aterrizamos negocio, objetivo y situacion actual. Con eso definimos que mensaje conviene mostrar y cual debe ser el siguiente paso del cliente.`,
     PRESENT_OFFER: `${prefix}con lo que me dices, lo mas util seria enfocarlo a captar prospectos y generar confianza rapido. Te puedo manejar una opcion inicial y una mas completa; dime si quieres arrancar con algo ligero o con una presencia mas fuerte.`,
+    TEST_PURCHASE_INTENT: `${prefix}si este enfoque te hace sentido, podemos aterrizarlo en una opcion concreta para tu negocio. Te gustaria avanzar a revisar eso?`,
     SEND_EXAMPLES: `${prefix}si buscas ejemplos, te mando referencias parecidas a ${businessType}. Fijate sobre todo en claridad, confianza y llamada a WhatsApp; eso es lo que hace que el cliente avance.`,
     SEND_RELEVANT_CASE: `${prefix}te muestro un caso parecido para que aterrices el resultado. La meta no es solo que se vea bonito: es que el prospecto entienda, confie y pregunte.`,
     SEND_TESTIMONIAL: `${prefix}te comparto una referencia para que veas como trabajamos y que tipo de resultado buscamos antes de que tomes una decision.`,
@@ -69,6 +134,10 @@ function fallbackReply({ action, lead = {}, analysis = {}, conversationMemory = 
 
 export async function generateReply({
   action = 'WAIT',
+  conversationObjective = 'WAIT',
+  productStrategy = 'unknown',
+  qualification = {},
+  selectedAsset = null,
   lead = {},
   analysis = {},
   salesState = {},
@@ -80,7 +149,34 @@ export async function generateReply({
     return { message: '', model: 'none', replyGenerationStatus: 'empty', replyPromptVersion: SALES_BRAIN_REPLY_PROMPT_VERSION };
   }
 
-  const fallback = fallbackReply({ action: safeAction, lead, analysis, salesState, conversationMemory });
+  const fallback = fallbackReply({
+    action: safeAction,
+    conversationObjective,
+    productStrategy,
+    lead,
+    analysis,
+    salesState,
+    conversationMemory,
+    qualification,
+  });
+  const templateOnlyObjectives = new Set([
+    'DISCOVER_BUSINESS',
+    'DISCOVER_GOAL',
+    'DISCOVER_CURRENT_SITUATION',
+    'DEMONSTRATE_UNDERSTANDING',
+    'DELIVER_MICRO_VALUE',
+    'CREATE_PERSONALIZED_IDEA',
+    'TEST_PURCHASE_INTENT',
+  ]);
+  if (productStrategy === 'redes_sociales' && templateOnlyObjectives.has(conversationObjective)) {
+    return {
+      message: fallback,
+      model: 'template',
+      replyGenerationStatus: fallback ? 'template' : 'failed',
+      replyPromptVersion: SALES_BRAIN_REPLY_PROMPT_VERSION,
+    };
+  }
+
   const openai = await getOpenAi();
   if (!openai) {
     return { message: fallback, model: 'template', replyGenerationStatus: fallback ? 'fallback' : 'failed', replyPromptVersion: SALES_BRAIN_REPLY_PROMPT_VERSION };
@@ -88,16 +184,23 @@ export async function generateReply({
 
   const system = [
     'Eres closer consultivo de ventas por WhatsApp en Mexico para servicios digitales.',
-    'NO decidas la estrategia. La accion ya esta decidida y no puedes cambiarla.',
-    'Escribe con tono seguro, concreto y orientado a avance comercial.',
-    'Evita frases complacientes o blandas como "que bueno", "me encanta", "espero tu respuesta", "para poder ayudarte mejor".',
-    'Usa neuromarketing practico: claridad, confianza, beneficio tangible, reduccion de riesgo y siguiente paso simple.',
-    'Maximo 1 o 2 parrafos cortos. Haz una sola pregunta de avance cuando aplique.',
-    'No uses lenguaje tecnico ni bloques largos. No inventes links, precios, descuentos ni casos especificos.',
+    'NO decidas la estrategia. conversationObjective y action ya estan decididos y no puedes cambiarlos.',
+    'Objetivo principal: precalificar y madurar al lead antes de pasarlo a ventas.',
+    'Escribe natural, corto, conversacional y especifico al negocio.',
+    'Una idea principal por mensaje. Normalmente una sola pregunta como maximo.',
+    'No vendas demasiado pronto si el objetivo es descubrir informacion.',
+    'Evita frases como "nuestro plan esta disenado para", "estrategias especificas", "interacciones efectivas", "para poder ayudarte mejor".',
+    'Prefiere preguntas faciles de contestar.',
+    'No inventes links, precios, descuentos, clientes, estadisticas, testimonios, resultados ni casos.',
+    'Si selectedAsset es null, no prometas enviar ejemplos/casos concretos.',
   ].join('\n');
 
   const user = JSON.stringify({
+    conversationObjective,
     action: safeAction,
+    productStrategy,
+    qualification,
+    selectedAsset,
     leadName: firstName(lead?.nombre || ''),
     analysis,
     salesState,
@@ -124,6 +227,7 @@ export async function generateReply({
       message: message || fallback,
       model: AI_MODEL,
       replyGenerationStatus: message ? 'ok' : (fallback ? 'fallback' : 'failed'),
+      usage: response?.data?.usage || null,
       replyPromptVersion: SALES_BRAIN_REPLY_PROMPT_VERSION,
     };
   } catch (error) {

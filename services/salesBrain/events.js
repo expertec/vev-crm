@@ -1,6 +1,7 @@
 import { admin, db as defaultDb } from '../../firebaseAdmin.js';
 import { eventIdForInputMessage, normalizeInputMessageId } from './catalog.js';
 import { buildSalesBrainEventPayload } from './eventPayload.js';
+import { deliveredPatchForObjective } from './qualification.js';
 
 const { FieldValue } = admin.firestore;
 
@@ -140,16 +141,26 @@ export async function recordSellerFeedback({
   const current = leadSnap.exists ? (leadSnap.data()?.salesBrainCurrent || null) : null;
   const batch = db.batch();
   batch.set(eventRef, payload, { merge: true });
+  const deliveredField = ['accepted', 'edited', 'spoken'].includes(safeDecision)
+    ? deliveredPatchForObjective(eventData?.conversationObjective || '')
+    : '';
+  const leadPatch = {};
+  if (deliveredField) {
+    leadPatch[`salesState.qualification.delivered.${deliveredField}`] = true;
+    leadPatch['salesState.qualification.lastDeliveredObjective'] = cleanText(eventData?.conversationObjective || '', 80);
+    leadPatch['salesState.qualification.lastDeliveredAt'] = FieldValue.serverTimestamp();
+  }
   if (current?.eventId === safeEventId) {
+    leadPatch.salesBrainCurrent = {
+      ...current,
+      status: safeDecision,
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+  }
+  if (Object.keys(leadPatch).length) {
     batch.set(
       leadRef,
-      {
-        salesBrainCurrent: {
-          ...current,
-          status: safeDecision,
-          updatedAt: FieldValue.serverTimestamp(),
-        },
-      },
+      leadPatch,
       { merge: true }
     );
   }

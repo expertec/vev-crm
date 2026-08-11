@@ -21,6 +21,10 @@ function hasSignal(analysis = {}, signal = '') {
   return Array.isArray(analysis?.signals) && analysis.signals.includes(signal);
 }
 
+function objectOr(value, fallback = {}) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : fallback;
+}
+
 function isClosedLead(lead = {}, analysis = {}) {
   if (getTerminalLeadReason(lead)) return true;
   if (analysis?.intent === 'no_interest' || hasSignal(analysis, 'stop_requested')) return true;
@@ -32,6 +36,7 @@ export function decideRouting({ lead = {}, analysis = {}, latestText = '', comme
   const signals = commercialSignals || buildCommercialSignals({ lead: safeLead, analysis, latestText });
   const interest = cleanText(analysis?.interestLevel || safeLead?.salesState?.interestLevel || '', 40).toLowerCase();
   const intent = cleanText(analysis?.intent || safeLead?.salesState?.intent || '', 80).toLowerCase();
+  const qualification = objectOr(safeLead?.salesState?.qualification, null);
   const followUpMs = toMillis(safeLead.followUp.nextAt);
   const nowMs = toMillis(now) || Date.now();
 
@@ -40,6 +45,19 @@ export function decideRouting({ lead = {}, analysis = {}, latestText = '', comme
   }
   if (followUpMs && followUpMs <= nowMs) {
     return { status: ROUTING_STATUSES.FOLLOWUP, reason: ROUTING_REASONS.FOLLOWUP_OVERDUE, humanRequired: true };
+  }
+  if (qualification) {
+    if (qualification.humanRequired === true || qualification.readyForSales === true || qualification.qualificationStatus === 'ready_for_sales') {
+      return { status: ROUTING_STATUSES.READY_FOR_AGENT, reason: ROUTING_REASONS.READY_FOR_SALES, humanRequired: true };
+    }
+    if (interest === 'lost') {
+      return { status: ROUTING_STATUSES.DORMANT, reason: ROUTING_REASONS.DORMANT, humanRequired: false };
+    }
+    return {
+      status: ROUTING_STATUSES.AUTOMATION,
+      reason: qualification.qualificationStatus === 'discovering' ? ROUTING_REASONS.LOW_INTEREST : ROUTING_REASONS.NO_SIGNAL,
+      humanRequired: false,
+    };
   }
   if (intent === 'ready_to_buy' || intent === 'asks_how_to_start' || hasSignal(analysis, 'ready_to_buy')) {
     return { status: ROUTING_STATUSES.READY_FOR_AGENT, reason: ROUTING_REASONS.READY_TO_BUY, humanRequired: true };

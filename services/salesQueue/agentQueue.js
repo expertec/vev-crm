@@ -87,7 +87,8 @@ async function loadGeneralOpportunityCandidates(db) {
     loadCandidateDocs(db, [(ref) => ref.where('queue.status', '==', QUEUE_STATUSES.WAITING)]),
     loadCandidateDocs(db, [(ref) => ref.where('routing.status', '==', ROUTING_STATUSES.READY_FOR_AGENT)]).catch(() => []),
     loadCandidateDocs(db, [(ref) => ref.where('salesBrainCurrent.routing.status', '==', ROUTING_STATUSES.READY_FOR_AGENT)]).catch(() => []),
-    loadCandidateDocs(db, [(ref) => ref.where('salesState.leadScore', '>=', 70)]).catch(() => []),
+    loadCandidateDocs(db, [(ref) => ref.where('salesState.qualification.readyForSales', '==', true)]).catch(() => []),
+    loadCandidateDocs(db, [(ref) => ref.where('salesState.readyForSales', '==', true)]).catch(() => []),
   ]);
   return dedupeLeads(batches.flat()).filter(canClaimGeneralLead);
 }

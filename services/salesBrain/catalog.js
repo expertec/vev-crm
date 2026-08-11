@@ -1,7 +1,7 @@
 export const SALES_BRAIN_AGENT_VERSION = 'sales-brain-mvp-v1';
 export const SALES_BRAIN_ANALYSIS_VERSION = 'v1';
-export const SALES_BRAIN_DECISION_VERSION = 'v1';
-export const SALES_BRAIN_REPLY_PROMPT_VERSION = 'v1';
+export const SALES_BRAIN_DECISION_VERSION = 'v2';
+export const SALES_BRAIN_REPLY_PROMPT_VERSION = 'v2';
 
 export const SALES_BRAIN_MODES = Object.freeze({
   OFF: 'off',
@@ -38,6 +38,44 @@ export const SALES_STAGES = Object.freeze([
   'lost',
 ]);
 
+export const PRODUCT_STRATEGIES = Object.freeze([
+  'web',
+  'redes_sociales',
+  'unknown',
+]);
+
+export const QUALIFICATION_STATUSES = Object.freeze([
+  'discovering',
+  'nurturing',
+  'qualified',
+  'ready_for_sales',
+]);
+
+export const CONVERSATION_OBJECTIVES = Object.freeze([
+  'DISCOVER_BUSINESS',
+  'DISCOVER_GOAL',
+  'DISCOVER_CURRENT_SITUATION',
+  'DISCOVER_PAIN',
+  'DEMONSTRATE_UNDERSTANDING',
+  'DELIVER_MICRO_VALUE',
+  'SHOW_RELEVANT_PROOF',
+  'CREATE_PERSONALIZED_IDEA',
+  'EXPLAIN_METHOD',
+  'PRESENT_OFFER',
+  'TEST_PURCHASE_INTENT',
+  'HANDLE_OBJECTION',
+  'QUALIFY_FOR_SALES',
+  'HANDOFF_SALES',
+  'WAIT',
+  'FOLLOW_UP',
+]);
+
+export const ACTION_RISK_LEVELS = Object.freeze([
+  'safe_automation',
+  'restricted',
+  'handoff',
+]);
+
 export const AWARENESS_LEVELS = Object.freeze([
   'unaware',
   'problem_aware',
@@ -70,8 +108,13 @@ export const NEXT_BEST_ACTIONS = Object.freeze([
   'ASK_BUSINESS_TYPE',
   'ASK_PRIMARY_GOAL',
   'ASK_CURRENT_SITUATION',
+  'DEMONSTRATE_UNDERSTANDING',
+  'DELIVER_MICRO_VALUE',
+  'CREATE_PERSONALIZED_IDEA',
   'EXPLAIN_SERVICE',
+  'EXPLAIN_METHOD',
   'PRESENT_OFFER',
+  'TEST_PURCHASE_INTENT',
   'SEND_EXAMPLES',
   'SEND_RELEVANT_CASE',
   'SEND_TESTIMONIAL',
@@ -149,6 +192,22 @@ export function uniqueAllowed(values = [], allowed = []) {
 
 export function normalizeNextBestAction(value = '') {
   return enumOr(value, NEXT_BEST_ACTIONS, 'WAIT');
+}
+
+export function normalizeConversationObjective(value = '') {
+  return enumOr(value, CONVERSATION_OBJECTIVES, 'WAIT');
+}
+
+export function normalizeQualificationStatus(value = '') {
+  return enumOr(value, QUALIFICATION_STATUSES, 'discovering');
+}
+
+export function normalizeProductStrategy(value = '') {
+  return enumOr(value, PRODUCT_STRATEGIES, 'unknown');
+}
+
+export function normalizeActionRisk(value = '') {
+  return enumOr(value, ACTION_RISK_LEVELS, 'restricted');
 }
 
 export function normalizeInputMessageId(value = '') {
