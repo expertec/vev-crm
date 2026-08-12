@@ -37,6 +37,55 @@ test('usa contexto de muestra para variar el mensaje', () => {
   assert.equal(variant.angleKey, 'reintro');
 });
 
+test('usa contexto de PlanRedes y no menciona muestra web en reactivacion', () => {
+  const variant = buildLeadFollowupVariant(
+    {
+      id: 'lead-redes',
+      nombre: 'JOJASAAL',
+      telefono: '5215551112233',
+      salesState: {
+        qualification: {
+          productStrategy: 'redes_sociales',
+        },
+      },
+    },
+    { campaignId: 'always-on-202608121200' }
+  );
+
+  assert.equal(variant.contextKey, 'plan_redes');
+  assert.match(variant.message, /redes/i);
+  assert.doesNotMatch(variant.message, /muestra|pagina gratis|p[aá]gina gratis/i);
+});
+
+test('always-on detecta contexto de redes desde Sales Brain', () => {
+  const result = evaluateLeadForAlwaysOn(
+    {
+      id: 'lead-redes-always-on',
+      nombre: 'Ana',
+      telefono: '5215559998877',
+      fecha_creacion: new Date('2026-05-20T12:00:00.000Z'),
+      lastMessageAt: new Date('2026-05-20T12:00:00.000Z'),
+      unreadCount: 0,
+      hasActiveSequences: false,
+      salesBrainCurrent: {
+        productStrategy: 'redes_sociales',
+      },
+    },
+    {
+      settings: {
+        targetStages: ['leads_nuevos'],
+        minSilenceHours: 24,
+        maxTouches: 6,
+        cadenceHours: [24, 72, 168],
+      },
+      now: new Date('2026-05-26T18:00:00.000Z'),
+    }
+  );
+
+  assert.equal(result.eligible, true);
+  assert.equal(result.contextKey, 'plan_redes');
+});
+
 test('omite leads con mensajes no leidos', () => {
   const window = getPreviousCalendarWeekWindow({
     now: new Date('2026-05-26T18:00:00.000Z'),

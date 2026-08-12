@@ -29,6 +29,43 @@ function triggerFamily(value = '') {
   return '';
 }
 
+function normalizeContextText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function collectLeadContextTexts(leadData = {}) {
+  return [
+    leadData?.salesState?.productStrategy,
+    leadData?.salesState?.qualification?.productStrategy,
+    leadData?.salesBrainCurrent?.productStrategy,
+    leadData?.salesBrainCurrent?.qualification?.productStrategy,
+    leadData?.salesContext?.interestedService,
+    leadData?.conversationMemory?.facts?.interestedService?.value,
+    leadData?.acquisitionContext?.productStrategy,
+    leadData?.acquisitionContext?.service,
+    leadData?.acquisitionContext?.source,
+    leadData?.acquisitionContext?.campaign,
+    leadData?.acquisitionContext?.ad,
+    leadData?.metaAttribution?.campaignName,
+    leadData?.metaAttribution?.adName,
+    leadData?.metaAttribution?.headline,
+    leadData?.metaAttribution?.body,
+    leadData?.lastMetaAttribution?.campaignName,
+    leadData?.lastMetaAttribution?.adName,
+    leadData?.lastMetaAttribution?.headline,
+    leadData?.lastMetaAttribution?.body,
+    leadData?.metaCampaignName,
+    leadData?.campaign,
+  ]
+    .map(normalizeContextText)
+    .filter(Boolean);
+}
+
 function collectLeadTriggerKeys(leadData = {}) {
   const keys = new Set();
   const add = (value) => {
@@ -61,14 +98,23 @@ function collectLeadTriggerKeys(leadData = {}) {
   return keys;
 }
 
+function hasSocialSalesBrainContext(leadData = {}) {
+  const texts = collectLeadContextTexts(leadData);
+  return texts.some((text) => (
+    text === 'redes_sociales'
+    || /\b(planredes|redes sociales|redessociales|manejo de redes|social media|meta ads|facebook ads|instagram)\b/.test(text)
+  ));
+}
+
 export function shouldBlockSequenceByLeadContext(leadData = {}, nextTrigger = '') {
   const nextFamily = triggerFamily(nextTrigger);
   if (!nextFamily) return { blocked: false, reason: '' };
 
   const keys = collectLeadTriggerKeys(leadData);
   const hasSocialContext = [...keys].some((key) => SOCIAL_SEQUENCE_TRIGGERS.has(key));
+  const hasSocialBrainContext = hasSocialSalesBrainContext(leadData);
 
-  if (nextFamily === 'web' && hasSocialContext) {
+  if (nextFamily === 'web' && (hasSocialContext || hasSocialBrainContext)) {
     return { blocked: true, reason: 'social_campaign_sequence_lock' };
   }
 
@@ -78,4 +124,3 @@ export function shouldBlockSequenceByLeadContext(leadData = {}, nextTrigger = ''
 export function getSequenceTriggerFamily(trigger = '') {
   return triggerFamily(trigger);
 }
-

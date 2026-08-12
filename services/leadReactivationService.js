@@ -114,7 +114,68 @@ const FOLLOWUP_ANGLES = [
   },
 ];
 
+const PLAN_REDES_FOLLOWUP_ANGLES = [
+  {
+    key: 'reintro_redes',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, te escribo de NegociosWeb. Quedamos pendientes con {{tema}} y queria ver si aun quieres que te ayude a mover tus redes.',
+      'Hola {{nombre}}, no quiero que se te pase: te habia compartido informacion de {{tema}}. Sigo disponible para ayudarte cuando gustes.',
+      'Hola {{nombre}}, paso a recordarte lo de {{tema}}. Si todavia quieres ordenar tus redes y generar mas consultas, lo retomamos.',
+    ],
+  },
+  {
+    key: 'beneficio_redes',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, unas redes bien trabajadas ayudan a que tu negocio se vea activo, confiable y genere mas mensajes. Te ayudo a armar ese plan.',
+      '{{nombre}}, publicar con estrategia hace mucha diferencia: contenido claro, constancia y enfoque en vender. Aun te puedo apoyar con tus redes.',
+    ],
+  },
+  {
+    key: 'prueba_social_redes',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, esta semana estuvimos trabajando contenido para otro negocio y ya estan teniendo mas movimiento en mensajes. Me gustaria hacer lo mismo por ti.',
+      '{{nombre}}, varios clientes empiezan con redes desordenadas y en poco tiempo ya tienen contenido mas claro y constante. Podemos hacer eso con tu negocio.',
+    ],
+  },
+  {
+    key: 'pregunta_redes',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, para no insistir de mas: que te detiene con {{tema}}? Es tema de precio, tiempo o quieres ver que incluye?',
+      '{{nombre}}, que te sirve mas: que te mande precio, ejemplos de contenido o que revisemos que conviene publicar para tu negocio?',
+    ],
+  },
+  {
+    key: 'oferta_redes',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, este mes tengo espacio para apoyar con manejo de redes y contenido para negocios. Lo aprovechamos?',
+      '{{nombre}}, si arrancamos esta semana puedo ayudarte a dejar encaminada tu estrategia de redes. Te aparto el lugar?',
+    ],
+  },
+  {
+    key: 'escasez_redes',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, voy cerrando espacios de contenido para este mes y queria preguntarte antes de llenarme. Retomamos tus redes?',
+      '{{nombre}}, me quedan pocos espacios para manejo de redes este mes. Si quieres, te aparto uno y lo revisamos.',
+    ],
+  },
+  {
+    key: 'breakup_redes',
+    requiresLink: false,
+    variants: [
+      'Hola {{nombre}}, no quiero llenarte de mensajes, asi que cierro el seguimiento por ahora. Si mas adelante retomas {{tema}}, aqui estoy para apoyarte.',
+      '{{nombre}}, te dejo de escribir por ahora para no molestar. Cuando quieras retomar tus redes, me mandas mensaje y seguimos.',
+    ],
+  },
+];
+
 const FALLBACK_ANGLE_KEY = 'beneficio';
+const PLAN_REDES_CONTEXT_KEY = 'plan_redes';
 
 // Catalogo completo de los textos automatizados de reactivacion (para revision
 // de copy / informe BI). Devuelve cada angulo del seguimiento diario y las
@@ -129,6 +190,11 @@ export function getReactivationMessageCatalog() {
   }));
   return {
     dailyAngles: angles,
+    planRedesAngles: PLAN_REDES_FOLLOWUP_ANGLES.map((a) => ({
+      key: a.key,
+      requiresLink: Boolean(a.requiresLink),
+      variants: Array.isArray(a.variants) ? a.variants : [],
+    })),
     sampleReadyVariants: [...SAMPLE_READY_VARIANTS],
     formInviteVariants: [...FORM_INVITE_VARIANTS],
   };
@@ -160,6 +226,7 @@ export function buildSampleLink(lead = {}) {
 }
 
 function resolveTema(contextKey = 'generic') {
+  if (contextKey === PLAN_REDES_CONTEXT_KEY) return 'tu plan de redes sociales';
   if (contextKey === 'web_sent') return 'tu pagina web';
   if (contextKey === 'sample_sent') return 'tu muestra';
   return 'la informacion que pediste';
@@ -344,12 +411,81 @@ function hasReachableTarget(lead = {}) {
   return phoneDigits.length >= 10;
 }
 
+function normalizeContextText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function triggerKey(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '')
+    .trim();
+}
+
+function leadHasPlanRedesContext(lead = {}) {
+  const triggerValues = [
+    lead?.lastMetaSequenceTrigger,
+    lead?.metaAttribution?.trigger,
+    lead?.metaAttribution?.route?.trigger,
+    lead?.lastMetaAttribution?.trigger,
+    lead?.acquisitionContext?.trigger,
+    lead?.acquisitionContext?.sequenceTrigger,
+    ...(Array.isArray(lead?.etiquetas) ? lead.etiquetas : []),
+    ...(Array.isArray(lead?.sequenceScheduledTriggers) ? lead.sequenceScheduledTriggers : []),
+    ...(Array.isArray(lead?.sequenceDeliveredTriggers) ? lead.sequenceDeliveredTriggers : []),
+    ...(Array.isArray(lead?.secuenciasActivas) ? lead.secuenciasActivas.map((seq) => seq?.trigger) : []),
+  ].map(triggerKey);
+
+  if (triggerValues.some((value) => value === 'planredes' || value === 'planredes990')) {
+    return true;
+  }
+
+  const contextTexts = [
+    lead?.salesState?.productStrategy,
+    lead?.salesState?.qualification?.productStrategy,
+    lead?.salesBrainCurrent?.productStrategy,
+    lead?.salesBrainCurrent?.qualification?.productStrategy,
+    lead?.salesContext?.interestedService,
+    lead?.conversationMemory?.facts?.interestedService?.value,
+    lead?.acquisitionContext?.productStrategy,
+    lead?.acquisitionContext?.service,
+    lead?.acquisitionContext?.source,
+    lead?.acquisitionContext?.campaign,
+    lead?.acquisitionContext?.ad,
+    lead?.metaAttribution?.campaignName,
+    lead?.metaAttribution?.adName,
+    lead?.metaAttribution?.headline,
+    lead?.metaAttribution?.body,
+    lead?.lastMetaAttribution?.campaignName,
+    lead?.lastMetaAttribution?.adName,
+    lead?.lastMetaAttribution?.headline,
+    lead?.lastMetaAttribution?.body,
+    lead?.metaCampaignName,
+    lead?.campaign,
+  ].map(normalizeContextText).filter(Boolean);
+
+  return contextTexts.some((text) => (
+    text === 'redes_sociales'
+    || /\b(planredes|redes sociales|redessociales|manejo de redes|social media|meta ads|facebook ads|instagram)\b/.test(text)
+  ));
+}
+
 function detectLeadContext(lead = {}) {
   const tags = Array.isArray(lead?.etiquetas)
     ? lead.etiquetas.map((item) => safeStatus(item))
     : [];
   const stage = safeStatus(lead?.etapa || lead?.etapaNombre || '');
 
+  if (leadHasPlanRedesContext(lead)) {
+    return PLAN_REDES_CONTEXT_KEY;
+  }
   if (tags.includes('webenviada') || stage.includes('web_enviada') || stage.includes('web enviada')) {
     return 'web_sent';
   }
@@ -701,14 +837,16 @@ export function buildLeadFollowupVariant(lead = {}, {
 } = {}) {
   const nombre = firstName(lead?.nombre || '');
   const safeTouch = Math.max(0, Math.floor(Number(touchIndex) || 0));
-  let angle = FOLLOWUP_ANGLES[safeTouch % FOLLOWUP_ANGLES.length];
+  const isPlanRedes = contextKey === PLAN_REDES_CONTEXT_KEY;
+  const angles = isPlanRedes ? PLAN_REDES_FOLLOWUP_ANGLES : FOLLOWUP_ANGLES;
+  let angle = angles[safeTouch % angles.length];
 
   // Resolver que "muestra" tiene el lead:
   //  - slug presente  -> muestra YA generada, reenviamos el sitio.
   //  - sin slug        -> el form de muestra GRATIS aun no se llena, reenviamos el form.
-  const slug = resolveSampleSlug(lead);
+  const slug = isPlanRedes ? '' : resolveSampleSlug(lead);
   const sampleLink = slug ? buildSampleLink(lead) : '';
-  const formLink = slug ? '' : buildSampleFormLink(lead);
+  const formLink = (!isPlanRedes && !slug) ? buildSampleFormLink(lead) : '';
   const link = sampleLink || formLink;
 
   let tema;

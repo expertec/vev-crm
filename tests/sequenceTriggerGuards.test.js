@@ -40,6 +40,50 @@ test('bloquea web aunque PlanRedes solo exista en historial', () => {
   assert.equal(result.blocked, true);
 });
 
+test('bloquea web si Sales Brain califico el producto como redes sociales', () => {
+  const result = shouldBlockSequenceByLeadContext(
+    {
+      salesState: {
+        qualification: {
+          productStrategy: 'redes_sociales',
+        },
+      },
+    },
+    'LeadWhatsapp'
+  );
+
+  assert.equal(result.blocked, true);
+  assert.equal(result.reason, 'social_campaign_sequence_lock');
+});
+
+test('bloquea web desde el snapshot actual de Sales Brain', () => {
+  const result = shouldBlockSequenceByLeadContext(
+    {
+      salesBrainCurrent: {
+        productStrategy: 'redes_sociales',
+      },
+    },
+    'WebPromo'
+  );
+
+  assert.equal(result.blocked, true);
+  assert.equal(result.reason, 'social_campaign_sequence_lock');
+});
+
+test('bloquea web cuando la atribucion Meta describe una campana de redes', () => {
+  const result = shouldBlockSequenceByLeadContext(
+    {
+      metaAttribution: {
+        campaignName: 'Agosto - manejo de redes sociales',
+        headline: 'Contenido para redes',
+      },
+    },
+    'NuevoLeadWeb'
+  );
+
+  assert.equal(result.blocked, true);
+});
+
 test('no bloquea triggers no web por contexto de redes', () => {
   const result = shouldBlockSequenceByLeadContext(
     { etiquetas: ['PlanRedes'] },
@@ -48,4 +92,3 @@ test('no bloquea triggers no web por contexto de redes', () => {
 
   assert.equal(result.blocked, false);
 });
-

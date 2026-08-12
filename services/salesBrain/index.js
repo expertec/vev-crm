@@ -309,6 +309,7 @@ export async function runSalesBrainForInbound({
           eventId,
           conversationObjective: decision.conversationObjective,
           nextBestAction: decision.nextBestAction,
+          productStrategy: decision.productStrategy,
           readyForSales: decision.readyForSales,
           humanRequired: decision.humanRequired,
           status: eventPayload.status,
