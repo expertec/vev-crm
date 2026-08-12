@@ -2717,6 +2717,75 @@ export async function sendMediaUrlToLead(phoneOrJid, {
   return { success: true };
 }
 
+export async function sendAudioUrlToLead(phoneOrJid, audioUrl, {
+  ptt = true,
+  forwarded = false,
+  mimetype = null,
+} = {}) {
+  const safeUrl = String(audioUrl || '').trim();
+  if (!safeUrl) throw new Error('Falta audioUrl');
+  if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
+
+  const { leadId, targetJid, num, leadData, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
+  if (!targetJid) throw new Error('No se pudo resolver JID de destino');
+
+  const sent = await sendAudioMessage(targetJid, { url: safeUrl }, {
+    ptt,
+    forwarded,
+    mimetype,
+  });
+
+  if (leadId) {
+    const sentRemoteJid = normalizeJid(sent?.key?.remoteJid || sent?.key?.remoteJidAlt || '');
+    const resolvedOutboundJid = (
+      isUserJid(sentRemoteJid) && !isSuspiciousPseudoPhoneJid(sentRemoteJid)
+    )
+      ? sentRemoteJid
+      : '';
+    const jidToPersist = normalizeJid(resolvedOutboundJid || targetJid || '');
+    const allowUnsafeTarget = leadData?.allowUnsafeTarget === true;
+    const outMsg = {
+      content: '',
+      mediaType: ptt ? 'audio_ptt' : 'audio',
+      mediaUrl: safeUrl,
+      sender: 'business',
+      timestamp: now(),
+    };
+    const canonicalRef = await ensureLeadDocForOutbound({
+      leadRef,
+      leadId,
+      targetJid,
+      num,
+    });
+    await persistLeadMessage(canonicalRef, outMsg, sent?.key?.id || null);
+    await canonicalRef.set(
+      {
+        ...buildLeadLastMessagePatch(outMsg),
+        lastOutboundAt: now(),
+        ...(num ? { telefono: num } : {}),
+        ...(jidToPersist ? { jid: jidToPersist } : {}),
+        ...(isUserJid(jidToPersist) && (!isSuspiciousPseudoPhoneJid(jidToPersist) || allowUnsafeTarget)
+          ? { resolvedJid: jidToPersist, needsJidResolution: false }
+          : {}),
+        ...(isLidJid(jidToPersist)
+          ? { lidJid: jidToPersist, needsJidResolution: true }
+          : (isLidJid(leadData?.lidJid || '') ? { lidJid: normalizeJid(leadData.lidJid), needsJidResolution: true } : {})),
+        ...(allowUnsafeTarget ? { allowUnsafeTarget: true } : {}),
+      },
+      { merge: true }
+    );
+
+    await syncAliasLeadToCanonical({
+      provisionalLeadId,
+      canonicalLeadId: leadId,
+      targetJid,
+      num,
+    });
+  }
+
+  return { success: true, waMessageId: sent?.key?.id || '' };
+}
+
 export async function sendFullAudioAsDocument(phone, fileUrl) {
   const sock = getWhatsAppSock();
   if (!sock) throw new Error('No hay conexión activa con WhatsApp');

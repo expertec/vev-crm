@@ -59,6 +59,7 @@ import {
   sendMessageToLead,
   sendImageToLead,
   sendMediaUrlToLead,
+  sendAudioUrlToLead,
   getSessionPhone,
   sendAudioMessage,
   sendVideoNote,
@@ -5429,11 +5430,20 @@ app.post('/api/whatsapp/send-audio-url', async (req, res) => {
       }
     }
 
-    await sendAudioMessage(String(leadId), String(audioUrl), {
-      ptt: Boolean(ptt),
-      forwarded: Boolean(forwarded),
+    const boolFromRequest = (value, fallback = false) => {
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'number') return value !== 0;
+      const clean = String(value ?? '').trim().toLowerCase();
+      if (['1', 'true', 'yes', 'si', 'sí'].includes(clean)) return true;
+      if (['0', 'false', 'no'].includes(clean)) return false;
+      return fallback;
+    };
+
+    const result = await sendAudioUrlToLead(String(leadId), String(audioUrl), {
+      ptt: boolFromRequest(ptt, true),
+      forwarded: boolFromRequest(forwarded, true),
     });
-    return res.json({ success: true });
+    return res.json({ success: true, result });
   } catch (error) {
     console.error('Error reenviando audio por URL:', error);
     return res.status(500).json({ error: error.message });
