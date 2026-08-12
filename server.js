@@ -33,6 +33,21 @@ function getAudioDurationSeconds(filePath) {
   });
 }
 
+function transcodeAudioToMp3(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .noVideo()
+      .audioCodec('libmp3lame')
+      .audioChannels(1)
+      .audioFrequency(44100)
+      .audioBitrate('96k')
+      .toFormat('mp3')
+      .save(outputPath)
+      .on('end', resolve)
+      .on('error', reject);
+  });
+}
+
 // ================ Firebase / WhatsApp ================
 import { admin, db } from './firebaseAdmin.js';
 import {
@@ -2776,6 +2791,53 @@ app.get('/api/whatsapp/number', (_req, res) => {
   const phone = getSessionPhone();
   if (phone) return res.json({ phone });
   return res.status(503).json({ error: 'WhatsApp no conectado' });
+});
+
+app.get('/api/media/audio-playback', async (req, res) => {
+  const rawUrl = String(req.query?.url || '').trim();
+  if (!rawUrl) {
+    return res.status(400).json({ error: 'Falta url de audio.' });
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(rawUrl);
+  } catch {
+    return res.status(400).json({ error: 'URL de audio inválida.' });
+  }
+
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+    return res.status(400).json({ error: 'URL de audio no permitida.' });
+  }
+
+  const tempRoot = path.resolve('./uploads/audio-playback');
+  fs.mkdirSync(tempRoot, { recursive: true });
+  const cacheKey = createHash('sha1').update(rawUrl).digest('hex');
+  const inputPath = path.join(tempRoot, `${cacheKey}.source`);
+  const outputPath = path.join(tempRoot, `${cacheKey}.mp3`);
+
+  try {
+    if (!fs.existsSync(outputPath)) {
+      const response = await axios.get(rawUrl, {
+        responseType: 'arraybuffer',
+        timeout: 20000,
+        maxContentLength: 25 * 1024 * 1024,
+      });
+      fs.writeFileSync(inputPath, Buffer.from(response.data));
+      await transcodeAudioToMp3(inputPath, outputPath);
+    }
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.sendFile(outputPath);
+  } catch (error) {
+    console.error('[audio-playback] No se pudo preparar audio:', error?.message || error);
+    return res.status(502).json({ error: 'No se pudo preparar el audio para reproducción.' });
+  } finally {
+    try {
+      if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+    } catch {}
+  }
 });
 
 app.post('/api/whatsapp/send-direct', async (req, res) => {

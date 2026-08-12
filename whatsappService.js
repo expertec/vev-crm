@@ -31,7 +31,10 @@ import {
   phoneFromJid
 } from './queue.js';
 import { extractMetaAdAttribution } from './utils/metaAdDetector.js';
-import { resolveMetaAdSequenceRoute } from './utils/metaAdSequenceRouter.js';
+import {
+  resolveMetaAdSequenceRoute,
+  shouldScheduleMetaAdNoContentTrigger,
+} from './utils/metaAdSequenceRouter.js';
 import {
   extractHashtags,
   resolveStaticTriggerFromMessage,
@@ -93,6 +96,7 @@ const META_AUTO_REARM_MS = Number(process.env.WA_META_AUTO_REARM_MS) > 0
   : 2 * 60 * 60 * 1000;
 const processedInboundMessageIds = new Map();
 const ENABLE_LID_APPEND_META_FALLBACK = process.env.WA_LID_APPEND_META_FALLBACK !== '0';
+const ENABLE_META_NO_CONTENT_FALLBACK_SEQUENCE = process.env.WA_META_NO_CONTENT_FALLBACK_SEQUENCE !== '0';
 
 function firstName(n = '') {
   return String(n).trim().split(/\s+/)[0] || '';
@@ -442,11 +446,12 @@ function isConfidentMetaTriggerForNoContent({
   preferMessageTrigger = false,
   messageRule = {},
 } = {}) {
-  if (preferMessageTrigger && ['db', 'hashtag', 'text'].includes(String(messageRule?.source || '').toLowerCase())) {
-    return true;
-  }
-  const routeSource = String(metaRoute?.source || '').trim().toLowerCase();
-  return Boolean(routeSource && routeSource !== 'meta_ad_default' && metaRoute?.trigger);
+  return shouldScheduleMetaAdNoContentTrigger({
+    metaRoute,
+    preferMessageTrigger,
+    messageRule,
+    allowDefaultFallback: false,
+  });
 }
 
 function resolveSequenceBlockState(leadData, nextTrigger, { isMetaAd = false } = {}) {
@@ -1344,12 +1349,22 @@ export async function connectToWhatsApp() {
                 preferMessageTrigger: preferPushNameTrigger,
                 messageRule: pushNameRule,
               });
+              const schedulableNoContentTrigger = shouldScheduleMetaAdNoContentTrigger({
+                metaRoute: metaAdRoute,
+                preferMessageTrigger: preferPushNameTrigger,
+                messageRule: pushNameRule,
+                allowDefaultFallback: ENABLE_META_NO_CONTENT_FALLBACK_SEQUENCE,
+              });
               if (preferPushNameTrigger) {
                 console.log(
                   `[WA] 🎯 Meta Ads sin contenido usa trigger '${detectedTrigger}' desde pushName (${pushNameRule.source}) para ${leadId}`
                 );
               }
-              if (shouldTreatAsMetaAdInbound && !confidentNoContentTrigger) {
+              if (shouldTreatAsMetaAdInbound && schedulableNoContentTrigger && !confidentNoContentTrigger) {
+                console.log(
+                  `[WA] 🛟 Meta Ads sin contenido programara fallback '${detectedTrigger}' para ${leadId}.`
+                );
+              } else if (shouldTreatAsMetaAdInbound && !schedulableNoContentTrigger) {
                 console.log(
                   `[WA] ⏸️ Meta Ads sin contenido no programa fallback '${detectedTrigger}' para ${leadId}; esperando mensaje legible o ruta especifica.`
                 );
@@ -1401,7 +1416,7 @@ export async function connectToWhatsApp() {
 
                 if (shouldTreatAsMetaAdInbound) {
                   const blocked = shouldBlockSequences({}, detectedTrigger);
-                  if (confidentNoContentTrigger && !blocked && hasReachableTarget) {
+                  if (schedulableNoContentTrigger && !blocked && hasReachableTarget) {
                     try {
                       await scheduleSequenceForLead(leadId, detectedTrigger, inboundAt);
                       await leadRef.set(
@@ -1417,7 +1432,7 @@ export async function connectToWhatsApp() {
                     } catch (seqErr) {
                       console.error(`[WA] ❌ Error programando secuencia desde Meta Ads: ${seqErr?.message || seqErr}`);
                     }
-                  } else if (!confidentNoContentTrigger) {
+                  } else if (!schedulableNoContentTrigger) {
                     console.log(`[WA] ⏭️ Meta Ads inbound sin contenido: no se programa fallback para ${leadId}.`);
                   } else if (!hasReachableTarget) {
                     console.log(`[WA] ⏭️ Meta Ads inbound sin ruta de envío (${leadId}); secuencia pendiente de resolución de JID.`);
@@ -1448,7 +1463,7 @@ export async function connectToWhatsApp() {
                     );
                   }
 
-                  if (confidentNoContentTrigger && !blocked && !alreadyHas && !metaCooldownActive && hasReachableTarget) {
+                  if (schedulableNoContentTrigger && !blocked && !alreadyHas && !metaCooldownActive && hasReachableTarget) {
                     try {
                       const programmed = await scheduleSequenceForLead(leadId, detectedTrigger, inboundAt);
                       if (programmed > 0) {
@@ -1468,7 +1483,7 @@ export async function connectToWhatsApp() {
                     } catch (seqErr) {
                       console.error(`[WA] ❌ Error programando secuencia desde Meta Ads: ${seqErr?.message || seqErr}`);
                     }
-                  } else if (!confidentNoContentTrigger) {
+                  } else if (!schedulableNoContentTrigger) {
                     console.log(`[WA] ⏭️ Meta Ads inbound sin contenido: no se reprograma fallback para ${leadId}.`);
                   } else if (!hasReachableTarget) {
                     console.log(`[WA] ⏭️ Meta Ads inbound sin ruta de envío (${leadId}); secuencia pendiente de resolución de JID.`);

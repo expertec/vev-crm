@@ -199,6 +199,24 @@ export function resolveMetaAdRouteFromRules({
   };
 }
 
+export function shouldScheduleMetaAdNoContentTrigger({
+  metaRoute = null,
+  preferMessageTrigger = false,
+  messageRule = {},
+  allowDefaultFallback = true,
+} = {}) {
+  const messageSource = String(messageRule?.source || '').toLowerCase();
+  if (preferMessageTrigger && ['db', 'hashtag', 'text'].includes(messageSource)) {
+    return Boolean(messageRule?.trigger);
+  }
+
+  const routeSource = String(metaRoute?.source || '').trim().toLowerCase();
+  if (!routeSource || !metaRoute?.trigger) return false;
+  if (routeSource !== 'meta_ad_default') return true;
+
+  return Boolean(allowDefaultFallback);
+}
+
 export async function resolveMetaAdSequenceRoute({
   db,
   attribution = {},

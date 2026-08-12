@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { extractMetaAdAttribution } from '../utils/metaAdDetector.js';
-import { resolveMetaAdRouteFromRules } from '../utils/metaAdSequenceRouter.js';
+import {
+  resolveMetaAdRouteFromRules,
+  shouldScheduleMetaAdNoContentTrigger,
+} from '../utils/metaAdSequenceRouter.js';
 
 test('extrae atribucion de un mensaje click-to-whatsapp con referral', () => {
   const attribution = extractMetaAdAttribution({
@@ -99,4 +102,30 @@ test('infiere PlanRedes desde metadata del anuncio cuando el mensaje es generico
   assert.equal(result.trigger, 'PlanRedes');
   assert.equal(result.source, 'meta_ad_inferred');
   assert.equal(result.routeId, 'inferred:PlanRedes');
+});
+
+test('permite fallback de Meta Ads sin contenido cuando no hay ruta especifica', () => {
+  assert.equal(
+    shouldScheduleMetaAdNoContentTrigger({
+      metaRoute: {
+        trigger: 'LeadWhatsapp',
+        source: 'meta_ad_default',
+      },
+      allowDefaultFallback: true,
+    }),
+    true
+  );
+});
+
+test('bloquea fallback generico de Meta Ads sin contenido cuando esta deshabilitado', () => {
+  assert.equal(
+    shouldScheduleMetaAdNoContentTrigger({
+      metaRoute: {
+        trigger: 'LeadWhatsapp',
+        source: 'meta_ad_default',
+      },
+      allowDefaultFallback: false,
+    }),
+    false
+  );
 });
