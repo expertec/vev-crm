@@ -760,15 +760,19 @@ function buildLeadFormUrl(baseUrl, { negocioId = '', leadId = '', phone = '' } =
 }
 
 function buildSiteUrl(negocioData = {}) {
-  const slug = String(
+  const slug = resolveSiteSlug(negocioData);
+
+  if (!slug) return '';
+  return `https://negociosweb.mx/site/${slug}`;
+}
+
+function resolveSiteSlug(negocioData = {}) {
+  return String(
     negocioData?.slug ||
       negocioData?.schema?.slug ||
       negocioData?.briefWeb?.slug ||
       ''
   ).trim();
-
-  if (!slug) return '';
-  return `https://negociosweb.mx/site/${slug}`;
 }
 
 function serializeNegocio(negocioId, negocioData = {}, context = {}) {
@@ -3386,13 +3390,11 @@ app.get('/api/crm/lead-business', async (req, res) => {
       leadId: leadCtx.leadId,
       phoneDigits: leadCtx.phoneDigits,
     });
-    const archivedNegocioCtx = negocioCtx.negocioData
-      ? { negocioId: '', negocioData: null }
-      : await resolveArchivedNegocioByIdentity({
-          negocioId,
-          leadId: leadCtx.leadId,
-          phoneDigits: leadCtx.phoneDigits,
-        });
+    const archivedNegocioCtx = await resolveArchivedNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
 
     const negocio = serializeNegocio(
       negocioCtx.negocioId,
@@ -3412,12 +3414,22 @@ app.get('/api/crm/lead-business', async (req, res) => {
     });
     const sampleUrl = buildSampleFormUrl(
       normalizePhoneDigits(
-        negocioCtx.negocioData?.contactWhatsapp
-        || negocioCtx.negocioData?.leadPhone
-        || leadCtx.phoneDigits
-        || leadCtx.leadData?.telefono
-        || ''
-      )
+      negocioCtx.negocioData?.contactWhatsapp
+      || negocioCtx.negocioData?.leadPhone
+      || archivedNegocioCtx.negocioData?.contactWhatsapp
+      || archivedNegocioCtx.negocioData?.leadPhone
+      || leadCtx.phoneDigits
+      || leadCtx.leadData?.telefono
+      || ''
+    )
+  );
+    const sampleEnabled = leadCtx.leadData?.sampleFlow?.enabled === true;
+    const activeSlug = resolveSiteSlug(negocioCtx.negocioData || {});
+    const archivedSlug = resolveSiteSlug(archivedNegocioCtx.negocioData || {});
+    const canRestoreSample = Boolean(
+      archivedNegocio
+      || (negocio && sampleEnabled !== true)
+      || (negocio && !activeSlug && archivedSlug)
     );
 
     return res.json({
@@ -3431,7 +3443,7 @@ app.get('/api/crm/lead-business', async (req, res) => {
       },
       negocio,
       archivedNegocio,
-      canRestoreSample: !negocio && Boolean(archivedNegocio),
+      canRestoreSample,
       panelUrl: getPanelAccessUrl(),
       formUrl,
       sampleUrl,
@@ -3445,7 +3457,7 @@ app.get('/api/crm/lead-business', async (req, res) => {
         || negocioCtx.negocioData?.sampleOnReadyStageKey
         || ''
       ),
-      sampleEnabled: leadCtx.leadData?.sampleFlow?.enabled === true,
+      sampleEnabled,
       sampleExpiresAt: toIsoOrNull(leadCtx.leadData?.sampleFlow?.expiresAt),
     });
   } catch (error) {
@@ -3473,13 +3485,11 @@ app.post('/api/crm/lead-business/restore-sample', async (req, res) => {
       leadId: leadCtx.leadId,
       phoneDigits: leadCtx.phoneDigits,
     });
-    const archivedCtx = activeCtx.negocioData
-      ? { negocioId: '', negocioData: null, negocioRef: null }
-      : await resolveArchivedNegocioByIdentity({
-          negocioId,
-          leadId: leadCtx.leadId,
-          phoneDigits: leadCtx.phoneDigits,
-        });
+    const archivedCtx = await resolveArchivedNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
 
     if (!activeCtx.negocioData && !archivedCtx.negocioData) {
       return res.status(404).json({ error: 'No se encontró muestra archivada para este lead.' });
@@ -3488,7 +3498,12 @@ app.post('/api/crm/lead-business/restore-sample', async (req, res) => {
     const now = new Date();
     const windowDays = Math.max(1, Number(process.env.SAMPLE_WINDOW_DAYS || 14));
     const sampleExpiresAt = new Date(now.getTime() + windowDays * 24 * 60 * 60 * 1000);
-    const sourceData = activeCtx.negocioData || archivedCtx.negocioData || {};
+    const activeSlug = resolveSiteSlug(activeCtx.negocioData || {});
+    const archivedSlug = resolveSiteSlug(archivedCtx.negocioData || {});
+    const shouldUseArchivedSite = Boolean(archivedCtx.negocioData && (!activeCtx.negocioData || (!activeSlug && archivedSlug)));
+    const sourceData = shouldUseArchivedSite
+      ? archivedCtx.negocioData
+      : (activeCtx.negocioData || archivedCtx.negocioData || {});
     const restoredNegocioId = activeCtx.negocioId || archivedCtx.negocioId;
     const targetPhone = normalizePhoneDigits(
       sourceData.contactWhatsapp
@@ -3533,7 +3548,29 @@ app.post('/api/crm/lead-business/restore-sample', async (req, res) => {
         console.warn('[crm/restore-sample] No se pudo marcar ArchivoNegocios:', error?.message || error);
       });
     } else {
+      const sitePatch = {};
+      if (shouldUseArchivedSite) {
+        for (const key of [
+          'slug',
+          'schema',
+          'briefWeb',
+          'templateId',
+          'businessStory',
+          'advancedBrief',
+          'logoURL',
+          'photoURLs',
+          'keyItems',
+          'primaryColor',
+          'descripcion',
+        ]) {
+          if (sourceData[key] !== undefined && sourceData[key] !== null && sourceData[key] !== '') {
+            sitePatch[key] = sourceData[key];
+          }
+        }
+      }
+
       await negocioRef.set({
+        ...sitePatch,
         websiteArchived: false,
         restoredFromArchiveAt: sourceData.restoredFromArchiveAt || now,
         updatedAt: now,
