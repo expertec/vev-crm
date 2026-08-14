@@ -694,6 +694,46 @@ async function resolveNegocioByIdentity({
   };
 }
 
+async function resolveArchivedNegocioByIdentity({
+  negocioId = '',
+  leadId = '',
+  phoneDigits = '',
+} = {}) {
+  const archivoCol = db.collection('ArchivoNegocios');
+  const requestedNegocioId = String(negocioId || '').trim();
+  const finalLeadId = String(leadId || '').trim();
+  const phoneCandidates = expandPhoneCandidates(phoneDigits);
+
+  let negocioSnap = null;
+
+  if (requestedNegocioId) {
+    const byId = await archivoCol.doc(requestedNegocioId).get();
+    if (byId.exists) negocioSnap = byId;
+  }
+
+  if (!negocioSnap && finalLeadId) {
+    const byLeadId = await archivoCol.where('leadId', '==', finalLeadId).limit(1).get();
+    if (!byLeadId.empty) negocioSnap = byLeadId.docs[0];
+  }
+
+  if (!negocioSnap) {
+    for (const candidate of phoneCandidates) {
+      const byLeadPhone = await archivoCol.where('leadPhone', '==', candidate).limit(1).get();
+      if (!byLeadPhone.empty) {
+        negocioSnap = byLeadPhone.docs[0];
+        break;
+      }
+    }
+  }
+
+  return {
+    negocioSnap,
+    negocioId: negocioSnap?.id || '',
+    negocioRef: negocioSnap?.ref || null,
+    negocioData: negocioSnap?.data?.() || null,
+  };
+}
+
 function getPanelAccessUrl() {
   return process.env.CLIENT_PANEL_URL || 'https://negociosweb.mx/cliente-login';
 }
@@ -3346,10 +3386,22 @@ app.get('/api/crm/lead-business', async (req, res) => {
       leadId: leadCtx.leadId,
       phoneDigits: leadCtx.phoneDigits,
     });
+    const archivedNegocioCtx = negocioCtx.negocioData
+      ? { negocioId: '', negocioData: null }
+      : await resolveArchivedNegocioByIdentity({
+          negocioId,
+          leadId: leadCtx.leadId,
+          phoneDigits: leadCtx.phoneDigits,
+        });
 
     const negocio = serializeNegocio(
       negocioCtx.negocioId,
       negocioCtx.negocioData,
+      { leadId: leadCtx.leadId, phoneDigits: leadCtx.phoneDigits }
+    );
+    const archivedNegocio = serializeNegocio(
+      archivedNegocioCtx.negocioId,
+      archivedNegocioCtx.negocioData,
       { leadId: leadCtx.leadId, phoneDigits: leadCtx.phoneDigits }
     );
 
@@ -3378,6 +3430,8 @@ app.get('/api/crm/lead-business', async (req, res) => {
         etapa: String(leadCtx.leadData?.etapa || leadCtx.leadData?.etapaNombre || ''),
       },
       negocio,
+      archivedNegocio,
+      canRestoreSample: !negocio && Boolean(archivedNegocio),
       panelUrl: getPanelAccessUrl(),
       formUrl,
       sampleUrl,
@@ -3396,6 +3450,164 @@ app.get('/api/crm/lead-business', async (req, res) => {
     });
   } catch (error) {
     console.error('[crm/lead-business] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/restore-sample', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    negocioId = '',
+    resend = false,
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId, phone o negocioId.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const activeCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+    const archivedCtx = activeCtx.negocioData
+      ? { negocioId: '', negocioData: null, negocioRef: null }
+      : await resolveArchivedNegocioByIdentity({
+          negocioId,
+          leadId: leadCtx.leadId,
+          phoneDigits: leadCtx.phoneDigits,
+        });
+
+    if (!activeCtx.negocioData && !archivedCtx.negocioData) {
+      return res.status(404).json({ error: 'No se encontró muestra archivada para este lead.' });
+    }
+
+    const now = new Date();
+    const windowDays = Math.max(1, Number(process.env.SAMPLE_WINDOW_DAYS || 14));
+    const sampleExpiresAt = new Date(now.getTime() + windowDays * 24 * 60 * 60 * 1000);
+    const sourceData = activeCtx.negocioData || archivedCtx.negocioData || {};
+    const restoredNegocioId = activeCtx.negocioId || archivedCtx.negocioId;
+    const targetPhone = normalizePhoneDigits(
+      sourceData.contactWhatsapp
+      || sourceData.leadPhone
+      || leadCtx.phoneDigits
+      || leadCtx.leadData?.telefono
+      || ''
+    );
+    if (!targetPhone) {
+      return res.status(400).json({ error: 'No se pudo resolver teléfono para restaurar la muestra.' });
+    }
+
+    let negocioRef = activeCtx.negocioRef;
+    if (!negocioRef) {
+      negocioRef = db.collection('Negocios').doc(restoredNegocioId);
+      const restoredData = { ...sourceData };
+      delete restoredData.archivedAt;
+      delete restoredData.archivedReason;
+      delete restoredData.reactivatedAt;
+      delete restoredData.reactivatedNegocioId;
+      const restoredPlan = isPaidPlan(restoredData.plan) ? restoredData.plan : '';
+
+      await negocioRef.set({
+        ...restoredData,
+        leadId: String(sourceData.leadId || leadCtx.leadId || ''),
+        leadPhone: normalizePhoneDigits(sourceData.leadPhone || targetPhone),
+        contactWhatsapp: targetPhone,
+        plan: restoredPlan,
+        createdAt: now,
+        originalCreatedAt: sourceData.createdAt || null,
+        restoredFromArchiveAt: now,
+        restoredFromArchiveReason: 'sample_recovery',
+        websiteArchived: false,
+        updatedAt: now,
+      }, { merge: false });
+
+      await archivedCtx.negocioRef?.set({
+        restoredAt: now,
+        restoredNegocioId,
+        restoredReason: 'sample_recovery',
+      }, { merge: true }).catch((error) => {
+        console.warn('[crm/restore-sample] No se pudo marcar ArchivoNegocios:', error?.message || error);
+      });
+    } else {
+      await negocioRef.set({
+        websiteArchived: false,
+        restoredFromArchiveAt: sourceData.restoredFromArchiveAt || now,
+        updatedAt: now,
+      }, { merge: true });
+    }
+
+    const sampleUrl = String(
+      sourceData.sampleLinkSentUrl
+      || leadCtx.leadData?.sampleFlow?.sampleUrl
+      || buildSampleFormUrl(targetPhone)
+    ).trim();
+
+    if (leadCtx.leadRef) {
+      await leadCtx.leadRef.set({
+        archived: false,
+        archivedAt: null,
+        archivedBy: '',
+        sampleFlow: {
+          ...(leadCtx.leadData?.sampleFlow && typeof leadCtx.leadData.sampleFlow === 'object'
+            ? leadCtx.leadData.sampleFlow
+            : {}),
+          enabled: true,
+          enabledAt: leadCtx.leadData?.sampleFlow?.enabledAt || now,
+          restoredAt: now,
+          source: 'crm_restore_sample',
+          phone: targetPhone,
+          sampleUrl,
+          mode: 'funnel',
+          expiresAt: sampleExpiresAt,
+        },
+        sampleLinkSentAt: leadCtx.leadData?.sampleLinkSentAt || now,
+        sampleLinkSentUrl: sampleUrl,
+        etiquetas: admin.firestore.FieldValue.arrayUnion('MuestraActiva', 'SampleLinkSent'),
+      }, { merge: true });
+    }
+
+    await negocioRef.set({
+      sampleFlowType: 'funnel',
+      sampleEnabledAt: now,
+      sampleExpiresAt,
+      sampleLinkSentUrl: sampleUrl,
+      sampleRestoredAt: now,
+      updatedAt: now,
+    }, { merge: true });
+
+    let sentVia = '';
+    if (parseBooleanInput(resend, false)) {
+      const finalMessage = buildSampleInviteMessage({
+        companyName: String(sourceData.companyInfo || leadCtx.leadData?.nombre || ''),
+        sampleUrl,
+      });
+      const sent = await sendWhatsappFallbackMessage({
+        leadId: String(leadCtx.leadId || sourceData.leadId || ''),
+        phoneDigits: targetPhone,
+        message: finalMessage,
+      });
+      sentVia = sent.method;
+    }
+
+    const updatedSnap = await negocioRef.get();
+    return res.json({
+      success: true,
+      restored: !activeCtx.negocioData,
+      negocioId: restoredNegocioId,
+      negocio: serializeNegocio(updatedSnap.id, updatedSnap.data() || {}, {
+        leadId: leadCtx.leadId,
+        phoneDigits: targetPhone,
+      }),
+      sampleUrl,
+      sampleExpiresAt: sampleExpiresAt.toISOString(),
+      sentVia,
+    });
+  } catch (error) {
+    console.error('[crm/restore-sample] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
