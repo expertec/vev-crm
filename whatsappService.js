@@ -51,6 +51,11 @@ let connectionStatus = 'Desconectado';
 let whatsappSock = null;
 let sessionPhone = null;
 let lastConnectionError = null;
+let whatsappConnecting = false;
+let reconnectTimer = null;
+let socketGeneration = 0;
+let manualLogoutRequested = false;
+let manualLogoutSuppressReconnectUntil = 0;
 
 const localAuthFolder = '/var/data';
 const { FieldValue } = admin.firestore;
@@ -60,6 +65,139 @@ const WA_SESSION_REJECTED = 405;
 function getDisconnectReasonName(reason) {
   if (reason === WA_SESSION_REJECTED) return 'sessionRejected';
   return DisconnectReason?.[reason] || 'unknown';
+}
+
+function getWaErrorStatusCode(error) {
+  const candidates = [
+    error?.output?.statusCode,
+    error?.output?.payload?.statusCode,
+    error?.statusCode,
+    error?.data?.statusCode,
+  ];
+  const code = candidates.map((value) => Number(value)).find((value) => Number.isFinite(value));
+  return code || null;
+}
+
+function getWaErrorMessage(error) {
+  return String(
+    error?.output?.payload?.message ||
+      error?.message ||
+      error ||
+      'Connection closed'
+  );
+}
+
+function isWhatsAppSocketClosedError(error) {
+  const code = getWaErrorStatusCode(error);
+  const message = getWaErrorMessage(error);
+  return code === 428 || /connection\s+closed|stream\s+errored|unavailableService|socket\s+closed|timed\s+out\s+waiting/i.test(message);
+}
+
+function buildWaUnavailableError(message = 'No hay conexión activa con WhatsApp') {
+  const err = new Error(message);
+  err.code = 'WA_NOT_CONNECTED';
+  err.isWaUnavailable = true;
+  return err;
+}
+
+function setLastConnectionErrorFrom(error, fallbackReason = null) {
+  const reason = getWaErrorStatusCode(error) || fallbackReason;
+  lastConnectionError = {
+    reason,
+    reasonName: getDisconnectReasonName(reason),
+    message: getWaErrorMessage(error),
+    at: new Date().toISOString(),
+  };
+  return lastConnectionError;
+}
+
+function scheduleWhatsAppReconnect(reason = null) {
+  if (reconnectTimer) return;
+  if (reason === WA_SESSION_REJECTED) return;
+
+  const delay = Math.floor(Math.random() * 8000) + 5000;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectToWhatsApp().catch((error) => {
+      console.warn('[WA] reconexión falló:', error?.message || error);
+    });
+  }, delay);
+  console.log(`[WA] reconecta en ${delay}ms${reason ? ` (reason=${reason})` : ''}`);
+}
+
+function assertConnectedWhatsAppSock() {
+  const sock = getWhatsAppSock();
+  if (!sock) {
+    throw buildWaUnavailableError(`WhatsApp no está conectado (estado: ${connectionStatus || 'desconocido'})`);
+  }
+  return sock;
+}
+
+async function sendWhatsAppMessage(jid, content, options = {}) {
+  const sock = assertConnectedWhatsAppSock();
+  try {
+    return await sock.sendMessage(jid, content, options);
+  } catch (error) {
+    if (markWhatsAppSendFailure(error, sock)) {
+      error.code = 'WA_NOT_CONNECTED';
+      error.isWaUnavailable = true;
+    }
+    throw error;
+  }
+}
+
+export function markWhatsAppSendFailure(error, failedSock = null) {
+  if (!isWhatsAppSocketClosedError(error)) return false;
+
+  if (failedSock && whatsappSock && failedSock !== whatsappSock) {
+    return true;
+  }
+
+  setLastConnectionErrorFrom(error, getWaErrorStatusCode(error));
+  connectionStatus = 'Desconectado';
+  latestQR = null;
+  socketGeneration += 1;
+  whatsappSock = null;
+  scheduleWhatsAppReconnect(lastConnectionError?.reason || null);
+  return true;
+}
+
+export async function logoutWhatsAppSession() {
+  manualLogoutRequested = true;
+  manualLogoutSuppressReconnectUntil = Date.now() + 60_000;
+  socketGeneration += 1;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  const sock = whatsappSock;
+  whatsappSock = null;
+  latestQR = null;
+  connectionStatus = 'Desconectado';
+  lastConnectionError = {
+    reason: 'manual_logout',
+    reasonName: 'manualLogout',
+    message: 'Sesión cerrada manualmente desde el panel.',
+    at: new Date().toISOString(),
+  };
+
+  try {
+    if (sock) await sock.logout();
+  } catch (error) {
+    console.warn('[WA] logout manual: el socket ya estaba cerrado:', error?.message || error);
+  } finally {
+    clearWhatsAppAuthState();
+    manualLogoutRequested = false;
+  }
+
+  return {
+    ok: true,
+    status: connectionStatus,
+    qr: latestQR,
+    lastError: lastConnectionError,
+  };
 }
 
 function clearWhatsAppAuthState() {
@@ -980,6 +1118,17 @@ async function consolidateLeadAliasesToCanonical({
 
 /* ---------------------------- conexión WA ---------------------------- */
 export async function connectToWhatsApp() {
+  if (whatsappConnecting) return whatsappSock;
+  if (whatsappSock && connectionStatus === 'Conectado') return whatsappSock;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  whatsappConnecting = true;
+  connectionStatus = 'Conectando';
+
   try {
     if (!fs.existsSync(localAuthFolder)) {
       fs.mkdirSync(localAuthFolder, { recursive: true });
@@ -996,10 +1145,13 @@ export async function connectToWhatsApp() {
       logger: Pino({ level: 'info' }),
       version,
     });
+    const generation = ++socketGeneration;
     whatsappSock = sock;
 
     // ── eventos de conexión
     sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+      if (generation !== socketGeneration) return;
+
       if (qr) {
         latestQR = qr;
         connectionStatus = 'QR disponible. Escanéalo.';
@@ -1007,21 +1159,18 @@ export async function connectToWhatsApp() {
         QRCode.generate(qr, { small: true });
       }
       if (connection === 'open') {
+        manualLogoutRequested = false;
+        manualLogoutSuppressReconnectUntil = 0;
         connectionStatus = 'Conectado';
         latestQR = null;
         lastConnectionError = null;
         if (sock.user?.id) sessionPhone = sock.user.id.split('@')[0];
       }
       if (connection === 'close') {
-        whatsappSock = null;
+        if (whatsappSock === sock) whatsappSock = null;
         const reason = lastDisconnect?.error?.output?.statusCode;
         const reasonName = getDisconnectReasonName(reason);
-        lastConnectionError = {
-          reason,
-          reasonName,
-          message: lastDisconnect?.error?.message || 'Connection closed',
-          at: new Date().toISOString(),
-        };
+        setLastConnectionErrorFrom(lastDisconnect?.error, reason);
         console.warn('[WA] conexion cerrada', {
           reason,
           reasonName,
@@ -1037,13 +1186,21 @@ export async function connectToWhatsApp() {
           });
           clearWhatsAppAuthState();
         }
+        if (manualLogoutRequested || Date.now() < manualLogoutSuppressReconnectUntil) {
+          connectionStatus = 'Desconectado';
+          lastConnectionError = {
+            reason: 'manual_logout',
+            reasonName: 'manualLogout',
+            message: 'Sesión cerrada manualmente desde el panel.',
+            at: new Date().toISOString(),
+          };
+          return;
+        }
         if (reason === WA_SESSION_REJECTED) {
           console.warn('[WA] registro rechazado por WhatsApp; reconexión automática pausada');
           return;
         }
-        // Backoff más largo para Render
-        const delay = Math.floor(Math.random() * 8000) + 5000;
-        setTimeout(() => connectToWhatsApp().catch(() => {}), delay);
+        scheduleWhatsAppReconnect(reason);
       }
     });
 
@@ -2098,8 +2255,13 @@ export async function connectToWhatsApp() {
 
     return sock;
   } catch (error) {
+    whatsappSock = null;
+    connectionStatus = 'Desconectado';
+    setLastConnectionErrorFrom(error);
     console.error('Error al conectar con WhatsApp:', error);
     throw error;
+  } finally {
+    whatsappConnecting = false;
   }
 }
 
@@ -2108,7 +2270,7 @@ export async function connectToWhatsApp() {
 export function getLatestQR() { return latestQR; }
 export function getConnectionStatus() { return connectionStatus; }
 export function getLastConnectionError() { return lastConnectionError; }
-export function getWhatsAppSock() { return whatsappSock; }
+export function getWhatsAppSock() { return connectionStatus === 'Conectado' ? whatsappSock : null; }
 export function getSessionPhone() { return sessionPhone; }
 
 async function resolveLeadAndTarget(phoneOrJid) {
@@ -2301,10 +2463,10 @@ async function syncAliasLeadToCanonical({
 // Avisa al dueño por WhatsApp (a su propio número, definido en OWNER_WHATSAPP).
 async function notifyOwner(text) {
   const raw = String(process.env.OWNER_WHATSAPP || process.env.OWNER_PHONE || '').replace(/\D/g, '');
-  if (raw.length < 10 || !whatsappSock) return false;
+  if (raw.length < 10 || !getWhatsAppSock()) return false;
   const jid = `${raw}@s.whatsapp.net`;
   try {
-    await whatsappSock.sendMessage(jid, { text: String(text || '').slice(0, 900), linkPreview: false });
+    await sendWhatsAppMessage(jid, { text: String(text || '').slice(0, 900), linkPreview: false });
     return true;
   } catch (err) {
     console.warn('[notifyOwner] no se pudo avisar al dueño:', err?.message || err);
@@ -2313,7 +2475,7 @@ async function notifyOwner(text) {
 }
 
 export async function sendMessageToLead(phoneOrJid, messageContent, options = {}) {
-  if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
+  assertConnectedWhatsAppSock();
 
   const { leadId, targetJid, num, leadData, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
 
@@ -2335,18 +2497,21 @@ export async function sendMessageToLead(phoneOrJid, messageContent, options = {}
 
   let sent;
   try {
-    sent = await whatsappSock.sendMessage(
+    sent = await sendWhatsAppMessage(
       targetJid,
       { text: messageContent, linkPreview: false },
       sendOptions
     );
   } catch (error) {
+    if (error?.code === 'WA_NOT_CONNECTED' || error?.isWaUnavailable === true) {
+      throw error;
+    }
     if (quoted) {
       console.warn(
         `[WA] quoted falló para ${targetJid} (msgId=${replyToWaMessageId}). Reintentando sin quoted:`,
         error?.message || error
       );
-      sent = await whatsappSock.sendMessage(
+      sent = await sendWhatsAppMessage(
         targetJid,
         { text: messageContent, linkPreview: false },
         { timeoutMs: 60_000 }
@@ -2450,12 +2615,12 @@ export async function sendMessageToLead(phoneOrJid, messageContent, options = {}
 }
 
 export async function sendImageToLead(phoneOrJid, imageUrl, caption = '') {
-  if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
+  assertConnectedWhatsAppSock();
 
   const { leadId, targetJid, num, leadData, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
 
-  const sent = await whatsappSock.sendMessage(
+  const sent = await sendWhatsAppMessage(
     targetJid,
     {
       image: { url: imageUrl },
@@ -2587,7 +2752,7 @@ export async function sendMediaUrlToLead(phoneOrJid, {
     throw new Error('mediaType inválido. Usa: image, video, document o pdf');
   }
 
-  if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
+  assertConnectedWhatsAppSock();
 
   const { leadId, targetJid, num, leadData, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
@@ -2615,7 +2780,7 @@ export async function sendMediaUrlToLead(phoneOrJid, {
       ...(safeCaption ? { caption: safeCaption } : {}),
     };
 
-  const sent = await whatsappSock.sendMessage(
+  const sent = await sendWhatsAppMessage(
     targetJid,
     payload,
     { timeoutMs: 120_000 }
@@ -2724,7 +2889,7 @@ export async function sendAudioUrlToLead(phoneOrJid, audioUrl, {
 } = {}) {
   const safeUrl = String(audioUrl || '').trim();
   if (!safeUrl) throw new Error('Falta audioUrl');
-  if (!whatsappSock) throw new Error('No hay conexión activa con WhatsApp');
+  assertConnectedWhatsAppSock();
 
   const { leadId, targetJid, num, leadData, provisionalLeadId, leadRef } = await resolveLeadAndTarget(phoneOrJid);
   if (!targetJid) throw new Error('No se pudo resolver JID de destino');
@@ -2787,8 +2952,7 @@ export async function sendAudioUrlToLead(phoneOrJid, audioUrl, {
 }
 
 export async function sendFullAudioAsDocument(phone, fileUrl) {
-  const sock = getWhatsAppSock();
-  if (!sock) throw new Error('No hay conexión activa con WhatsApp');
+  assertConnectedWhatsAppSock();
 
   const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
@@ -2796,7 +2960,7 @@ export async function sendFullAudioAsDocument(phone, fileUrl) {
   const res = await axios.get(fileUrl, { responseType: 'arraybuffer' });
   const buffer = Buffer.from(res.data);
 
-  await sock.sendMessage(jid, {
+  await sendWhatsAppMessage(jid, {
     document: buffer,
     mimetype: 'audio/mpeg',
     fileName: 'cancion_completa.mp3',
@@ -2812,8 +2976,7 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
   quoted = null,
   mimetype = null
 } = {}) {
-  const sock = getWhatsAppSock();
-  if (!sock) throw new Error('Socket de WhatsApp no está conectado');
+  assertConnectedWhatsAppSock();
 
   const raw = String(phoneOrJid || '').trim();
   let jid = null;
@@ -2879,12 +3042,11 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
   const options = { timeoutMs: 120_000 };
   if (quoted) options.quoted = quoted;
 
-  return sock.sendMessage(jid, message, options);
+  return sendWhatsAppMessage(jid, message, options);
 }
 
 export async function sendClipMessage(phone, clipUrl) {
-  const sock = getWhatsAppSock();
-  if (!sock) throw new Error('No hay conexión activa con WhatsApp');
+  assertConnectedWhatsAppSock();
 
   const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
@@ -2897,10 +3059,11 @@ export async function sendClipMessage(phone, clipUrl) {
   const opts = { timeoutMs: 120_000, sendSeen: false };
 
   try {
-    await sock.sendMessage(jid, urlPayload, opts);
+    await sendWhatsAppMessage(jid, urlPayload, opts);
     console.log(`✅ clip enviado por URL a ${jid}`);
     return;
   } catch (err) {
+    if (err?.code === 'WA_NOT_CONNECTED' || err?.isWaUnavailable === true) throw err;
     console.warn(`⚠️ fallo envío por URL: ${err?.message || err}`);
   }
 
@@ -2915,7 +3078,7 @@ export async function sendClipMessage(phone, clipUrl) {
         : 'audio/mp4');
 
     const payload = { audio: buf, mimetype: mime, ptt: isOgg };
-    await sock.sendMessage(jid, payload, opts);
+    await sendWhatsAppMessage(jid, payload, opts);
 
     console.log(`✅ clip enviado como buffer a ${jid} (mime=${mime})`);
     return;
@@ -2926,8 +3089,7 @@ export async function sendClipMessage(phone, clipUrl) {
 }
 
 export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
-  const sock = getWhatsAppSock();
-  if (!sock) throw new Error('No hay conexión activa con WhatsApp');
+  assertConnectedWhatsAppSock();
 
   const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
@@ -2941,7 +3103,7 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
     msg.seconds = Math.max(1, Math.round(secondsHint));
   }
 
-  const sent = await sock.sendMessage(jid, msg, { timeoutMs: 120_000 });
+  const sent = await sendWhatsAppMessage(jid, msg, { timeoutMs: 120_000 });
 
   const q = await db.collection('leads').where('telefono', '==', num).limit(1).get();
   if (!q.empty) {
@@ -2960,8 +3122,7 @@ export async function sendVoiceNoteFromUrl(phone, fileUrl, secondsHint = null) {
 }
 
 export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
-  const sock = getWhatsAppSock();
-  if (!sock) throw new Error('No hay conexión activa con WhatsApp');
+  assertConnectedWhatsAppSock();
 
   const num = normalizePhoneForWA(phone);
   const jid = `${num}@s.whatsapp.net`;
@@ -2981,9 +3142,10 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
 
   if (isHttp) {
     try {
-      sentMsg = await sock.sendMessage(jid, buildMsg({ url: videoUrlOrPath }), opts);
+      sentMsg = await sendWhatsAppMessage(jid, buildMsg({ url: videoUrlOrPath }), opts);
       console.log(`✅ videonota enviada por URL a ${jid}`);
     } catch (e1) {
+      if (e1?.code === 'WA_NOT_CONNECTED' || e1?.isWaUnavailable === true) throw e1;
       console.warn(`[videonota] fallo por URL: ${e1?.message || e1}`);
       try {
         const res = await axios.get(videoUrlOrPath, { responseType: 'arraybuffer' });
@@ -2993,7 +3155,7 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
         const msg = buildMsg(buf);
         if (ct.startsWith('video/')) msg.mimetype = ct;
 
-        sentMsg = await sock.sendMessage(jid, msg, opts);
+        sentMsg = await sendWhatsAppMessage(jid, msg, opts);
         console.log(`✅ videonota enviada como buffer a ${jid} (mime=${msg.mimetype})`);
       } catch (e2) {
         console.error(`❌ videonota falló también con buffer: ${e2?.message || e2}`);
@@ -3002,7 +3164,7 @@ export async function sendVideoNote(phone, videoUrlOrPath, secondsHint = null) {
     }
   } else {
     const buf = fs.readFileSync(videoUrlOrPath);
-    sentMsg = await sock.sendMessage(jid, buildMsg(buf), opts);
+    sentMsg = await sendWhatsAppMessage(jid, buildMsg(buf), opts);
     console.log(`✅ videonota enviada desde archivo local a ${jid}`);
   }
 

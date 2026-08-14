@@ -7,10 +7,14 @@ import {
   decideRouting,
 } from '../services/salesQueue/routing.js';
 import {
+  assignLeadToAgent,
   claimNextLead,
   getAgentQueueStats,
   getNextAgentWork,
+  listSalesAgents,
   registerAgentOutcome,
+  unassignLead,
+  upsertSalesAgent,
 } from '../services/salesQueue/agentQueue.js';
 import { QUEUE_STATUSES, ROUTING_STATUSES } from '../services/salesQueue/config.js';
 
@@ -76,11 +80,11 @@ class MemoryDocRef {
   }
 
   async get() {
-    return new MemoryDocSnap(this.id, this.db.store.get(this.id));
+    return new MemoryDocSnap(this.id, this.db.getCollectionStore(this.collectionName).get(this.id));
   }
 
   async set(patch, options = {}) {
-    this.db.applySet(this.id, patch, options);
+    this.db.applySet(this.collectionName, this.id, patch, options);
   }
 
   collection(name) {
@@ -99,22 +103,23 @@ class MemoryDocRef {
 }
 
 class MemoryQuery {
-  constructor(db, filters = [], max = 999) {
+  constructor(db, collectionName = 'leads', filters = [], max = 999) {
     this.db = db;
+    this.collectionName = collectionName;
     this.filters = filters;
     this.max = max;
   }
 
   where(field, op, value) {
-    return new MemoryQuery(this.db, [...this.filters, { field, op, value }], this.max);
+    return new MemoryQuery(this.db, this.collectionName, [...this.filters, { field, op, value }], this.max);
   }
 
   limit(max) {
-    return new MemoryQuery(this.db, this.filters, max);
+    return new MemoryQuery(this.db, this.collectionName, this.filters, max);
   }
 
   async get() {
-    let docs = Array.from(this.db.store.entries()).map(([id, data]) => new MemoryDocSnap(id, data));
+    let docs = Array.from(this.db.getCollectionStore(this.collectionName).entries()).map(([id, data]) => new MemoryDocSnap(id, data));
     docs = docs.filter((snap) => this.filters.every((filter) => {
       const actual = getPath(snap.data(), filter.field);
       if (filter.op === '==') return actual === filter.value;
@@ -126,27 +131,39 @@ class MemoryQuery {
   }
 
   doc(id) {
-    return new MemoryDocRef(this.db, 'leads', id);
+    return new MemoryDocRef(this.db, this.collectionName, id);
   }
 }
 
 class MemoryDb {
   constructor(seed = {}) {
-    this.store = new Map(Object.entries(seed).map(([id, data]) => [id, clone(data)]));
+    const leadSeed = seed.leads && typeof seed.leads === 'object' ? seed.leads : seed;
+    const agentSeed = seed.salesAgents && typeof seed.salesAgents === 'object' ? seed.salesAgents : {};
+    this.collections = new Map([
+      ['leads', new Map(Object.entries(leadSeed).map(([id, data]) => [id, clone(data)]))],
+      ['salesAgents', new Map(Object.entries(agentSeed).map(([id, data]) => [id, clone(data)]))],
+    ]);
+    this.store = this.collections.get('leads');
     this.activities = [];
     this.beforeTransactionGet = null;
     this.txQueue = Promise.resolve();
   }
 
-  collection(name) {
-    assert.equal(name, 'leads');
-    return new MemoryQuery(this);
+  getCollectionStore(name) {
+    const safeName = String(name || 'leads');
+    if (!this.collections.has(safeName)) this.collections.set(safeName, new Map());
+    return this.collections.get(safeName);
   }
 
-  applySet(id, patch, options = {}) {
-    const base = options.merge ? clone(this.store.get(id) || {}) : {};
+  collection(name) {
+    return new MemoryQuery(this, name);
+  }
+
+  applySet(collectionName, id, patch, options = {}) {
+    const store = this.getCollectionStore(collectionName);
+    const base = options.merge ? clone(store.get(id) || {}) : {};
     applyPatch(base, patch);
-    this.store.set(id, base);
+    store.set(id, base);
   }
 
   async runTransaction(callback) {
@@ -156,7 +173,7 @@ class MemoryDb {
           if (this.beforeTransactionGet) this.beforeTransactionGet(ref.id);
           return ref.get();
         },
-        set: (ref, patch, options = {}) => this.applySet(ref.id, patch, options),
+        set: (ref, patch, options = {}) => this.applySet(ref.collectionName, ref.id, patch, options),
       };
       return callback(tx);
     });
@@ -165,7 +182,11 @@ class MemoryDb {
   }
 
   lead(id) {
-    return this.store.get(id);
+    return this.getCollectionStore('leads').get(id);
+  }
+
+  agent(id) {
+    return this.getCollectionStore('salesAgents').get(id);
   }
 }
 
@@ -292,7 +313,7 @@ test('claim prueba siguiente candidato si el mejor fue reclamado antes de la tra
   db.beforeTransactionGet = (id) => {
     if (!stolen && id === 'leadA') {
       stolen = true;
-      db.applySet('leadA', {
+      db.applySet('leads', 'leadA', {
         salesOwner: 'other-agent',
         assignedTo: 'other-agent',
         'queue.status': QUEUE_STATUSES.CLAIMED,
@@ -417,6 +438,142 @@ test('propiedad: lead con propietario vuelve al trabajo personal del propietario
   assert.equal(ownerWork.lead.id, 'leadA');
   assert.equal(otherWork.lead, null);
   assert.equal(db.lead('leadA').salesOwner, 'owner-a');
+});
+
+test('permisos: agente restringido no reclama cola general pero conserva trabajo asignado', async () => {
+  const db = new MemoryDb({
+    generalLead: waitingLead(92),
+    ownLead: waitingLead(88, { assignedTo: 'agent-a', unreadCount: 1 }),
+  });
+
+  const stats = await getAgentQueueStats({
+    db,
+    firestore: fakeFirestore,
+    agentUid: 'agent-a',
+    includeGeneral: false,
+  });
+  const directClaim = await claimNextLead({
+    db,
+    firestore: fakeFirestore,
+    recordActivity: noActivity,
+    agentUid: 'agent-a',
+    allowGeneralClaim: false,
+  });
+  const work = await getNextAgentWork({
+    db,
+    firestore: fakeFirestore,
+    recordActivity: noActivity,
+    agentUid: 'agent-a',
+    allowGeneralClaim: false,
+  });
+
+  assert.equal(stats.waiting, 0);
+  assert.equal(stats.personal, 1);
+  assert.equal(directClaim.claimed, false);
+  assert.equal(work.source, 'personal');
+  assert.equal(work.lead.id, 'ownLead');
+  assert.equal(db.lead('generalLead').salesOwner, undefined);
+});
+
+test('registra agentes de venta y lista solo activos por defecto', async () => {
+  const db = new MemoryDb();
+
+  await upsertSalesAgent({
+    db,
+    firestore: fakeFirestore,
+    agentUid: 'agent-a',
+    name: 'Ana Ventas',
+    email: 'ana@example.com',
+    updatedBy: 'admin',
+  });
+  await upsertSalesAgent({
+    db,
+    firestore: fakeFirestore,
+    agentUid: 'agent-b',
+    name: 'Beto Ventas',
+    email: 'beto@example.com',
+    active: false,
+    updatedBy: 'admin',
+  });
+
+  const activeAgents = await listSalesAgents({ db, firestore: fakeFirestore });
+  const allAgents = await listSalesAgents({ db, firestore: fakeFirestore, includeInactive: true });
+
+  assert.deepEqual(activeAgents.map((agent) => agent.uid), ['agent-a']);
+  assert.deepEqual(allAgents.map((agent) => agent.uid).sort(), ['agent-a', 'agent-b']);
+  assert.equal(db.agent('agent-a').name, 'Ana Ventas');
+});
+
+test('asigna lead manualmente a un agente activo y alimenta cola personal', async () => {
+  const db = new MemoryDb({
+    leads: {
+      leadA: waitingLead(50, { queue: { status: QUEUE_STATUSES.AUTOMATION, priority: 0 } }),
+    },
+    salesAgents: {
+      'agent-a': { uid: 'agent-a', name: 'Ana Ventas', email: 'ana@example.com', active: true },
+    },
+  });
+
+  const result = await assignLeadToAgent({
+    db,
+    firestore: fakeFirestore,
+    recordActivity: noActivity,
+    leadId: 'leadA',
+    agentUid: 'agent-a',
+    assignedBy: 'admin',
+  });
+  const stats = await getAgentQueueStats({ db, firestore: fakeFirestore, agentUid: 'agent-a' });
+  const work = await getNextAgentWork({ db, firestore: fakeFirestore, recordActivity: noActivity, agentUid: 'agent-a' });
+
+  assert.equal(result.agent.name, 'Ana Ventas');
+  assert.equal(db.lead('leadA').salesOwner, 'agent-a');
+  assert.equal(db.lead('leadA').assignedToName, 'Ana Ventas');
+  assert.equal(db.lead('leadA').queue.status, QUEUE_STATUSES.CLAIMED);
+  assert.equal(stats.personal, 1);
+  assert.equal(work.source, 'personal');
+  assert.equal(work.lead.id, 'leadA');
+});
+
+test('rechaza asignar leads a agentes inactivos y permite desasignar', async () => {
+  const db = new MemoryDb({
+    leads: {
+      leadA: waitingLead(50),
+    },
+    salesAgents: {
+      'agent-a': { uid: 'agent-a', name: 'Ana Ventas', active: true },
+      'agent-off': { uid: 'agent-off', name: 'Agente Inactivo', active: false },
+    },
+  });
+
+  await assert.rejects(
+    assignLeadToAgent({
+      db,
+      firestore: fakeFirestore,
+      recordActivity: noActivity,
+      leadId: 'leadA',
+      agentUid: 'agent-off',
+    }),
+    /inactivo/
+  );
+
+  await assignLeadToAgent({
+    db,
+    firestore: fakeFirestore,
+    recordActivity: noActivity,
+    leadId: 'leadA',
+    agentUid: 'agent-a',
+  });
+  await unassignLead({
+    db,
+    firestore: fakeFirestore,
+    recordActivity: noActivity,
+    leadId: 'leadA',
+    assignedBy: 'admin',
+  });
+
+  assert.equal(db.lead('leadA').salesOwner, undefined);
+  assert.equal(db.lead('leadA').assignedTo, undefined);
+  assert.equal(db.lead('leadA').queue.status, QUEUE_STATUSES.WAITING);
 });
 
 test('outcome followup requiere nextAt y mantiene propietario', async () => {

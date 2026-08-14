@@ -3,6 +3,8 @@ import { db, admin } from './firebaseAdmin.js';
 import {
   sendClipMessage,
   getWhatsAppSock,
+  getConnectionStatus,
+  markWhatsAppSendFailure,
   sendVideoNote,
   sendAudioMessage,
 } from './whatsappService.js';
@@ -15,9 +17,24 @@ const { Timestamp } = admin.firestore;
 const SEQUENCE_LOCK_TTL_MS = 2 * 60 * 1000; // 2 minutos
 const MAX_SEQUENCE_BATCH = 25;
 const MAX_DUE_SEQUENCE_STEPS_PER_RUN = Math.max(1, Number(process.env.MAX_DUE_SEQUENCE_STEPS_PER_RUN || 8));
+const WA_UNAVAILABLE_RETRY_MS = Math.max(30_000, Number(process.env.WA_UNAVAILABLE_RETRY_MS || 120_000));
 
 /* ----------------------------- utilidades ------------------------------ */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function createWhatsAppUnavailableError(message) {
+  const err = new Error(message || 'WhatsApp no está conectado');
+  err.code = 'WA_NOT_CONNECTED';
+  err.isWaUnavailable = true;
+  return err;
+}
+
+function isWhatsAppUnavailableError(err) {
+  if (err?.code === 'WA_NOT_CONNECTED' || err?.isWaUnavailable === true) return true;
+  const statusCode = Number(err?.output?.statusCode || err?.output?.payload?.statusCode || err?.statusCode);
+  const msg = String(err?.message || err || '');
+  return statusCode === 428 || /no hay conexión activa|socket de whatsapp no está conectado|whatsapp no está conectado|connection\s+closed|stream\s+errored|unavailableService/i.test(msg);
+}
 
 function firstName(full = '') {
   return String(full).trim().split(/\s+/)[0] || '';
@@ -319,8 +336,13 @@ async function sendWithRetry(sock, jid, message, opts = {}, attempts = 3) {
       return await sock.sendMessage(jid, message, opts);
     } catch (err) {
       lastErr = err;
+      if (markWhatsAppSendFailure(err, sock)) {
+        err.code = 'WA_NOT_CONNECTED';
+        err.isWaUnavailable = true;
+        throw err;
+      }
       const msg = String(err?.message || err || '');
-      const transient = /timed\s*out|timeout|socket|network|disconnected|aborted/i.test(msg);
+      const transient = /timed\s*out|timeout|socket|network|disconnected|aborted|closed/i.test(msg);
       if (!transient || i === attempts - 1) throw err;
       const backoff = (i + 1) * 3000;
       await sleep(backoff);
@@ -614,7 +636,9 @@ async function deliverPayload(leadId, payload) {
   };
 
   const sock = getWhatsAppSock();
-  if (!sock) throw new Error('Socket de WhatsApp no está conectado');
+  if (!sock) {
+    throw createWhatsAppUnavailableError(`WhatsApp no está conectado (estado: ${getConnectionStatus() || 'desconocido'})`);
+  }
 
   console.log(`[SEQ] dispatch → ${jid} type=${type} delay? (payload no incluye delay)`);
   switch (type) {
@@ -856,6 +880,19 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
     } catch (err) {
       const msg = String(err?.message || err);
       console.error(`[QUEUE] error job=${job.id}: ${msg}`);
+
+      if (isWhatsAppUnavailableError(err)) {
+        const retryCount = Number(job.retry || 0);
+        await job.ref.update({
+          status: 'pending',
+          dueAt: new Date(Date.now() + WA_UNAVAILABLE_RETRY_MS),
+          retry: retryCount + 1,
+          error: msg,
+          processedAt: FieldValue.serverTimestamp()
+        });
+        console.log(`[QUEUE] ↻ WhatsApp desconectado; job=${job.id} reprogramado en ${WA_UNAVAILABLE_RETRY_MS}ms`);
+        continue;
+      }
 
       // Reintento simple para errores transitorios de conexión/socket
       const transient = /socket|terminated|timed out|econn|network|disconnected|closed/i.test(msg);

@@ -56,6 +56,7 @@ import {
   getConnectionStatus,
   getLastConnectionError,
   getWhatsAppSock,
+  logoutWhatsAppSession,
   sendMessageToLead,
   sendImageToLead,
   sendMediaUrlToLead,
@@ -2762,6 +2763,35 @@ app.get('/', (req, res) => {
   res.json({ message: 'Servidor activo y corriendo 🚀' });
 });
 
+async function requireSuperAdmin(req, res, next) {
+  try {
+    const header = String(req.headers.authorization || '');
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+    if (!token) {
+      return res.status(401).json({ error: 'Falta token de autenticación.' });
+    }
+
+    const decoded = await admin.auth().verifyIdToken(token);
+    const claimRole = String(decoded?.role || '').trim().toLowerCase();
+    if (claimRole === 'superadmin' || claimRole === 'super_admin') {
+      req.adminUser = decoded;
+      return next();
+    }
+
+    const userSnap = await db.collection('users').doc(decoded.uid).get();
+    const role = String(userSnap.data()?.role || '').trim().toLowerCase();
+    if (role !== 'superadmin' && role !== 'super_admin') {
+      return res.status(403).json({ error: 'Solo super admin puede operar la sesión de WhatsApp.' });
+    }
+
+    req.adminUser = decoded;
+    return next();
+  } catch (error) {
+    console.error('[whatsapp admin guard] Error:', error?.message || error);
+    return res.status(401).json({ error: 'Token de autenticación inválido.' });
+  }
+}
+
 // WhatsApp status / número
 app.get('/api/whatsapp/status', (_req, res) => {
   res.json({
@@ -2771,7 +2801,7 @@ app.get('/api/whatsapp/status', (_req, res) => {
   });
 });
 
-app.post('/api/whatsapp/reconnect', async (_req, res) => {
+app.post('/api/whatsapp/reconnect', requireSuperAdmin, async (_req, res) => {
   try {
     await connectToWhatsApp();
     res.json({
@@ -2783,6 +2813,18 @@ app.post('/api/whatsapp/reconnect', async (_req, res) => {
   } catch (error) {
     res.status(500).json({
       error: error?.message || 'No se pudo reintentar la conexión de WhatsApp',
+      lastError: getLastConnectionError(),
+    });
+  }
+});
+
+app.post('/api/whatsapp/logout', requireSuperAdmin, async (_req, res) => {
+  try {
+    const state = await logoutWhatsAppSession();
+    res.json(state);
+  } catch (error) {
+    res.status(500).json({
+      error: error?.message || 'No se pudo cerrar la sesión de WhatsApp',
       lastError: getLastConnectionError(),
     });
   }
