@@ -521,6 +521,38 @@ function normalizePhoneForWA(phone) {
   return num;
 }
 
+function buildProfilePictureJidCandidates({
+  targetJid = '',
+  resolvedJid = '',
+  jid = '',
+  lidJid = '',
+  phone = '',
+} = {}) {
+  const candidates = new Set();
+  const pushJid = (value) => {
+    const normalized = normalizeJid(value);
+    if (normalized && (isUserJid(normalized) || isLidJid(normalized))) candidates.add(normalized);
+  };
+  const pushPhone = (value) => {
+    const digits = String(value || '').replace(/\D/g, '');
+    if (!digits) return;
+    const variants = new Set([digits, normalizePhoneForWA(digits)].filter(Boolean));
+    if (/^\d{10}$/.test(digits)) {
+      variants.add(`52${digits}`);
+      variants.add(`521${digits}`);
+    } else if (/^52\d{10}$/.test(digits) && !digits.startsWith('521')) {
+      variants.add(`521${digits.slice(2)}`);
+    } else if (/^521\d{10}$/.test(digits)) {
+      variants.add(`52${digits.slice(3)}`);
+    }
+    variants.forEach((item) => pushJid(`${item}@s.whatsapp.net`));
+  };
+
+  [targetJid, resolvedJid, jid, lidJid].forEach(pushJid);
+  [phone, phoneFromJid(targetJid), phoneFromJid(resolvedJid), phoneFromJid(jid)].forEach(pushPhone);
+  return Array.from(candidates);
+}
+
 // Reglas dinámicas opcionales en Firestore
 async function resolveHashtagInDB(code) {
   const snap = await db
@@ -2273,26 +2305,95 @@ export function getLastConnectionError() { return lastConnectionError; }
 export function getWhatsAppSock() { return connectionStatus === 'Conectado' ? whatsappSock : null; }
 export function getSessionPhone() { return sessionPhone; }
 
-export async function refreshLeadProfilePicture(phoneOrJid) {
+export async function refreshLeadProfilePicture(input = {}) {
   const sock = assertConnectedWhatsAppSock();
-  const { leadId, targetJid, num, leadRef } = await resolveLeadAndTarget(phoneOrJid);
-  const safeTargetJid = normalizeJid(targetJid || '');
+  const request = input && typeof input === 'object' && !Array.isArray(input)
+    ? input
+    : { leadId: String(input || ''), phone: String(input || '') };
 
-  if (!leadId || !safeTargetJid) {
+  const requestedLeadId = String(request.leadId || '').trim();
+  let leadRef = null;
+  let leadData = null;
+
+  if (requestedLeadId) {
+    const snap = await db.collection('leads').doc(requestedLeadId).get();
+    if (snap.exists) {
+      leadRef = snap.ref;
+      leadData = snap.data() || {};
+    }
+  }
+
+  const resolveInputs = Array.from(new Set([
+    request.resolvedJid,
+    request.jid,
+    request.lidJid,
+    leadData?.resolvedJid,
+    leadData?.jid,
+    leadData?.lidJid,
+    request.phone,
+    leadData?.telefono,
+    requestedLeadId,
+  ].map((value) => String(value || '').trim()).filter(Boolean)));
+
+  let resolved = null;
+  for (const candidate of resolveInputs) {
+    try {
+      const item = await resolveLeadAndTarget(candidate);
+      if (item?.leadId || item?.targetJid) {
+        resolved = item;
+        break;
+      }
+    } catch (error) {
+      console.warn('[WA] No se pudo resolver candidato para foto de perfil:', candidate, error?.message || error);
+    }
+  }
+
+  const leadId = resolved?.leadId || requestedLeadId;
+  const num = resolved?.num || normalizePhoneForWA(request.phone || leadData?.telefono || '');
+  const targetJid = resolved?.targetJid || '';
+  leadRef = resolved?.leadRef || leadRef || (leadId ? db.collection('leads').doc(String(leadId)) : null);
+
+  if (!leadId || !leadRef) {
     throw new Error('No se pudo resolver el lead o su destino WhatsApp.');
   }
 
   let profilePhotoUrl = '';
   let unavailable = false;
+  let selectedTargetJid = '';
+  const jidCandidates = buildProfilePictureJidCandidates({
+    targetJid,
+    resolvedJid: request.resolvedJid || leadData?.resolvedJid || '',
+    jid: request.jid || leadData?.jid || '',
+    lidJid: request.lidJid || leadData?.lidJid || '',
+    phone: num || request.phone || leadData?.telefono || '',
+  });
+
+  if (jidCandidates.length === 0) {
+    throw new Error('No se pudo resolver el JID para consultar la foto.');
+  }
+
   try {
     if (typeof sock.profilePictureUrl !== 'function') {
       throw new Error('La sesión de WhatsApp no permite consultar fotos de perfil.');
     }
-    profilePhotoUrl = String(await sock.profilePictureUrl(safeTargetJid, 'image') || '').trim();
+    for (const candidateJid of jidCandidates) {
+      try {
+        profilePhotoUrl = String(await sock.profilePictureUrl(candidateJid, 'image') || '').trim();
+        if (profilePhotoUrl) {
+          selectedTargetJid = candidateJid;
+          break;
+        }
+      } catch (candidateError) {
+        console.warn(
+          `[WA] Foto no disponible con candidato ${candidateJid}:`,
+          candidateError?.message || candidateError
+        );
+      }
+    }
   } catch (error) {
     unavailable = true;
     console.warn(
-      `[WA] No se pudo obtener foto de perfil para ${safeTargetJid}:`,
+      `[WA] No se pudo obtener foto de perfil para ${leadId}:`,
       error?.message || error
     );
   }
@@ -2300,17 +2401,18 @@ export async function refreshLeadProfilePicture(phoneOrJid) {
   const targetRef = leadRef || db.collection('leads').doc(String(leadId));
   await targetRef.set({
     ...(num ? { telefono: num } : {}),
-    ...(safeTargetJid ? { resolvedJid: safeTargetJid, jid: safeTargetJid } : {}),
     whatsappProfilePhotoUrl: profilePhotoUrl,
     whatsappProfilePhotoFetchedAt: now(),
     whatsappProfilePhotoUnavailable: unavailable || !profilePhotoUrl,
+    ...(selectedTargetJid ? { whatsappProfilePhotoJid: selectedTargetJid } : {}),
   }, { merge: true });
 
   return {
     success: true,
     leadId,
-    targetJid: safeTargetJid,
+    targetJid: selectedTargetJid || targetJid || jidCandidates[0],
     profilePhotoUrl,
+    attemptedJids: jidCandidates,
     unavailable: unavailable || !profilePhotoUrl,
   };
 }

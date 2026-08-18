@@ -5227,14 +5227,23 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
 app.post('/api/whatsapp/lead-profile-photo', async (req, res) => {
   const leadId = String(req.body?.leadId || '').trim();
   const phone = String(req.body?.phone || '').trim();
-  const target = leadId || phone;
+  const resolvedJid = String(req.body?.resolvedJid || '').trim();
+  const jid = String(req.body?.jid || '').trim();
+  const lidJid = String(req.body?.lidJid || '').trim();
+  const target = leadId || phone || resolvedJid || jid || lidJid;
 
   if (!target) {
     return res.status(400).json({ error: 'Falta leadId o phone.' });
   }
 
   try {
-    const result = await refreshLeadProfilePicture(target);
+    const result = await refreshLeadProfilePicture({
+      leadId,
+      phone,
+      resolvedJid,
+      jid,
+      lidJid,
+    });
     return res.json(result);
   } catch (error) {
     const status = error?.code === 'WA_NOT_CONNECTED' || error?.isWaUnavailable ? 503 : 500;
