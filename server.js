@@ -65,6 +65,7 @@ import {
   sendAudioMessage,
   sendVideoNote,
   refreshLeadProfilePicture,
+  refreshLeadProfilePicturesBatch,
 } from './whatsappService.js';
 
 // ================ SUSCRIPCIONES STRIPE ================
@@ -5252,6 +5253,22 @@ app.post('/api/whatsapp/lead-profile-photo', async (req, res) => {
   }
 });
 
+app.post('/api/whatsapp/lead-profile-photos', async (req, res) => {
+  const leads = Array.isArray(req.body?.leads) ? req.body.leads : [];
+  if (leads.length === 0) {
+    return res.status(400).json({ error: 'Falta leads.' });
+  }
+
+  try {
+    const result = await refreshLeadProfilePicturesBatch(leads);
+    return res.json(result);
+  } catch (error) {
+    const status = error?.code === 'WA_NOT_CONNECTED' || error?.isWaUnavailable ? 503 : 500;
+    console.error('[whatsapp/lead-profile-photos] Error:', error?.message || error);
+    return res.status(status).json({ error: error?.message || 'No se pudieron consultar las fotos de WhatsApp.' });
+  }
+});
+
 // Acciones de seguimiento de un clic: lista de botones disponibles.
 app.get('/api/whatsapp/followup-actions', (_req, res) => {
   try {
@@ -6248,6 +6265,45 @@ app.get('/api/whatsapp/reminders', async (req, res) => {
   const { leadId = '', phone = '', status = 'pending' } = req.query || {};
 
   try {
+    const hasLeadIdentity = Boolean(String(leadId || '').trim() || String(phone || '').trim());
+    const statusFilter = String(status || 'pending').trim().toLowerCase();
+
+    if (!hasLeadIdentity) {
+      const snap = await db.collection('sequenceQueue')
+        .where('jobType', '==', 'reminder')
+        .limit(500)
+        .get();
+
+      const rows = snap.docs
+        .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
+        .filter((item) => {
+          if (statusFilter === 'all') return true;
+          return String(item.status || '').toLowerCase() === statusFilter;
+        })
+        .sort((a, b) => {
+          const aDue = a?.dueAt?.toMillis?.() || new Date(a?.dueAt || 0).getTime() || 0;
+          const bDue = b?.dueAt?.toMillis?.() || new Date(b?.dueAt || 0).getTime() || 0;
+          return aDue - bDue;
+        })
+        .slice(0, 300)
+        .map((item) => ({
+          id: item.id,
+          leadId: String(item.leadId || ''),
+          status: String(item.status || ''),
+          message: String(item?.reminder?.message || item?.payload?.contenido || ''),
+          sendAt: toIsoOrNull(item.dueAt),
+          createdAt: toIsoOrNull(item.createdAt),
+          processedAt: toIsoOrNull(item.processedAt),
+          error: String(item.error || ''),
+        }));
+
+      return res.json({
+        success: true,
+        leadId: '',
+        reminders: rows,
+      });
+    }
+
     const leadCtx = await resolveLeadByIdentity({ leadId, phone });
     const finalLeadId = String(leadCtx.leadId || '').trim();
     if (!finalLeadId) {
@@ -6259,7 +6315,6 @@ app.get('/api/whatsapp/reminders', async (req, res) => {
       .limit(160)
       .get();
 
-    const statusFilter = String(status || 'pending').trim().toLowerCase();
     const rows = snap.docs
       .map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }))
       .filter((item) => String(item.jobType || '').toLowerCase() === 'reminder')

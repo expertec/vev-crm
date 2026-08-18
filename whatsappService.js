@@ -257,6 +257,47 @@ function messageDocIdFromWaId(waMessageId) {
   return `wa_${clean}`;
 }
 
+function safeStoragePathSegment(value = '') {
+  return String(value || '')
+    .trim()
+    .replace(/[^\w.-]/g, '_')
+    .slice(0, 160) || `lead_${Date.now()}`;
+}
+
+async function mirrorProfilePhotoToStorage({
+  leadId = '',
+  sourceUrl = '',
+} = {}) {
+  const safeUrl = String(sourceUrl || '').trim();
+  if (!safeUrl) return '';
+
+  const response = await axios.get(safeUrl, {
+    responseType: 'arraybuffer',
+    timeout: 15000,
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    },
+  });
+
+  const contentType = String(response.headers?.['content-type'] || 'image/jpeg').split(';')[0] || 'image/jpeg';
+  const extension = contentType.includes('png')
+    ? 'png'
+    : contentType.includes('webp')
+      ? 'webp'
+      : 'jpg';
+  const fileName = `profile-photos/${safeStoragePathSegment(leadId)}.${extension}`;
+  const fileRef = bucket.file(fileName);
+  await fileRef.save(Buffer.from(response.data), {
+    contentType,
+    metadata: {
+      cacheControl: 'public, max-age=86400',
+    },
+  });
+  const [url] = await fileRef.getSignedUrl({ action: 'read', expires: '03-01-2500' });
+  return url;
+}
+
 async function persistLeadMessage(leadRef, msgData, waMessageId = null) {
   const payload = {
     ...msgData,
@@ -2358,6 +2399,7 @@ export async function refreshLeadProfilePicture(input = {}) {
   }
 
   let profilePhotoUrl = '';
+  let remoteProfilePhotoUrl = '';
   let unavailable = false;
   let selectedTargetJid = '';
   const jidCandidates = buildProfilePictureJidCandidates({
@@ -2378,9 +2420,21 @@ export async function refreshLeadProfilePicture(input = {}) {
     }
     for (const candidateJid of jidCandidates) {
       try {
-        profilePhotoUrl = String(await sock.profilePictureUrl(candidateJid, 'image') || '').trim();
-        if (profilePhotoUrl) {
+        remoteProfilePhotoUrl = String(await sock.profilePictureUrl(candidateJid, 'image') || '').trim();
+        if (remoteProfilePhotoUrl) {
           selectedTargetJid = candidateJid;
+          try {
+            profilePhotoUrl = await mirrorProfilePhotoToStorage({
+              leadId,
+              sourceUrl: remoteProfilePhotoUrl,
+            });
+          } catch (mirrorError) {
+            console.warn(
+              `[WA] No se pudo guardar foto de perfil en Storage para ${leadId}:`,
+              mirrorError?.message || mirrorError
+            );
+            profilePhotoUrl = remoteProfilePhotoUrl;
+          }
           break;
         }
       } catch (candidateError) {
@@ -2402,6 +2456,7 @@ export async function refreshLeadProfilePicture(input = {}) {
   await targetRef.set({
     ...(num ? { telefono: num } : {}),
     whatsappProfilePhotoUrl: profilePhotoUrl,
+    whatsappProfilePhotoRemoteUrl: remoteProfilePhotoUrl,
     whatsappProfilePhotoFetchedAt: now(),
     whatsappProfilePhotoUnavailable: unavailable || !profilePhotoUrl,
     ...(selectedTargetJid ? { whatsappProfilePhotoJid: selectedTargetJid } : {}),
@@ -2412,8 +2467,37 @@ export async function refreshLeadProfilePicture(input = {}) {
     leadId,
     targetJid: selectedTargetJid || targetJid || jidCandidates[0],
     profilePhotoUrl,
+    remoteProfilePhotoUrl,
     attemptedJids: jidCandidates,
     unavailable: unavailable || !profilePhotoUrl,
+  };
+}
+
+export async function refreshLeadProfilePicturesBatch(items = []) {
+  const rows = Array.isArray(items) ? items.slice(0, 20) : [];
+  const results = [];
+
+  for (const item of rows) {
+    try {
+      const result = await refreshLeadProfilePicture(item);
+      results.push({
+        success: true,
+        leadId: result.leadId,
+        profilePhotoUrl: result.profilePhotoUrl || '',
+        unavailable: Boolean(result.unavailable),
+      });
+    } catch (error) {
+      results.push({
+        success: false,
+        leadId: String(item?.leadId || '').trim(),
+        error: error?.message || 'No se pudo consultar la foto.',
+      });
+    }
+  }
+
+  return {
+    success: true,
+    results,
   };
 }
 
