@@ -2273,6 +2273,48 @@ export function getLastConnectionError() { return lastConnectionError; }
 export function getWhatsAppSock() { return connectionStatus === 'Conectado' ? whatsappSock : null; }
 export function getSessionPhone() { return sessionPhone; }
 
+export async function refreshLeadProfilePicture(phoneOrJid) {
+  const sock = assertConnectedWhatsAppSock();
+  const { leadId, targetJid, num, leadRef } = await resolveLeadAndTarget(phoneOrJid);
+  const safeTargetJid = normalizeJid(targetJid || '');
+
+  if (!leadId || !safeTargetJid) {
+    throw new Error('No se pudo resolver el lead o su destino WhatsApp.');
+  }
+
+  let profilePhotoUrl = '';
+  let unavailable = false;
+  try {
+    if (typeof sock.profilePictureUrl !== 'function') {
+      throw new Error('La sesión de WhatsApp no permite consultar fotos de perfil.');
+    }
+    profilePhotoUrl = String(await sock.profilePictureUrl(safeTargetJid, 'image') || '').trim();
+  } catch (error) {
+    unavailable = true;
+    console.warn(
+      `[WA] No se pudo obtener foto de perfil para ${safeTargetJid}:`,
+      error?.message || error
+    );
+  }
+
+  const targetRef = leadRef || db.collection('leads').doc(String(leadId));
+  await targetRef.set({
+    ...(num ? { telefono: num } : {}),
+    ...(safeTargetJid ? { resolvedJid: safeTargetJid, jid: safeTargetJid } : {}),
+    whatsappProfilePhotoUrl: profilePhotoUrl,
+    whatsappProfilePhotoFetchedAt: now(),
+    whatsappProfilePhotoUnavailable: unavailable || !profilePhotoUrl,
+  }, { merge: true });
+
+  return {
+    success: true,
+    leadId,
+    targetJid: safeTargetJid,
+    profilePhotoUrl,
+    unavailable: unavailable || !profilePhotoUrl,
+  };
+}
+
 async function resolveLeadAndTarget(phoneOrJid) {
   const raw = String(phoneOrJid || '');
   const isJidInput = raw.includes('@');

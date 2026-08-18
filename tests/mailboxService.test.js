@@ -289,6 +289,29 @@ test('changePassword verifies current password and updates mailbox credentials',
   assert.ok(login.token);
 });
 
+test('refreshSession renews mailbox tokens and is revoked after password change', async () => {
+  const { service, mailboxRecords } = buildService();
+
+  const login = await service.login({ email: 'ventas@cliente.com', password: 'Actual123' });
+  assert.ok(login.token);
+  assert.ok(login.refreshToken);
+
+  const refreshed = await service.refreshSession({ refreshToken: login.refreshToken });
+  assert.ok(refreshed.token);
+  assert.ok(refreshed.refreshToken);
+  assert.equal(refreshed.mailbox.email, 'ventas@cliente.com');
+
+  mailboxRecords.set('empresa-1/ventas_cliente_com', {
+    ...mailboxRecords.get('empresa-1/ventas_cliente_com'),
+    passwordUpdatedAt: new Date(Date.now() + 1000),
+  });
+
+  await assert.rejects(
+    () => service.refreshSession({ refreshToken: login.refreshToken }),
+    /contraseña cambió/i
+  );
+});
+
 test('drafts are saved, listed and deleted per mailbox', async () => {
   const { service } = buildService();
 

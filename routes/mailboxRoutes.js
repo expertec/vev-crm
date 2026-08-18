@@ -3,6 +3,7 @@
 //   POST /api/internal/mailbox/ingest   (Worker → guarda entrante)   [x-ingest-secret]
 //   POST /api/mailbox/setup             (alta/enable buzón + password) [x-mailbox-admin-secret]
 //   POST /api/mailbox/login             (email + password → token)
+//   POST /api/mailbox/refresh           (refresh token → token nuevo)
 //   PUT  /api/mailbox/password          (auth) cambiar contraseña propia
 //   GET  /api/mailbox/inbox             (auth) bandeja
 //   GET  /api/mailbox/messages/:id      (auth) leer mensaje (marca leído)
@@ -62,6 +63,8 @@ export function createMailboxRouter({ logger = console } = {}) {
     ingestSecret: process.env.MAILBOX_INGEST_SECRET,
     jwtSecret: process.env.MAILBOX_JWT_SECRET,
     adminSecret: process.env.MAILBOX_ADMIN_SECRET,
+    tokenTtlSeconds: process.env.MAILBOX_TOKEN_TTL_SECONDS,
+    refreshTokenTtlSeconds: process.env.MAILBOX_REFRESH_TOKEN_TTL_SECONDS,
     maxInboundAttachments: process.env.MAILBOX_INBOUND_MAX_ATTACHMENTS,
     maxInboundAttachmentBytes: process.env.MAILBOX_INBOUND_MAX_ATTACHMENT_BYTES,
     maxInboundTotalAttachmentBytes: process.env.MAILBOX_INBOUND_MAX_TOTAL_ATTACHMENT_BYTES,
@@ -80,13 +83,14 @@ export function createMailboxRouter({ logger = console } = {}) {
     storage: multer.memoryStorage(),
     limits: {
       files: Number(process.env.MAILBOX_SEND_MAX_ATTACHMENTS || 3),
-      fileSize: Number(process.env.MAILBOX_SEND_MAX_ATTACHMENT_BYTES || 2 * 1024 * 1024),
+      fileSize: Number(process.env.MAILBOX_SEND_MAX_ATTACHMENT_BYTES || 20 * 1024 * 1024),
     },
   });
 
   router.post('/internal/mailbox/ingest', controller.ingest);
   router.post('/mailbox/setup', controller.setup);
   router.post('/mailbox/login', controller.login);
+  router.post('/mailbox/refresh', controller.refresh);
   router.put('/mailbox/password', controller.requireAuth, controller.changePassword);
   router.get('/mailbox/inbox', controller.requireAuth, controller.inbox);
   router.get('/mailbox/sent', controller.requireAuth, controller.sent);

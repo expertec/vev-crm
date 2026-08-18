@@ -577,8 +577,8 @@ export class CorporateEmailService {
   validateAttachments(attachments = []) {
     const source = Array.isArray(attachments) ? attachments : [];
     const maxFiles = Math.max(0, parseInteger(process.env.MAILBOX_SEND_MAX_ATTACHMENTS, 3));
-    const maxFileBytes = Math.max(1, parseInteger(process.env.MAILBOX_SEND_MAX_ATTACHMENT_BYTES, 2 * 1024 * 1024));
-    const maxTotalBytes = Math.max(1, parseInteger(process.env.MAILBOX_SEND_MAX_TOTAL_ATTACHMENT_BYTES, 3.5 * 1024 * 1024));
+    const maxFileBytes = Math.max(1, parseInteger(process.env.MAILBOX_SEND_MAX_ATTACHMENT_BYTES, 20 * 1024 * 1024));
+    const maxTotalBytes = Math.max(1, parseInteger(process.env.MAILBOX_SEND_MAX_TOTAL_ATTACHMENT_BYTES, 20 * 1024 * 1024));
 
     if (source.length > maxFiles) {
       throw new CorporateEmailServiceError(`Máximo ${maxFiles} adjuntos por correo`, {
@@ -608,7 +608,7 @@ export class CorporateEmailService {
         });
       }
       if (size > maxFileBytes) {
-        throw new CorporateEmailServiceError(`El archivo ${filename} supera el límite de 2 MB`, {
+        throw new CorporateEmailServiceError(`El archivo ${filename} supera el límite de ${Math.round(maxFileBytes / (1024 * 1024))} MB`, {
           code: 'SEND_ATTACHMENT_TOO_LARGE',
           statusCode: 400,
         });

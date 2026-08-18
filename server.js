@@ -64,6 +64,7 @@ import {
   getSessionPhone,
   sendAudioMessage,
   sendVideoNote,
+  refreshLeadProfilePicture,
 } from './whatsappService.js';
 
 // ================ SUSCRIPCIONES STRIPE ================
@@ -5220,6 +5221,25 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
   } catch (error) {
     console.error('Error enviando WhatsApp:', error);
     return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/whatsapp/lead-profile-photo', async (req, res) => {
+  const leadId = String(req.body?.leadId || '').trim();
+  const phone = String(req.body?.phone || '').trim();
+  const target = leadId || phone;
+
+  if (!target) {
+    return res.status(400).json({ error: 'Falta leadId o phone.' });
+  }
+
+  try {
+    const result = await refreshLeadProfilePicture(target);
+    return res.json(result);
+  } catch (error) {
+    const status = error?.code === 'WA_NOT_CONNECTED' || error?.isWaUnavailable ? 503 : 500;
+    console.error('[whatsapp/lead-profile-photo] Error:', error?.message || error);
+    return res.status(status).json({ error: error?.message || 'No se pudo consultar la foto de WhatsApp.' });
   }
 });
 

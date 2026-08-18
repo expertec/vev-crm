@@ -24,6 +24,35 @@ function contentDispositionAttachment(filename = 'adjunto') {
   return `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`;
 }
 
+function getCookie(req, name) {
+  const target = String(name || '').trim();
+  const raw = String(req.headers?.cookie || '');
+  if (!target || !raw) return '';
+  for (const part of raw.split(';')) {
+    const [key, ...valueParts] = part.trim().split('=');
+    if (key === target) {
+      try {
+        return decodeURIComponent(valueParts.join('='));
+      } catch {
+        return valueParts.join('=');
+      }
+    }
+  }
+  return '';
+}
+
+function setRefreshCookie(res, refreshToken, maxAgeSeconds) {
+  const token = cleanString(refreshToken, 2000);
+  if (!token || typeof res.cookie !== 'function') return;
+  res.cookie('mailbox_refresh_token', token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    maxAge: Math.max(1, Number(maxAgeSeconds || 0) || 60 * 60 * 24 * 60) * 1000,
+    path: '/api/mailbox',
+  });
+}
+
 export function createMailboxController({ service, logger = console }) {
   if (!service) throw new Error('createMailboxController requiere service');
 
@@ -89,6 +118,19 @@ export function createMailboxController({ service, logger = console }) {
     login: async (req, res) => {
       try {
         const out = await service.login({ email: req.body?.email, password: req.body?.password });
+        setRefreshCookie(res, out.refreshToken, service.refreshTokenTtlSeconds);
+        return res.status(200).json({ success: true, ...out });
+      } catch (error) {
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    refresh: async (req, res) => {
+      try {
+        const out = await service.refreshSession({
+          refreshToken: req.body?.refreshToken || getCookie(req, 'mailbox_refresh_token'),
+        });
+        setRefreshCookie(res, out.refreshToken, service.refreshTokenTtlSeconds);
         return res.status(200).json({ success: true, ...out });
       } catch (error) {
         return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));

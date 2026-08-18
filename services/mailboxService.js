@@ -33,6 +33,20 @@ function toIso(value) {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 
+function toMillis(value) {
+  if (!value) return 0;
+  if (typeof value?.toDate === 'function') {
+    try {
+      return value.toDate().getTime();
+    } catch {
+      return 0;
+    }
+  }
+  if (value instanceof Date) return value.getTime();
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function parseBoolean(value, defaultValue = true) {
   if (value === undefined || value === null || value === '') return defaultValue;
   if (typeof value === 'boolean') return value;
@@ -111,6 +125,7 @@ export class MailboxService {
     jwtSecret,
     adminSecret,
     tokenTtlSeconds = 60 * 60 * 12,
+    refreshTokenTtlSeconds = process.env.MAILBOX_REFRESH_TOKEN_TTL_SECONDS || 60 * 60 * 24 * 60,
     maxInboundAttachments = 5,
     maxInboundAttachmentBytes = 5 * 1024 * 1024,
     maxInboundTotalAttachmentBytes = 10 * 1024 * 1024,
@@ -129,6 +144,7 @@ export class MailboxService {
     this.jwtSecret = cleanString(jwtSecret, 200);
     this.adminSecret = cleanString(adminSecret, 200);
     this.tokenTtlSeconds = Number(tokenTtlSeconds) || 60 * 60 * 12;
+    this.refreshTokenTtlSeconds = numberOrDefault(refreshTokenTtlSeconds, 60 * 60 * 24 * 60);
     this.maxInboundAttachments = numberOrDefault(maxInboundAttachments, 5);
     this.maxInboundAttachmentBytes = numberOrDefault(maxInboundAttachmentBytes, 5 * 1024 * 1024);
     this.maxInboundTotalAttachmentBytes = numberOrDefault(maxInboundTotalAttachmentBytes, 10 * 1024 * 1024);
@@ -532,15 +548,84 @@ export class MailboxService {
       });
     }
 
-    const token = signMailboxToken(
-      { empresaId: found.empresaId, correoId: found.correoId, email: address },
-      { secret: this.jwtSecret, expiresInSeconds: this.tokenTtlSeconds }
-    );
+    const { token, refreshToken } = this.issueTokens({
+      empresaId: found.empresaId,
+      correoId: found.correoId,
+      email: address,
+    });
 
     return {
       token,
+      refreshToken,
       mailbox: {
         email: address,
+        displayName: cleanString(data.displayName, 120),
+        domain: cleanString(data.domain, 200),
+      },
+    };
+  }
+
+  issueTokens({ empresaId, correoId, email }) {
+    const payload = {
+      empresaId: cleanString(empresaId, 140),
+      correoId: cleanString(correoId, 240),
+      email: normalizeEmail(email),
+    };
+    return {
+      token: signMailboxToken(
+        { ...payload, typ: 'access' },
+        { secret: this.jwtSecret, expiresInSeconds: this.tokenTtlSeconds }
+      ),
+      refreshToken: signMailboxToken(
+        { ...payload, typ: 'refresh' },
+        { secret: this.jwtSecret, expiresInSeconds: this.refreshTokenTtlSeconds }
+      ),
+    };
+  }
+
+  async refreshSession({ refreshToken }) {
+    if (!this.jwtSecret) {
+      throw new MailboxServiceError('El servidor no tiene configurado MAILBOX_JWT_SECRET', {
+        code: 'MAILBOX_JWT_NOT_CONFIGURED',
+        statusCode: 503,
+      });
+    }
+
+    const claims = verifyMailboxToken(refreshToken, { secret: this.jwtSecret });
+    if (!claims || claims.typ !== 'refresh' || !claims.empresaId || !claims.correoId || !claims.email) {
+      throw new MailboxServiceError('Sesión inválida o expirada.', {
+        code: 'MAILBOX_REFRESH_INVALID',
+        statusCode: 401,
+      });
+    }
+
+    const empresaId = cleanString(claims.empresaId, 140);
+    const correoId = cleanString(claims.correoId, 240);
+    const email = normalizeEmail(claims.email);
+    const data = await this.repo.getCorporateEmailById(empresaId, correoId);
+    const storedAddress = data ? normalizeEmail(data.email || data.address) : '';
+
+    if (!data || data.mailboxEnabled !== true || !data.passwordHash || storedAddress !== email) {
+      throw new MailboxServiceError('Buzón no encontrado o desactivado.', {
+        code: 'MAILBOX_REFRESH_NOT_ALLOWED',
+        statusCode: 401,
+      });
+    }
+
+    const passwordUpdatedAt = toMillis(data.passwordUpdatedAt);
+    const tokenIssuedAt = Number(claims.iat || 0) * 1000;
+    if (passwordUpdatedAt && tokenIssuedAt && passwordUpdatedAt > tokenIssuedAt) {
+      throw new MailboxServiceError('La contraseña cambió. Inicia sesión de nuevo.', {
+        code: 'MAILBOX_REFRESH_REVOKED',
+        statusCode: 401,
+      });
+    }
+
+    const tokens = this.issueTokens({ empresaId, correoId, email });
+    return {
+      ...tokens,
+      mailbox: {
+        email,
         displayName: cleanString(data.displayName, 120),
         domain: cleanString(data.domain, 200),
       },
@@ -604,6 +689,7 @@ export class MailboxService {
     if (!this.jwtSecret) return null;
     const claims = verifyMailboxToken(token, { secret: this.jwtSecret });
     if (!claims || !claims.empresaId || !claims.correoId || !claims.email) return null;
+    if (claims.typ && claims.typ !== 'access') return null;
     return {
       empresaId: cleanString(claims.empresaId, 140),
       correoId: cleanString(claims.correoId, 240),
