@@ -2414,11 +2414,34 @@ export async function refreshLeadProfilePicture(input = {}) {
     throw new Error('No se pudo resolver el JID para consultar la foto.');
   }
 
+  const expandedJidCandidates = [...jidCandidates];
+  if (typeof sock.onWhatsApp === 'function') {
+    for (const candidateJid of jidCandidates) {
+      if (!isUserJid(candidateJid)) continue;
+      const candidatePhone = phoneFromJid(candidateJid);
+      if (!candidatePhone) continue;
+      try {
+        const matches = await sock.onWhatsApp(candidatePhone);
+        (Array.isArray(matches) ? matches : []).forEach((match) => {
+          const verifiedJid = normalizeJid(match?.jid || '');
+          if (verifiedJid && !expandedJidCandidates.includes(verifiedJid)) {
+            expandedJidCandidates.unshift(verifiedJid);
+          }
+        });
+      } catch (verifyError) {
+        console.warn(
+          `[WA] No se pudo verificar JID para foto (${candidatePhone}):`,
+          verifyError?.message || verifyError
+        );
+      }
+    }
+  }
+
   try {
     if (typeof sock.profilePictureUrl !== 'function') {
       throw new Error('La sesión de WhatsApp no permite consultar fotos de perfil.');
     }
-    for (const candidateJid of jidCandidates) {
+    for (const candidateJid of expandedJidCandidates) {
       try {
         remoteProfilePhotoUrl = String(await sock.profilePictureUrl(candidateJid, 'image') || '').trim();
         if (remoteProfilePhotoUrl) {
@@ -2465,16 +2488,16 @@ export async function refreshLeadProfilePicture(input = {}) {
   return {
     success: true,
     leadId,
-    targetJid: selectedTargetJid || targetJid || jidCandidates[0],
+    targetJid: selectedTargetJid || targetJid || expandedJidCandidates[0],
     profilePhotoUrl,
     remoteProfilePhotoUrl,
-    attemptedJids: jidCandidates,
+    attemptedJids: expandedJidCandidates,
     unavailable: unavailable || !profilePhotoUrl,
   };
 }
 
 export async function refreshLeadProfilePicturesBatch(items = []) {
-  const rows = Array.isArray(items) ? items.slice(0, 20) : [];
+  const rows = Array.isArray(items) ? items.slice(0, 8) : [];
   const results = [];
 
   for (const item of rows) {
