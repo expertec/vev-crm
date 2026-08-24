@@ -47,6 +47,7 @@ export const ROUTING_REASONS = Object.freeze({
   READY_TO_BUY: 'ready_to_buy',
   ASKED_PAYMENT_METHOD: 'asked_payment_method',
   ASKED_PRICE: 'asked_price',
+  SAMPLE_ENGAGEMENT: 'sample_engagement',
   COMMERCIAL_QUESTION: 'commercial_question',
   HIGH_INTEREST: 'high_interest',
   FOLLOWUP_OVERDUE: 'followup_overdue',

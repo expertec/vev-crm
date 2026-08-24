@@ -121,7 +121,7 @@ export function decideNextAction({
 
   if (isPlanRedes) {
     // PLANREDES POLICY V2: guardrails ya corrieron, ahora progresion comercial.
-    if (analysis?.intent === 'ready_to_buy' || analysis?.intent === 'asks_how_to_start' || signals.has('ready_to_buy') || signals.has('asks_how_to_start') || signals.has('asked_payment_method')) {
+    if (analysis?.intent === 'ready_to_buy' || analysis?.intent === 'asks_how_to_start' || analysis?.intent === 'ready_for_deposit' || signals.has('ready_to_buy') || signals.has('asks_how_to_start') || signals.has('ready_for_deposit') || signals.has('asked_payment_method')) {
       return result('QUALIFY_FOR_SALES', 'START_CLOSING', 'El lead muestra intencion fuerte de avanzar o pagar.', {
         humanRequired: true,
         readyForSales: true,
@@ -180,11 +180,28 @@ export function decideNextAction({
   }
 
   // PRIORIDAD 2: cierre.
-  if (analysis?.intent === 'ready_to_buy' || analysis?.intent === 'asks_how_to_start' || signals.has('ready_to_buy') || signals.has('asks_how_to_start') || signals.has('asked_payment_method')) {
+  if (analysis?.intent === 'ready_to_buy' || analysis?.intent === 'asks_how_to_start' || analysis?.intent === 'ready_for_deposit' || signals.has('ready_to_buy') || signals.has('asks_how_to_start') || signals.has('ready_for_deposit') || signals.has('asked_payment_method')) {
     return result('QUALIFY_FOR_SALES', 'START_CLOSING', 'El lead muestra intencion fuerte de avanzar o pagar.', {
       humanRequired: true,
       readyForSales: true,
       actionRisk: 'handoff',
+    });
+  }
+  if (analysis?.intent === 'sample_change_request' || analysis?.intent === 'likes_sample' || analysis?.intent === 'sample_feedback' || signals.has('sample_feedback') || signals.has('sample_change_request') || signals.has('likes_sample')) {
+    return result('QUALIFY_FOR_SALES', 'START_CLOSING', 'El lead interactuo con la muestra y dio feedback; conviene avanzar a cierre consultivo.', {
+      humanRequired: true,
+      readyForSales: true,
+      actionRisk: 'handoff',
+    });
+  }
+  if (analysis?.intent === 'asks_domain' || signals.has('asks_domain')) {
+    return result('PRESENT_OFFER', 'PRESENT_OFFER', 'El lead pregunto por dominio; es una senal comercial de evaluacion avanzada.', {
+      actionRisk: 'restricted',
+    });
+  }
+  if (analysis?.intent === 'missing_assets' || signals.has('missing_assets')) {
+    return result('HANDLE_OBJECTION', 'HANDLE_TIME_OBJECTION', 'El lead tiene friccion por falta de fotos, logo o contenido; hay que reducir esfuerzo.', {
+      actionRisk: 'restricted',
     });
   }
 

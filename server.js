@@ -162,6 +162,10 @@ import {
   generateBiReport,
   generateConversationConversionDataset,
 } from './services/biReport.js';
+import {
+  WEB_SALES_EVENTS,
+  recordWebSalesEvent,
+} from './services/webSales/index.js';
 
 // (opcional) queue helpers
 let cancelSequences = null;
@@ -174,6 +178,21 @@ try {
   scheduleSequenceForLead = q.scheduleSequenceForLead || null;
 } catch {
   /* noop */
+}
+
+async function applyWebSalesSequenceCancellations(leadId = '', cancellations = []) {
+  const safeLeadId = String(leadId || '').trim();
+  if (!safeLeadId || !Array.isArray(cancellations) || cancellations.length === 0) return 0;
+  if (cancellations.includes('*')) {
+    if (typeof cancelAllSequences === 'function') {
+      return cancelAllSequences(safeLeadId);
+    }
+    return 0;
+  }
+  if (typeof cancelSequences === 'function') {
+    return cancelSequences(safeLeadId, cancellations);
+  }
+  return 0;
 }
 
 // ================ OpenAI compat (para mensajes GPT) ================
@@ -4007,6 +4026,32 @@ app.post('/api/crm/lead-business/send-sample-link', async (req, res) => {
         },
         { merge: true }
       );
+      const webEvent = await recordWebSalesEvent({
+        leadRef: leadCtx.leadRef,
+        leadId: leadCtx.leadId,
+        type: WEB_SALES_EVENTS.SAMPLE_FORM_SENT,
+        source: 'seller',
+        timestamp: now,
+        metadata: {
+          sampleUrl: resolvedSampleUrl,
+          negocioId: negocioCtx.negocioId || '',
+          onReadyTrigger: normalizedTrigger,
+          onReadyStageKey: normalizedStageKey,
+          idempotencyKey: `send_sample_link_${String(leadCtx.leadId || targetPhone || '').trim()}`,
+        },
+        requestContext: {
+          ip: req.ip,
+          userAgent: req.get('user-agent') || '',
+        },
+      }).catch((eventError) => {
+        console.warn('[crm/send-sample-link] webSales event:', eventError?.message || eventError);
+        return null;
+      });
+      if (webEvent?.sequenceCancellations?.length) {
+        await applyWebSalesSequenceCancellations(leadCtx.leadId, webEvent.sequenceCancellations).catch((cancelError) => {
+          console.warn('[crm/send-sample-link] webSales cancellations:', cancelError?.message || cancelError);
+        });
+      }
     }
 
     if (negocioCtx.negocioRef) {
@@ -6803,6 +6848,60 @@ app.post('/api/whatsapp/apply-stage', async (req, res) => {
   }
 });
 
+app.post('/api/web/funnel-event', async (req, res) => {
+  try {
+    const {
+      leadId = '',
+      phone = '',
+      type = '',
+      source = 'form',
+      metadata = {},
+    } = req.body || {};
+
+    const safeType = String(type || '').trim();
+    const allowed = new Set([
+      WEB_SALES_EVENTS.SAMPLE_FORM_OPENED,
+      WEB_SALES_EVENTS.SAMPLE_FORM_STARTED,
+      WEB_SALES_EVENTS.SAMPLE_FORM_COMPLETED,
+      WEB_SALES_EVENTS.SAMPLE_OPENED,
+      WEB_SALES_EVENTS.SAMPLE_FEEDBACK_RECEIVED,
+    ]);
+    if (!allowed.has(safeType)) {
+      return res.status(400).json({ error: 'Evento de funnel web no permitido desde este endpoint.' });
+    }
+
+    const phoneDigits = normalizePhoneDigits(phone || '');
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone: phoneDigits });
+    if (!leadCtx?.leadRef || !leadCtx?.leadId) {
+      return res.status(404).json({ error: 'Lead no encontrado para evento web.' });
+    }
+
+    const result = await recordWebSalesEvent({
+      leadRef: leadCtx.leadRef,
+      leadId: leadCtx.leadId,
+      type: safeType,
+      source,
+      metadata: {
+        ...(metadata && typeof metadata === 'object' ? metadata : {}),
+        phone: phoneDigits,
+      },
+      requestContext: {
+        ip: req.ip,
+        userAgent: req.get('user-agent') || '',
+      },
+    });
+    if (result?.sequenceCancellations?.length) {
+      await applyWebSalesSequenceCancellations(leadCtx.leadId, result.sequenceCancellations).catch((cancelError) => {
+        console.warn('[web/funnel-event] webSales cancellations:', cancelError?.message || cancelError);
+      });
+    }
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('[web/funnel-event] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 app.get('/api/web/sample-access/:phone', async (req, res) => {
   try {
     const phoneDigits = normalizePhoneDigits(req.params?.phone || '');
@@ -6878,6 +6977,24 @@ app.get('/api/web/sample-access/:phone', async (req, res) => {
       phoneDigits: expectedPhone || phoneDigits,
     });
     const negocio = negocioCtx.negocioData || {};
+    await recordWebSalesEvent({
+      leadRef: leadCtx.leadRef,
+      leadId: leadCtx.leadId,
+      type: WEB_SALES_EVENTS.SAMPLE_FORM_OPENED,
+      source: 'form',
+      metadata: {
+        phone: expectedPhone || phoneDigits,
+        negocioId: negocioCtx.negocioId || '',
+        sampleUrl: String(sampleFlow.sampleUrl || buildSampleFormUrl(expectedPhone || phoneDigits)),
+        idempotencyKey: `sample_form_opened_${String(leadCtx.leadId || expectedPhone || phoneDigits).trim()}`,
+      },
+      requestContext: {
+        ip: req.ip,
+        userAgent: req.get('user-agent') || '',
+      },
+    }).catch((eventError) => {
+      console.warn('[web/sample-access] webSales event:', eventError?.message || eventError);
+    });
 
     return res.json({
       success: true,
@@ -7146,6 +7263,32 @@ app.post('/api/web/sample-submit', async (req, res) => {
       },
       { merge: true }
     );
+    const webEvent = await recordWebSalesEvent({
+      leadRef: leadCtx.leadRef,
+      leadId: leadCtx.leadId,
+      type: WEB_SALES_EVENTS.SAMPLE_FORM_COMPLETED,
+      source: 'form',
+      timestamp: now,
+      metadata: {
+        phone: expectedPhone,
+        negocioId: finalNegocioId,
+        slug: finalSlug,
+        step: 2,
+        idempotencyKey: `sample_form_completed_${String(leadCtx.leadId || expectedPhone).trim()}`,
+      },
+      requestContext: {
+        ip: req.ip,
+        userAgent: req.get('user-agent') || '',
+      },
+    }).catch((eventError) => {
+      console.warn('[web/sample-submit] webSales event:', eventError?.message || eventError);
+      return null;
+    });
+    if (webEvent?.sequenceCancellations?.length) {
+      await applyWebSalesSequenceCancellations(leadCtx.leadId, webEvent.sequenceCancellations).catch((cancelError) => {
+        console.warn('[web/sample-submit] webSales cancellations:', cancelError?.message || cancelError);
+      });
+    }
 
     if (hasSummarySampleOnReadyTrigger) {
       await leadCtx.leadRef.update({
@@ -7302,6 +7445,31 @@ app.post('/api/web/after-form', async (req, res) => {
       },
       { merge: true }
     );
+    const completedWebEvent = await recordWebSalesEvent({
+      leadRef,
+      leadId: finalLeadId,
+      type: WEB_SALES_EVENTS.SAMPLE_FORM_COMPLETED,
+      source: 'form',
+      metadata: {
+        phone: leadPhoneDigits,
+        negocioId: negocioId || targetNegocioId || '',
+        slug: String(summary?.slug || ''),
+        step: 2,
+        idempotencyKey: `after_form_completed_${finalLeadId}`,
+      },
+      requestContext: {
+        ip: req.ip,
+        userAgent: req.get('user-agent') || '',
+      },
+    }).catch((eventError) => {
+      console.warn('[after-form] webSales event:', eventError?.message || eventError);
+      return null;
+    });
+    if (completedWebEvent?.sequenceCancellations?.length) {
+      await applyWebSalesSequenceCancellations(finalLeadId, completedWebEvent.sequenceCancellations).catch((cancelError) => {
+        console.warn('[after-form] webSales cancellations:', cancelError?.message || cancelError);
+      });
+    }
 
     // F: disparar seguimiento por WhatsApp para leads de formulario Web
     // (antes estos leads quedaban sin canal de seguimiento → 0% conversión).
@@ -7681,6 +7849,30 @@ app.post('/api/web/sample-sent', async (req, res) => {
         },
         { merge: true }
       );
+    const webEvent = await recordWebSalesEvent({
+      leadId: finalLeadId,
+      type: WEB_SALES_EVENTS.SAMPLE_SENT,
+      source: 'seller',
+      timestamp: new Date(),
+      metadata: {
+        leadPhone: leadPhone || '',
+        sequenceTrigger: 'WebEnviada',
+        scheduledAt: startAt.toISOString(),
+        idempotencyKey: `sample_sent_${finalLeadId}`,
+      },
+      requestContext: {
+        ip: req.ip,
+        userAgent: req.get('user-agent') || '',
+      },
+    }).catch((eventError) => {
+      console.warn('[sample-sent] webSales event:', eventError?.message || eventError);
+      return null;
+    });
+    if (webEvent?.sequenceCancellations?.length) {
+      await applyWebSalesSequenceCancellations(finalLeadId, webEvent.sequenceCancellations).catch((cancelError) => {
+        console.warn('[sample-sent] webSales cancellations:', cancelError?.message || cancelError);
+      });
+    }
 
     return res.json({
       ok: true,
@@ -7735,20 +7927,25 @@ app.post('/api/track/link-open', async (req, res) => {
       });
 
     const leadData = leadSnap.data() || {};
-    if (leadData.linkOpenedAt) {
-      return res.json({ ok: true, already: true });
-    }
+    const alreadyOpened = Boolean(leadData.linkOpenedAt);
 
-    await leadRef.set(
-      {
-        linkOpenedAt: new Date(),
-        etiquetas:
-          admin.firestore.FieldValue.arrayUnion(
-            'LinkAbierto'
-          ),
+    const webEvent = await recordWebSalesEvent({
+      leadRef,
+      leadId,
+      type: WEB_SALES_EVENTS.SAMPLE_OPENED,
+      source: 'sample_page',
+      metadata: {
+        leadPhone: leadPhone || '',
+        slug: slug || '',
       },
-      { merge: true }
-    );
+      requestContext: {
+        ip: req.ip,
+        userAgent: req.get('user-agent') || '',
+      },
+    }).catch((eventError) => {
+      console.warn('[track/link-open] webSales event:', eventError?.message || eventError);
+      return null;
+    });
 
     try {
       if (cancelSequences) {
@@ -7770,7 +7967,18 @@ app.post('/api/track/link-open', async (req, res) => {
       );
     }
 
-    return res.json({ ok: true });
+    if (webEvent?.sequenceCancellations?.length) {
+      await applyWebSalesSequenceCancellations(leadId, webEvent.sequenceCancellations).catch((cancelError) => {
+        console.warn('[track/link-open] webSales cancellations:', cancelError?.message || cancelError);
+      });
+    }
+
+    return res.json({
+      ok: true,
+      already: alreadyOpened,
+      openCount: webEvent?.webSales?.sample?.openCount || null,
+      ignored: webEvent?.ignored === true,
+    });
   } catch (err) {
     console.error(
       '/api/track/link-open error:',

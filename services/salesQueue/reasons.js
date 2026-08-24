@@ -32,6 +32,12 @@ export function humanQueueReason({ reasonCode = '', lead = {}, analysis = {}, no
   const code = String(reasonCode || '').trim();
   if (code === 'asked_payment_method') return `Pregunto como realizar el pago ${minutesAgo(lead.lastMessageAt, now)}`.trim();
   if (code === 'asked_price') return 'Pregunto precio despues de mostrar interes';
+  if (code === 'sample_engagement') {
+    const count = Number(lead?.webSales?.sample?.openCount || 0);
+    if (lead?.webSales?.sample?.feedbackReceivedAt) return 'Dio feedback sobre la muestra';
+    if (count >= 3) return `Abrio la muestra ${count} veces`;
+    return 'Interactuo con la muestra web';
+  }
   if (code === 'ready_to_buy') return 'Mostro intencion alta de compra';
   if (code === 'commercial_question') return 'Hizo una pregunta comercial relevante';
   if (code === 'high_interest') return 'Mostro interes alto en la conversacion';

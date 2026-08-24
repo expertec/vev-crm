@@ -77,6 +77,13 @@ const INFO_RE = /(info|informacion|informaci[oó]n|que incluye|como funciona|me 
 const TRUST_RE = /(desconf|no confio|estafa|fraude|mala experiencia|me quedaron mal|otra agencia|sin resultados|no funciono|me fallaron)/i;
 const TIME_RE = /(luego|despues|despu[eé]s|no tengo tiempo|mas tarde|la otra semana|pr[oó]ximo mes|ahorita no)/i;
 const AUTO_REPLY_RE = /(mensaje automatico|respuesta automatica|asistente virtual|soy (el|un|una|tu) asistente|soy una ia|soy un bot|gracias por contactar|hemos recibido|en breve|horario de atencion|menu principal|selecciona una opcion)/i;
+const SAMPLE_CHANGE_RE = /(cambiar|cambia|ajustar|ajuste|modificar|editar|corregir|quitar|poner|agregar|reemplazar).{0,80}(foto|fotos|imagen|imagenes|texto|color|logo|seccion|pagina|muestra)|(?:foto|fotos|imagen|imagenes|texto|color|logo|seccion).{0,80}(cambiar|ajustar|modificar|editar|corregir)/i;
+const SAMPLE_LIKES_RE = /(me gusto|me gust[oó]|esta bien|se ve bien|quedo bien|me encanta|esta bonita|esta padre|me sirve|asi esta bien)/i;
+const DOMAIN_RE = /(dominio|\.com|punto com|url|direccion web|direcci[oó]n web|minegocio\.com)/i;
+const DELIVERY_RE = /(cuanto tardan|cu[aá]nto tardan|tiempo de entrega|cuando queda|cu[aá]ndo queda|en cuanto tiempo|dias habiles|d[ií]as h[aá]biles)/i;
+const EDITING_RE = /(puedo editar|se puede editar|editar despues|cambios despues|modificar despues|actualizar la pagina|actualizarla)/i;
+const MISSING_ASSETS_RE = /(no tengo|no cuento|me faltan|todavia no tengo|aun no tengo).{0,80}(foto|fotos|imagenes|im[aá]genes|logo|textos|contenido|material)/i;
+const DEPOSIT_RE = /(anticipo|apartado|50%|cincuenta|mitad|dar el pago|dar pago|empezar con|iniciar con).{0,80}(pago|anticipo|transferencia|tarjeta|deposito|dep[oó]sito)?/i;
 
 const BUSINESS_PATTERNS = [
   ['travel_agency', /(viaje|viajes|agencia de viajes|turismo|vacaciones|tours?|excursiones|paquetes de viaje)/i],
@@ -157,6 +164,52 @@ function buildFallbackAnalysis({ lead = {}, latestText = '' } = {}) {
     salesStage = 'lost';
     signals.push('no_interest', 'stop_requested');
     sentiment = 'negative';
+  } else if (DEPOSIT_RE.test(normalized)) {
+    intent = 'ready_for_deposit';
+    interestLevel = 'hot';
+    salesStage = 'closing';
+    signals.push('ready_for_deposit', 'asked_payment_method', 'ready_to_buy');
+    hot = true;
+    awareness = 'most_aware';
+  } else if (SAMPLE_CHANGE_RE.test(normalized)) {
+    intent = 'sample_change_request';
+    interestLevel = 'hot';
+    salesStage = 'evaluation';
+    signals.push('sample_feedback', 'sample_change_request');
+    hot = true;
+    awareness = 'product_aware';
+  } else if (SAMPLE_LIKES_RE.test(normalized)) {
+    intent = 'likes_sample';
+    interestLevel = 'hot';
+    salesStage = 'evaluation';
+    signals.push('sample_feedback', 'likes_sample');
+    hot = true;
+    awareness = 'product_aware';
+  } else if (MISSING_ASSETS_RE.test(normalized)) {
+    intent = 'missing_assets';
+    interestLevel = 'warm';
+    salesStage = 'discovery';
+    signals.push('missing_assets');
+    awareness = 'problem_aware';
+  } else if (DOMAIN_RE.test(normalized)) {
+    intent = 'asks_domain';
+    interestLevel = 'hot';
+    salesStage = 'evaluation';
+    signals.push('asks_domain', 'commercial_question');
+    hot = true;
+    awareness = 'product_aware';
+  } else if (DELIVERY_RE.test(normalized)) {
+    intent = 'asks_delivery_time';
+    interestLevel = 'warm';
+    salesStage = 'evaluation';
+    signals.push('asks_delivery_time', 'commercial_question');
+    awareness = 'product_aware';
+  } else if (EDITING_RE.test(normalized)) {
+    intent = 'asks_editing';
+    interestLevel = 'warm';
+    salesStage = 'evaluation';
+    signals.push('asks_editing', 'commercial_question');
+    awareness = 'product_aware';
   } else if (START_RE.test(normalized)) {
     intent = 'ready_to_buy';
     interestLevel = 'hot';
@@ -185,6 +238,10 @@ function buildFallbackAnalysis({ lead = {}, latestText = '' } = {}) {
   }
 
   if (PAYMENT_RE.test(normalized)) signals.push('asked_payment_method');
+  if (DOMAIN_RE.test(normalized)) signals.push('asks_domain');
+  if (DELIVERY_RE.test(normalized)) signals.push('asks_delivery_time');
+  if (EDITING_RE.test(normalized)) signals.push('asks_editing');
+  if (MISSING_ASSETS_RE.test(normalized)) signals.push('missing_assets');
   if (intent === 'question' || /\?/.test(text)) signals.push('commercial_question');
 
   if (TRUST_RE.test(normalized)) {
@@ -334,7 +391,7 @@ async function aiAnalyze({ lead = {}, recentMessages = [], latestText = '', acqu
     'Tu unica tarea es ENTENDER la conversacion. No redactes respuesta de venta.',
     'Devuelve SOLO JSON valido con campos controlados.',
     'Campos:',
-    '{"interestLevel":"hot|warm|cold|lost","intent":"wants_information|wants_price|wants_examples|ready_to_buy|asks_how_to_start|needs_time|not_now|no_interest|question|other","hot":true|false,"automated":true|false,"summary":"resumen comercial breve","businessType":"tipo de negocio o null","primaryNeed":"necesidad principal o null","salesStage":"new|discovery|education|evaluation|closing|won|lost","awareness":"unaware|problem_aware|solution_aware|product_aware|most_aware|unknown","objection":"none|price|trust|time|bad_previous_experience|needs_approval|not_ready|other","sentiment":"positive|neutral|skeptical|negative|confused","signals":["..."],"facts":{}}',
+    '{"interestLevel":"hot|warm|cold|lost","intent":"wants_information|wants_price|wants_examples|ready_to_buy|asks_how_to_start|wants_sample|needs_help_with_sample|missing_assets|sample_feedback|sample_change_request|likes_sample|concern_about_final_quality|asks_domain|asks_delivery_time|asks_editing|ready_for_deposit|needs_time|not_now|no_interest|question|other","hot":true|false,"automated":true|false,"summary":"resumen comercial breve","businessType":"tipo de negocio o null","primaryNeed":"necesidad principal o null","salesStage":"new|discovery|education|evaluation|closing|won|lost","awareness":"unaware|problem_aware|solution_aware|product_aware|most_aware|unknown","objection":"none|price|trust|time|bad_previous_experience|needs_approval|not_ready|other","sentiment":"positive|neutral|skeptical|negative|confused","signals":["..."],"facts":{}}',
     `signals permitidas: ${SIGNALS.join(', ')}`,
     `facts permitidos: ${FACT_KEYS.join(', ')}`,
     'facts solo para hechos objetivos. Usa {"value":X,"confidence":0-1,"source":"explicit|inferred"}.',

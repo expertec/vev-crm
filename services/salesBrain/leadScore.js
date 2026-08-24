@@ -19,6 +19,12 @@ function hasMetaSource(lead = {}, analysis = {}) {
     || analysis?.signals?.includes?.('meta_ad');
 }
 
+function hasWebSalesEvent(lead = {}, path = '') {
+  const [group, field] = String(path || '').split('.');
+  if (!group || !field) return false;
+  return Boolean(lead?.webSales?.[group]?.[field]);
+}
+
 export function calculateLeadScore({ lead = {}, analysis = {}, memory = {} } = {}) {
   const signals = new Set(Array.isArray(analysis?.signals) ? analysis.signals : []);
   const previousApplied = lead?.salesScoreState?.appliedSignals
@@ -45,6 +51,16 @@ export function calculateLeadScore({ lead = {}, analysis = {}, memory = {} } = {
   mark('ready_to_buy', 30, analysis?.intent === 'ready_to_buy' || signals.has('ready_to_buy') || signals.has('wants_to_buy'));
   mark('sample_or_web_sent', 8, hasTag(lead, 'WebEnviada') || Boolean(getFactValue(memory, 'receivedSample')));
   mark('examples_sent', 5, Boolean(getFactValue(memory, 'receivedExamples') || signals.has('examples_sent')));
+  mark('web_sample_offered', 5, hasWebSalesEvent(lead, 'sample.offeredAt'));
+  mark('web_form_opened', 5, hasWebSalesEvent(lead, 'sample.formOpenedAt'));
+  mark('web_form_started', 7, hasWebSalesEvent(lead, 'sample.formStartedAt'));
+  mark('web_form_completed', 10, hasWebSalesEvent(lead, 'sample.formCompletedAt'));
+  mark('web_sample_opened', 10, hasWebSalesEvent(lead, 'sample.firstOpenedAt'));
+  mark('web_sample_opened_multiple', 6, Number(lead?.webSales?.sample?.openCount || 0) >= 3);
+  mark('web_sample_feedback', 15, hasWebSalesEvent(lead, 'sample.feedbackReceivedAt') || signals.has('sample_feedback'));
+  mark('web_sample_change_request', 12, signals.has('sample_change_request'));
+  mark('web_asks_domain', 8, signals.has('asks_domain'));
+  mark('web_ready_for_deposit', 20, signals.has('ready_for_deposit'));
   mark('warm_interest', 5, analysis?.interestLevel === 'warm');
   mark('hot_interest', 10, analysis?.interestLevel === 'hot');
   mark('no_interest', -50, analysis?.intent === 'no_interest' || signals.has('no_interest'));

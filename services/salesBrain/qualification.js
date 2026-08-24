@@ -148,11 +148,18 @@ export function buildQualificationSnapshot({
   const commercialIntentDetected = analysis?.intent === 'wants_price'
     || analysis?.intent === 'wants_examples'
     || analysis?.intent === 'wants_information'
+    || analysis?.intent === 'sample_feedback'
+    || analysis?.intent === 'sample_change_request'
+    || analysis?.intent === 'likes_sample'
+    || analysis?.intent === 'asks_domain'
+    || analysis?.intent === 'asks_delivery_time'
+    || analysis?.intent === 'asks_editing'
     || analysis?.intent === 'question'
-    || hasAnySignal(analysis, ['asked_price', 'asked_examples', 'commercial_question', 'asked_payment_method']);
+    || hasAnySignal(analysis, ['asked_price', 'asked_examples', 'commercial_question', 'asked_payment_method', 'sample_feedback', 'sample_change_request', 'likes_sample', 'asks_domain', 'asks_delivery_time', 'asks_editing']);
   const purchaseIntentDetected = analysis?.intent === 'ready_to_buy'
     || analysis?.intent === 'asks_how_to_start'
-    || hasAnySignal(analysis, ['ready_to_buy', 'wants_to_buy', 'asks_how_to_start', 'asked_payment_method']);
+    || analysis?.intent === 'ready_for_deposit'
+    || hasAnySignal(analysis, ['ready_to_buy', 'wants_to_buy', 'asks_how_to_start', 'asked_payment_method', 'ready_for_deposit']);
   const priceIntentDetected = analysis?.intent === 'wants_price' || hasSignal(analysis, 'asked_price');
 
   const missingFacts = [];

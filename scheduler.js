@@ -8,6 +8,10 @@ import * as Q from './queue.js';
 import puppeteer from 'puppeteer';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import {
+  WEB_SALES_EVENTS,
+  recordWebSalesEvent,
+} from './services/webSales/index.js';
 
 // ⭐ IMPORTAR EL NUEVO GENERADOR
 import { generateCompleteSchema } from './schemaGenerator.js';
@@ -654,6 +658,22 @@ export async function generateSiteSchemas() {
           lastGeneratedAt: Timestamp.now(),
           updatedAt: Timestamp.now()
         }, { merge: true });
+        const generatedLeadId = String(data.leadId || '').trim()
+          || (data.leadPhone ? e164ToJid(toE164(data.leadPhone)) : '');
+        if (generatedLeadId) {
+          await recordWebSalesEvent({
+            leadId: generatedLeadId,
+            type: WEB_SALES_EVENTS.SAMPLE_GENERATED,
+            source: 'system',
+            metadata: {
+              negocioId: id,
+              slug: data.slug || schema?.slug || '',
+              idempotencyKey: `sample_generated_${id}`,
+            },
+          }).catch((eventError) => {
+            console.warn('[generateSiteSchemas] webSales sample_generated:', eventError?.message || eventError);
+          });
+        }
 
         console.log(`   💾 Schema guardado en Firebase para: ${id}`);
         console.log(`   🌐 URL del sitio: https://negociosweb.mx/site/${data.slug}`);
@@ -844,6 +864,21 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
     }
     
     console.log(`✅ WhatsApp enviado a ${e164}: ${sitioUrl}`);
+    const leadIdForWebSales = jid;
+    await recordWebSalesEvent({
+      leadId: leadIdForWebSales,
+      type: WEB_SALES_EVENTS.SAMPLE_SENT,
+      source: 'automation',
+      metadata: {
+        negocioId: String(negocio?.id || ''),
+        slug,
+        sampleUrl: sitioUrl,
+        isFunnelSample,
+        idempotencyKey: `sample_sent_${String(negocio?.id || slug || leadIdForWebSales).trim()}`,
+      },
+    }).catch((eventError) => {
+      console.warn('[enviarSitioWebPorWhatsApp] webSales sample_sent:', eventError?.message || eventError);
+    });
 
     if (!isFunnelSample && !negocio?.opportunitiesSentAt) {
       const oportunidades = buildAreasOportunidadMessage(negocio);

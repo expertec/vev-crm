@@ -26,9 +26,31 @@ export function buildCommercialSignals({ lead = {}, analysis = {}, latestText = 
   const objection = String(analysis?.objection || state?.objection || '').toLowerCase();
 
   const payment = /pago|pagar|transferencia|deposito|dep[oó]sito|anticipo|tarjeta|link de pago|datos de pago/.test(text)
-    || hasSignal(analysis, 'asked_payment_method');
+    || hasSignal(analysis, 'asked_payment_method')
+    || hasSignal(analysis, 'ready_for_deposit')
+    || intent === 'ready_for_deposit';
   const price = intent === 'wants_price' || hasSignal(analysis, 'asked_price') || /precio|costo|cu[aá]nto|cotiza|presupuesto/.test(text);
-  const ready = intent === 'ready_to_buy' || intent === 'asks_how_to_start' || hasSignal(analysis, 'ready_to_buy') || hasSignal(analysis, 'asks_how_to_start');
+  const ready = intent === 'ready_to_buy' || intent === 'asks_how_to_start' || intent === 'ready_for_deposit' || hasSignal(analysis, 'ready_to_buy') || hasSignal(analysis, 'asks_how_to_start') || hasSignal(analysis, 'ready_for_deposit');
+  const webSales = lead?.webSales || {};
+  const sampleOpenCount = Number(webSales?.sample?.openCount || 0);
+  const sampleEngagement = Boolean(
+    webSales?.sample?.feedbackReceivedAt
+    || hasSignal(analysis, 'sample_feedback')
+    || hasSignal(analysis, 'sample_change_request')
+    || hasSignal(analysis, 'likes_sample')
+    || intent === 'sample_feedback'
+    || intent === 'sample_change_request'
+    || intent === 'likes_sample'
+  );
+  const sampleEvaluation = Boolean(
+    webSales?.sample?.firstOpenedAt
+    || hasSignal(analysis, 'asks_domain')
+    || hasSignal(analysis, 'asks_delivery_time')
+    || hasSignal(analysis, 'asks_editing')
+    || intent === 'asks_domain'
+    || intent === 'asks_delivery_time'
+    || intent === 'asks_editing'
+  );
 
   return {
     buyingIntent: ready ? 100 : (interest === 'hot' ? 78 : interest === 'warm' ? 46 : 12),
@@ -39,6 +61,9 @@ export function buildCommercialSignals({ lead = {}, analysis = {}, latestText = 
     engagement: hasSignal(analysis, 'answered') ? (interest === 'hot' ? 90 : interest === 'warm' ? 70 : 45) : 0,
     paymentIntent: payment ? 100 : 0,
     commercialQuestion: intent === 'question' || intent === 'wants_information' || hasSignal(analysis, 'commercial_question') ? 65 : 0,
+    sampleEngagement: sampleEngagement ? 95 : (sampleOpenCount >= 3 ? 82 : 0),
+    sampleEvaluation: sampleEvaluation ? 72 : 0,
+    sampleOpenCount,
   };
 }
 
@@ -75,6 +100,8 @@ export function calculateQueuePriority({
     + (Number(signals.buyingIntent || 0) / 100) * weights.buyingIntent
     + (Number(signals.paymentIntent || 0) / 100) * weights.paymentQuestion
     + (Number(signals.priceIntent || 0) / 100) * weights.priceQuestion
+    + (Number(signals.sampleEngagement || 0) / 100) * 18
+    + (Number(signals.sampleEvaluation || 0) / 100) * 10
     + (Number(signals.commercialQuestion || 0) / 100) * weights.commercialQuestion
     + (Number(signals.urgency || 0) / 100) * weights.urgency
     + (Number(signals.engagement || 0) / 100) * weights.engagement
@@ -93,6 +120,9 @@ export function calculateQueuePriority({
       buyingIntent: signals.buyingIntent,
       paymentIntent: signals.paymentIntent,
       priceIntent: signals.priceIntent,
+      sampleEngagement: signals.sampleEngagement,
+      sampleEvaluation: signals.sampleEvaluation,
+      sampleOpenCount: signals.sampleOpenCount,
       commercialQuestion: signals.commercialQuestion,
       urgency: signals.urgency,
       engagement: signals.engagement,

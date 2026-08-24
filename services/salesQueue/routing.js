@@ -65,8 +65,14 @@ export function decideRouting({ lead = {}, analysis = {}, latestText = '', comme
   if (Number(signals.paymentIntent || 0) >= 70) {
     return { status: ROUTING_STATUSES.READY_FOR_AGENT, reason: ROUTING_REASONS.ASKED_PAYMENT_METHOD, humanRequired: true };
   }
+  if (Number(signals.sampleEngagement || 0) >= 80) {
+    return { status: ROUTING_STATUSES.READY_FOR_AGENT, reason: ROUTING_REASONS.SAMPLE_ENGAGEMENT, humanRequired: true };
+  }
   if ((intent === 'wants_price' || Number(signals.priceIntent || 0) >= 70) && ['hot', 'warm'].includes(interest)) {
     return { status: ROUTING_STATUSES.READY_FOR_AGENT, reason: ROUTING_REASONS.ASKED_PRICE, humanRequired: true };
+  }
+  if (Number(signals.sampleEvaluation || 0) >= 70 && ['hot', 'warm'].includes(interest)) {
+    return { status: ROUTING_STATUSES.READY_FOR_AGENT, reason: ROUTING_REASONS.SAMPLE_ENGAGEMENT, humanRequired: true };
   }
   if (Number(signals.commercialQuestion || 0) >= 60 && ['hot', 'warm'].includes(interest)) {
     return { status: ROUTING_STATUSES.READY_FOR_AGENT, reason: ROUTING_REASONS.COMMERCIAL_QUESTION, humanRequired: true };
