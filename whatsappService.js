@@ -1210,7 +1210,7 @@ export async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState(localAuthFolder);
     if (state.creds.me?.id) sessionPhone = state.creds.me.id.split('@')[0];
 
-    const version = getWhatsAppWebVersion();
+    const version = await getWhatsAppWebVersion();
     const sock = makeWASocket({
       auth: state,
       browser: Browsers.macOS('Chrome'),

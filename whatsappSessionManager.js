@@ -48,6 +48,7 @@ export function setInboundHandler(fn) {
 }
 
 const logger = Pino({ level: process.env.WA_LOG_LEVEL || 'warn' });
+const WA_SESSION_REJECTED = 405;
 
 function sanitizeNegocioId(negocioId) {
   // Evita path traversal: solo permitimos ids "seguros" para nombre de carpeta.
@@ -56,6 +57,21 @@ function sanitizeNegocioId(negocioId) {
     throw new Error(`negocioId inválido para sesión de WhatsApp: "${negocioId}"`);
   }
   return id;
+}
+
+function getDisconnectReasonName(reason) {
+  if (reason === WA_SESSION_REJECTED) return 'sessionRejected';
+  return DisconnectReason?.[reason] || 'unknown';
+}
+
+function buildLastDisconnectError(lastDisconnect, fallbackReason = null) {
+  const reason = Number(lastDisconnect?.error?.output?.statusCode || fallbackReason || 0) || fallbackReason;
+  return {
+    reason,
+    reasonName: getDisconnectReasonName(reason),
+    message: String(lastDisconnect?.error?.message || 'Connection closed'),
+    at: new Date().toISOString(),
+  };
 }
 
 function getAuthDir(negocioId) {
@@ -79,7 +95,7 @@ function getOrInitSession(negocioId) {
       qrAt: 0,
       status: WA_SESSION_STATUS.DISCONNECTED,
       phone: null,
-      lastError: '',
+      lastError: null,
       starting: false,
       reconnectTimer: null,
       updatedAt: Date.now(),
@@ -106,7 +122,7 @@ export async function connectSession(negocioId) {
   if (session.sock && session.status === WA_SESSION_STATUS.CONNECTED) return session;
 
   session.starting = true;
-  patchSession(session, { status: WA_SESSION_STATUS.CONNECTING, lastError: '' });
+  patchSession(session, { status: WA_SESSION_STATUS.CONNECTING, lastError: null });
 
   try {
     ensureRoot();
@@ -118,7 +134,7 @@ export async function connectSession(negocioId) {
       patchSession(session, { phone: state.creds.me.id.split('@')[0] });
     }
 
-    const version = getWhatsAppWebVersion();
+    const version = await getWhatsAppWebVersion();
     const sock = makeWASocket({
       auth: state,
       logger,
@@ -142,7 +158,7 @@ export async function connectSession(negocioId) {
         patchSession(session, {
           status: WA_SESSION_STATUS.CONNECTED,
           qr: null,
-          lastError: '',
+          lastError: null,
           phone: sock.user?.id ? sock.user.id.split('@')[0] : session.phone,
         });
         console.log(`[WA-MT] ✅ Conectado negocio=${id} phone=${session.phone || '?'}`);
@@ -151,23 +167,33 @@ export async function connectSession(negocioId) {
       if (connection === 'close') {
         const reason = lastDisconnect?.error?.output?.statusCode;
         const loggedOut = reason === DisconnectReason.loggedOut;
+        const sessionRejected = reason === WA_SESSION_REJECTED;
+        const lastError = buildLastDisconnectError(lastDisconnect, reason);
 
-        if (loggedOut) {
+        if (loggedOut || sessionRejected) {
           // El dispositivo cerró sesión: limpiamos credenciales, requiere nuevo QR.
           patchSession(session, {
             status: WA_SESSION_STATUS.LOGGED_OUT,
             qr: null,
             phone: null,
-            lastError: 'El dispositivo cerró sesión. Vuelve a escanear el QR.',
+            lastError: sessionRejected
+              ? {
+                  ...lastError,
+                  message: 'WhatsApp rechazó el registro antes de emitir un QR. Espera unos minutos y vuelve a conectar.',
+                }
+              : {
+                  ...lastError,
+                  message: 'El dispositivo cerró sesión. Vuelve a escanear el QR.',
+                },
           });
           clearAuthDir(id);
           session.sock = null;
-          console.log(`[WA-MT] 🚪 logged_out negocio=${id}`);
+          console.log(`[WA-MT] 🚪 ${sessionRejected ? 'session_rejected' : 'logged_out'} negocio=${id}`);
           return;
         }
 
         // Reconexión con backoff (evita timers duplicados).
-        patchSession(session, { status: WA_SESSION_STATUS.DISCONNECTED });
+        patchSession(session, { status: WA_SESSION_STATUS.DISCONNECTED, lastError });
         session.sock = null;
         if (!session.reconnectTimer) {
           const delay = Math.floor(Math.random() * 8000) + 5000;
@@ -197,7 +223,12 @@ export async function connectSession(negocioId) {
   } catch (error) {
     patchSession(session, {
       status: WA_SESSION_STATUS.DISCONNECTED,
-      lastError: error?.message || 'No se pudo iniciar la sesión de WhatsApp.',
+      lastError: {
+        reason: null,
+        reasonName: 'connectError',
+        message: error?.message || 'No se pudo iniciar la sesión de WhatsApp.',
+        at: new Date().toISOString(),
+      },
     });
     console.error(`[WA-MT] connectSession negocio=${id} error:`, error?.message);
     throw error;
@@ -220,7 +251,7 @@ export function getSessionState(negocioId) {
   const id = sanitizeNegocioId(negocioId);
   const s = sessions.get(id);
   if (!s) {
-    return { negocioId: id, status: WA_SESSION_STATUS.DISCONNECTED, qr: null, phone: null, connected: false };
+    return { negocioId: id, status: WA_SESSION_STATUS.DISCONNECTED, qr: null, phone: null, connected: false, lastError: null };
   }
   return {
     negocioId: id,
@@ -228,7 +259,7 @@ export function getSessionState(negocioId) {
     qr: s.status === WA_SESSION_STATUS.QR ? s.qr : null,
     phone: s.phone,
     connected: s.status === WA_SESSION_STATUS.CONNECTED,
-    lastError: s.lastError || '',
+    lastError: s.lastError || null,
     updatedAt: s.updatedAt,
   };
 }
