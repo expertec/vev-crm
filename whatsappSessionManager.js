@@ -135,6 +135,7 @@ export async function connectSession(negocioId) {
     }
 
     const version = await getWhatsAppWebVersion();
+    console.log(`[WA-MT] usando WhatsApp Web version=${version.join('.')}`);
     const sock = makeWASocket({
       auth: state,
       logger,

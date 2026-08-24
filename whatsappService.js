@@ -1211,6 +1211,7 @@ export async function connectToWhatsApp() {
     if (state.creds.me?.id) sessionPhone = state.creds.me.id.split('@')[0];
 
     const version = await getWhatsAppWebVersion();
+    console.log(`[WA] usando WhatsApp Web version=${version.join('.')}`);
     const sock = makeWASocket({
       auth: state,
       browser: Browsers.macOS('Chrome'),
