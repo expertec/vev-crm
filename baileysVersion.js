@@ -6,6 +6,14 @@ const VERSION_CACHE_TTL_MS = 30 * 60 * 1000;
 let cachedVersion = null;
 let cachedAt = 0;
 
+function compareVersion(a = [], b = []) {
+  for (let i = 0; i < 3; i += 1) {
+    const diff = Number(a[i] || 0) - Number(b[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 function parseEnvVersion() {
   const raw = String(process.env.WA_WEB_VERSION || '').trim();
   if (!raw) return null;
@@ -14,6 +22,10 @@ function parseEnvVersion() {
   const parsed = normalized.split(',').map((part) => Number(part.trim()));
   if (parsed.length !== 3 || parsed.some((part) => !Number.isInteger(part) || part < 0)) {
     console.warn(`[WA] WA_WEB_VERSION invalida (${raw}); usando ${DEFAULT_WA_WEB_VERSION.join('.')}`);
+    return null;
+  }
+  if (compareVersion(parsed, DEFAULT_WA_WEB_VERSION) < 0) {
+    console.warn(`[WA] WA_WEB_VERSION obsoleta (${raw}); usando ${DEFAULT_WA_WEB_VERSION.join('.')}`);
     return null;
   }
 

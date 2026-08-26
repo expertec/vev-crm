@@ -9,6 +9,7 @@ import {
   sendAudioMessage,
 } from './whatsappService.js';
 import { getBuiltinSequenceDefinition } from './services/salesQueue/welcomeSequence.js';
+import { recordWebSalesEvent, WEB_SALES_EVENTS } from './services/webSales/index.js';
 import { shouldBlockSequenceByLeadContext } from './utils/sequenceTriggerGuards.js';
 
 const { FieldValue } = admin.firestore;
@@ -111,6 +112,16 @@ function buildLinkMuestra(phone = '') {
   const safePhone = normalizePhoneForWA(phone);
   if (!safePhone) return '';
   return `${getSampleFormBaseUrl()}/muestra/${encodeURIComponent(safePhone)}`;
+}
+
+function buildSampleInviteMessage({ companyName = '', sampleUrl = '' } = {}) {
+  const safeName = String(companyName || '').trim() || 'tu negocio';
+  const safeUrl = String(sampleUrl || '').trim();
+  return (
+    `Hola ${safeName}.\n\n`
+    + `Aquí tienes tu formulario de muestra express:\n${safeUrl}\n\n`
+    + 'Cuando lo completes, te envío tu página por WhatsApp.'
+  );
 }
 
 function replacePlaceholders(template, lead) {
@@ -226,6 +237,50 @@ function resolveLeadJidAndPhone(lead) {
   return { jid: null, phone: null };
 }
 
+function expandPhoneCandidates(value = '') {
+  const digits = cleanLeadPhone(value);
+  if (!digits) return [];
+
+  const set = new Set([digits]);
+  if (/^\d{10}$/.test(digits)) {
+    set.add(`52${digits}`);
+    set.add(`521${digits}`);
+  } else if (/^52\d{10}$/.test(digits) && !digits.startsWith('521')) {
+    const tail = digits.slice(2);
+    set.add(tail);
+    set.add(`521${tail}`);
+  } else if (/^521\d{10}$/.test(digits)) {
+    const tail = digits.slice(3);
+    set.add(tail);
+    set.add(`52${tail}`);
+  }
+
+  return Array.from(set);
+}
+
+async function resolveNegocioForLead(lead = {}, phone = '') {
+  const negociosCol = db.collection('Negocios');
+  const leadId = String(lead?.id || '').trim();
+
+  if (leadId) {
+    const byLeadId = await negociosCol.where('leadId', '==', leadId).limit(1).get();
+    if (!byLeadId.empty) {
+      const snap = byLeadId.docs[0];
+      return { negocioId: snap.id, negocioRef: snap.ref, negocioData: snap.data() || {} };
+    }
+  }
+
+  for (const candidate of expandPhoneCandidates(phone || lead?.telefono || '')) {
+    const byLeadPhone = await negociosCol.where('leadPhone', '==', candidate).limit(1).get();
+    if (!byLeadPhone.empty) {
+      const snap = byLeadPhone.docs[0];
+      return { negocioId: snap.id, negocioRef: snap.ref, negocioData: snap.data() || {} };
+    }
+  }
+
+  return { negocioId: '', negocioRef: null, negocioData: {} };
+}
+
 function hasSameTrigger(secuencias = [], trigger = '') {
   const next = String(trigger || '').toLowerCase();
   return Array.isArray(secuencias)
@@ -327,6 +382,110 @@ async function persistOutgoing(leadId, {
     { lastMessageAt: now },
     { merge: true }
   );
+}
+
+async function deliverSampleInvitePayload(leadId, lead = {}, payload = {}) {
+  const { jid, phone } = resolveLeadJidAndPhone(lead);
+  const targetPhone = normalizePhoneForWA(phone || cleanLeadPhone(lead?.telefono || '') || phoneFromJid(jid) || '');
+  if (!jid || !targetPhone) throw new Error(`Lead sin JID ni teléfono: ${leadId}`);
+
+  const negocioCtx = await resolveNegocioForLead(lead, targetPhone);
+  const negocio = negocioCtx.negocioData || {};
+  const rawContent = replacePlaceholders(payload?.contenido || payload?.message || '', lead).trim();
+  const explicitUrl = /^https?:\/\//i.test(rawContent) ? rawContent : '';
+  const sampleUrl = String(payload?.sampleUrl || explicitUrl || buildLinkMuestra(targetPhone)).trim();
+  if (!sampleUrl) throw new Error(`No se pudo construir la URL de muestra para ${leadId}`);
+
+  const companyName = String(
+    negocio.companyInfo
+    || negocio.nombre
+    || lead?.nombre
+    || lead?.businessName
+    || ''
+  ).trim();
+  const customMessage = rawContent && rawContent !== explicitUrl
+    ? (rawContent.includes(sampleUrl) || /https?:\/\//i.test(rawContent) ? rawContent : `${rawContent}\n${sampleUrl}`)
+    : '';
+  const finalMessage = customMessage || buildSampleInviteMessage({ companyName, sampleUrl });
+  const normalizedStageKey = String(payload?.onReadyStageKey || payload?.sampleReadyStageKey || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  const normalizedTrigger = String(payload?.onReadyTrigger || payload?.sampleReadyTrigger || '').trim();
+
+  const sock = getWhatsAppSock();
+  if (!sock) {
+    throw createWhatsAppUnavailableError(`WhatsApp no está conectado (estado: ${getConnectionStatus() || 'desconocido'})`);
+  }
+
+  const sent = await sendWithRetry(sock, jid, { text: finalMessage, linkPreview: false }, { timeoutMs: 120_000 });
+  await persistOutgoing(leadId, {
+    content: finalMessage,
+    mediaType: 'text',
+    waMessageId: sent?.key?.id || '',
+    sequenceTrigger: payload?.sequenceTrigger,
+    sequenceStep: payload?.sequenceStep,
+  });
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  await db.collection('leads').doc(leadId).set(
+    {
+      sampleFlow: {
+        enabled: true,
+        enabledAt: now,
+        source: 'sequence_activate_sample',
+        phone: targetPhone,
+        sampleUrl,
+        mode: 'funnel',
+        onReadyTrigger: normalizedTrigger,
+        onReadyStageKey: normalizedStageKey,
+        expiresAt,
+      },
+      sampleLinkSentAt: now,
+      sampleLinkSentUrl: sampleUrl,
+      etiquetas: FieldValue.arrayUnion('SampleLinkSent', 'MuestraActiva'),
+    },
+    { merge: true }
+  );
+
+  await recordWebSalesEvent({
+    leadId,
+    type: WEB_SALES_EVENTS.SAMPLE_FORM_SENT,
+    source: 'sequence',
+    timestamp: now,
+    metadata: {
+      sampleUrl,
+      negocioId: negocioCtx.negocioId || '',
+      onReadyTrigger: normalizedTrigger,
+      onReadyStageKey: normalizedStageKey,
+      sequenceTrigger: String(payload?.sequenceTrigger || ''),
+      sequenceStep: payload?.sequenceStep ?? null,
+      idempotencyKey: `sequence_sample_link_${String(leadId || targetPhone).trim()}`,
+    },
+  }).catch((eventError) => {
+    console.warn('[sequence/activate-sample] webSales event:', eventError?.message || eventError);
+  });
+
+  if (negocioCtx.negocioRef) {
+    await negocioCtx.negocioRef.set(
+      {
+        sampleFlowType: 'funnel',
+        suppressDefaultFollowups: true,
+        sampleEnabledAt: now,
+        sampleExpiresAt: expiresAt,
+        sampleLinkSentAt: now,
+        sampleLinkSentUrl: sampleUrl,
+        sampleOnReadyTrigger: normalizedTrigger || FieldValue.delete(),
+        sampleOnReadyStageKey: normalizedStageKey || FieldValue.delete(),
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+  }
+
+  await persistSystemMessage(leadId, `[sequence-sample] muestra activada: ${sampleUrl}`);
 }
 
 async function sendWithRetry(sock, jid, message, opts = {}, attempts = 3) {
@@ -620,6 +779,17 @@ async function deliverPayload(leadId, payload) {
     } else {
       console.warn(`[SEQ] chain sin trigger destino en lead=${leadId}`);
     }
+    return;
+  }
+
+  if (
+    stepTypeRaw === 'activarmuestra'
+    || stepTypeRaw === 'enviarmuestra'
+    || stepTypeRaw === 'muestra'
+    || stepTypeRaw === 'samplelink'
+    || stepTypeRaw === 'sendsample'
+  ) {
+    await deliverSampleInvitePayload(leadId, lead, payload);
     return;
   }
 
