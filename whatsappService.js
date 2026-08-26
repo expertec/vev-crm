@@ -3279,28 +3279,107 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
     if (clean.endsWith('.webm')) return 'audio/webm';
     return null;
   };
+  const transcodeToOggOpus = (inputPath, outputPath) => new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .noVideo()
+      .audioCodec('libopus')
+      .audioChannels(1)
+      .audioFrequency(48000)
+      .audioBitrate('32k')
+      .outputOptions([
+        '-vbr on',
+        '-compression_level 10',
+        '-frame_duration 20',
+        '-application voip',
+        '-avoid_negative_ts make_zero',
+      ])
+      .toFormat('ogg')
+      .save(outputPath)
+      .on('end', resolve)
+      .on('error', reject);
+  });
+  const prepareAudioPayload = async (source, shouldPtt) => {
+    if (Buffer.isBuffer(source)) {
+      return {
+        audioPayload: source,
+        finalMime: mimetype || (shouldPtt ? 'audio/ogg; codecs=opus' : 'audio/mp4'),
+        cleanup: [],
+      };
+    }
+
+    const sourceUrl = source && typeof source === 'object' && source.url ? source.url : '';
+    const sourceValue = typeof source === 'string' ? source : sourceUrl;
+    if (!sourceValue) return null;
+
+    const inferred = inferAudioMime(sourceValue);
+    if (!shouldPtt && typeof sourceValue === 'string' && isHttp(sourceValue)) {
+      const response = await axios.get(sourceValue, {
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        maxContentLength: 25 * 1024 * 1024,
+      });
+      const responseMime = String(response.headers?.['content-type'] || '').split(';')[0].trim();
+      return {
+        audioPayload: Buffer.from(response.data),
+        finalMime: mimetype || (responseMime.startsWith('audio/') ? responseMime : inferred || 'audio/mp4'),
+        cleanup: [],
+      };
+    }
+
+    if (typeof sourceValue === 'string' && isHttp(sourceValue)) {
+      const tempRoot = path.resolve('./uploads/audio-send');
+      fs.mkdirSync(tempRoot, { recursive: true });
+      const token = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const inputPath = path.join(tempRoot, `${token}.source`);
+      const outputPath = path.join(tempRoot, `${token}.ogg`);
+      const response = await axios.get(sourceValue, {
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        maxContentLength: 25 * 1024 * 1024,
+      });
+      fs.writeFileSync(inputPath, Buffer.from(response.data));
+      await transcodeToOggOpus(inputPath, outputPath);
+      return {
+        audioPayload: fs.readFileSync(outputPath),
+        finalMime: 'audio/ogg; codecs=opus',
+        cleanup: [inputPath, outputPath],
+      };
+    }
+
+    if (typeof sourceValue === 'string') {
+      const cleanPath = sourceValue.split('?')[0].toLowerCase();
+      if (shouldPtt && !/\.(ogg|opus)$/i.test(cleanPath)) {
+        const tempRoot = path.resolve('./uploads/audio-send');
+        fs.mkdirSync(tempRoot, { recursive: true });
+        const outputPath = path.join(tempRoot, `${Date.now()}-${Math.random().toString(16).slice(2)}.ogg`);
+        await transcodeToOggOpus(sourceValue, outputPath);
+        return {
+          audioPayload: fs.readFileSync(outputPath),
+          finalMime: 'audio/ogg; codecs=opus',
+          cleanup: [outputPath],
+        };
+      }
+      return {
+        audioPayload: fs.readFileSync(sourceValue),
+        finalMime: mimetype || inferred || (shouldPtt ? 'audio/ogg; codecs=opus' : 'audio/mp4'),
+        cleanup: [],
+      };
+    }
+
+    return null;
+  };
   const normalizedAudioSrc = typeof audioSrc === 'string'
     ? unwrapAudioPlaybackUrl(audioSrc)
     : (audioSrc && typeof audioSrc === 'object' && audioSrc.url
       ? { ...audioSrc, url: unwrapAudioPlaybackUrl(audioSrc.url) }
       : audioSrc);
 
-  const audioPayload =
-    (typeof normalizedAudioSrc === 'string')
-      ? (isHttp(normalizedAudioSrc) ? { url: normalizedAudioSrc } : fs.readFileSync(normalizedAudioSrc))
-      : (Buffer.isBuffer(normalizedAudioSrc) ? normalizedAudioSrc
-         : (normalizedAudioSrc && typeof normalizedAudioSrc === 'object' && normalizedAudioSrc.url ? { url: normalizedAudioSrc.url } : null));
-
-  if (!audioPayload) throw new Error('Fuente de audio inválida');
-  const inferredMime =
-    typeof normalizedAudioSrc === 'string'
-      ? inferAudioMime(normalizedAudioSrc)
-      : inferAudioMime(normalizedAudioSrc?.url);
-  const finalMime = mimetype || inferredMime || (ptt ? 'audio/ogg; codecs=opus' : 'audio/mp4');
+  const prepared = await prepareAudioPayload(normalizedAudioSrc, !!ptt);
+  if (!prepared?.audioPayload) throw new Error('Fuente de audio inválida');
 
   const message = {
-    audio: audioPayload,
-    mimetype: finalMime,
+    audio: prepared.audioPayload,
+    mimetype: prepared.finalMime,
     ptt: !!ptt,
     ...(forwarded ? { contextInfo: { isForwarded: true, forwardingScore: 5 } } : {})
   };
@@ -3311,7 +3390,15 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
   const options = { timeoutMs: 120_000 };
   if (quoted) options.quoted = quoted;
 
-  return sendWhatsAppMessage(jid, message, options);
+  try {
+    return await sendWhatsAppMessage(jid, message, options);
+  } finally {
+    for (const filePath of prepared.cleanup || []) {
+      try {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch {}
+    }
+  }
 }
 
 export async function sendClipMessage(phone, clipUrl) {
