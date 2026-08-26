@@ -3258,6 +3258,18 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
   if (!jid) throw new Error('Número o JID de destino inválido');
 
   const isHttp = (v) => typeof v === 'string' && /^https?:/i.test(v);
+  const unwrapAudioPlaybackUrl = (value) => {
+    const safeValue = String(value || '').trim();
+    if (!isHttp(safeValue)) return safeValue;
+    try {
+      const parsed = new URL(safeValue);
+      const nestedUrl = parsed.searchParams.get('url');
+      if (nestedUrl && /\/api\/media\/audio-playback$/i.test(parsed.pathname)) {
+        return nestedUrl;
+      }
+    } catch {}
+    return safeValue;
+  };
   const inferAudioMime = (value) => {
     const clean = String(value || '').split('?')[0].toLowerCase();
     if (clean.endsWith('.ogg') || clean.endsWith('.opus')) return 'audio/ogg; codecs=opus';
@@ -3267,18 +3279,23 @@ export async function sendAudioMessage(phoneOrJid, audioSrc, {
     if (clean.endsWith('.webm')) return 'audio/webm';
     return null;
   };
+  const normalizedAudioSrc = typeof audioSrc === 'string'
+    ? unwrapAudioPlaybackUrl(audioSrc)
+    : (audioSrc && typeof audioSrc === 'object' && audioSrc.url
+      ? { ...audioSrc, url: unwrapAudioPlaybackUrl(audioSrc.url) }
+      : audioSrc);
 
   const audioPayload =
-    (typeof audioSrc === 'string')
-      ? (isHttp(audioSrc) ? { url: audioSrc } : fs.readFileSync(audioSrc))
-      : (Buffer.isBuffer(audioSrc) ? audioSrc
-         : (audioSrc && typeof audioSrc === 'object' && audioSrc.url ? { url: audioSrc.url } : null));
+    (typeof normalizedAudioSrc === 'string')
+      ? (isHttp(normalizedAudioSrc) ? { url: normalizedAudioSrc } : fs.readFileSync(normalizedAudioSrc))
+      : (Buffer.isBuffer(normalizedAudioSrc) ? normalizedAudioSrc
+         : (normalizedAudioSrc && typeof normalizedAudioSrc === 'object' && normalizedAudioSrc.url ? { url: normalizedAudioSrc.url } : null));
 
   if (!audioPayload) throw new Error('Fuente de audio inválida');
   const inferredMime =
-    typeof audioSrc === 'string'
-      ? inferAudioMime(audioSrc)
-      : inferAudioMime(audioSrc?.url);
+    typeof normalizedAudioSrc === 'string'
+      ? inferAudioMime(normalizedAudioSrc)
+      : inferAudioMime(normalizedAudioSrc?.url);
   const finalMime = mimetype || inferredMime || (ptt ? 'audio/ogg; codecs=opus' : 'audio/mp4');
 
   const message = {
