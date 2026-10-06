@@ -4511,6 +4511,7 @@ app.post('/api/crm/lead-business/send-sample-link', async (req, res) => {
     message = '',
     onReadyTrigger = '',
     onReadyStageKey = '',
+    forceFormLink = false,
   } = req.body || {};
 
   if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
@@ -4540,7 +4541,8 @@ app.post('/api/crm/lead-business/send-sample-link', async (req, res) => {
       .replace(/^_+|_+$/g, '');
     const normalizedTrigger = String(onReadyTrigger || '').trim();
     const sampleSlug = String(negocio.slug || negocio?.schema?.slug || negocio?.briefWeb?.slug || '').trim();
-    const publicSampleTracking = sampleSlug && negocioCtx.negocioId
+    const shouldForceFormLink = parseBooleanInput(forceFormLink, false);
+    const publicSampleTracking = !shouldForceFormLink && sampleSlug && negocioCtx.negocioId
       ? await ensureSampleOpenTracking(
           { id: negocioCtx.negocioId, ...negocio },
           {
@@ -4554,11 +4556,13 @@ app.post('/api/crm/lead-business/send-sample-link', async (req, res) => {
         })
       : null;
     const isPublicSampleLink = Boolean(publicSampleTracking?.sampleUrl);
-    const resolvedSampleUrl = String(
-      publicSampleTracking?.sampleUrl
-        || sampleUrl
-        || ''
-    ).trim() || buildSampleFormUrl(targetPhone);
+    const resolvedSampleUrl = shouldForceFormLink
+      ? buildSampleFormUrl(targetPhone)
+      : (String(
+        publicSampleTracking?.sampleUrl
+          || sampleUrl
+          || ''
+      ).trim() || buildSampleFormUrl(targetPhone));
     if (!resolvedSampleUrl) {
       return res.status(500).json({ error: 'No se pudo construir la URL de muestra.' });
     }
