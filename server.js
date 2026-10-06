@@ -7829,6 +7829,17 @@ app.post('/api/web/sample-submit', async (req, res) => {
       await finalNegocioRef.update(negocioCleanupPatch);
     }
 
+    await ensureSampleOpenTracking(
+      { id: finalNegocioId, ...currentNegocio, ...negocioPatch },
+      {
+        slug: finalSlug,
+        leadId: String(leadCtx.leadId || ''),
+        leadPhone: expectedPhone,
+      }
+    ).catch((trackingError) => {
+      console.warn('[web/sample-submit] No se pudo preparar link público de muestra:', trackingError?.message || trackingError);
+    });
+
     await leadCtx.leadRef.set(
       {
         briefWeb: safeSummary,

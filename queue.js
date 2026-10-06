@@ -103,6 +103,14 @@ function resolveSampleSlug(lead = {}) {
 }
 
 function buildLinkPagina(lead = {}) {
+  const trackedUrl = String(
+    lead?.linkPagina
+      || lead?.link_pagina
+      || lead?.sampleOpenUrl
+      || lead?.sampleOpenTracking?.sampleUrl
+      || ''
+  ).trim();
+  if (trackedUrl) return trackedUrl;
   const slug = resolveSampleSlug(lead);
   if (!slug) return '';
   return `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
@@ -146,6 +154,59 @@ function replacePlaceholders(template, lead) {
   return String(template)
     .replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => resolveKey(key))
     .replace(/\$\{\s*(\w+)\s*\}/g, (_, key) => resolveKey(key));
+}
+
+function phoneCandidates(value = '') {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return [];
+  const set = new Set([digits]);
+  if (digits.startsWith('521') && digits.length > 3) set.add(`52${digits.slice(3)}`);
+  if (digits.startsWith('52') && digits.length > 2) {
+    set.add(digits.slice(2));
+    set.add(`521${digits.slice(2)}`);
+  }
+  if (digits.length === 10) {
+    set.add(`52${digits}`);
+    set.add(`521${digits}`);
+  }
+  return Array.from(set);
+}
+
+async function enrichLeadSequenceLinks(leadId, lead = {}) {
+  const leadPhone = cleanLeadPhone(lead?.telefono || '') || phoneFromJid(extractJidFromLead(lead));
+  let negocioSnap = null;
+
+  const byLeadId = await db.collection('Negocios').where('leadId', '==', leadId).limit(1).get();
+  if (!byLeadId.empty) {
+    negocioSnap = byLeadId.docs[0];
+  } else {
+    for (const candidate of phoneCandidates(leadPhone)) {
+      const byLeadPhone = await db.collection('Negocios').where('leadPhone', '==', candidate).limit(1).get();
+      if (!byLeadPhone.empty) {
+        negocioSnap = byLeadPhone.docs[0];
+        break;
+      }
+    }
+  }
+
+  if (!negocioSnap) return lead;
+  const negocio = negocioSnap.data() || {};
+  const trackedUrl = String(
+    negocio.sampleOpenUrl
+      || negocio.sampleOpenTracking?.sampleUrl
+      || ''
+  ).trim();
+  const slug = String(negocio.slug || negocio?.schema?.slug || negocio?.briefWeb?.slug || '').trim();
+
+  return {
+    ...lead,
+    ...(slug ? { slug } : {}),
+    ...(trackedUrl ? {
+      linkPagina: trackedUrl,
+      link_pagina: trackedUrl,
+      sampleOpenUrl: trackedUrl,
+    } : {}),
+  };
 }
 
 // --- helpers de teléfono/JID (MX requiere 521 para móviles con Baileys) ---
@@ -765,7 +826,7 @@ async function deliverPayload(leadId, payload) {
   const leadSnap = await db.collection('leads').doc(leadId).get();
   if (!leadSnap.exists) throw new Error(`Lead no existe: ${leadId}`);
 
-  const lead = { id: leadSnap.id, ...leadSnap.data() };
+  const lead = await enrichLeadSequenceLinks(leadId, { id: leadSnap.id, ...leadSnap.data() });
 
   // Paso "disparar secuencia": no envía mensaje, encadena otra secuencia.
   // Permite, p.ej., que WebEnviada arranque CierrePost al terminar.
