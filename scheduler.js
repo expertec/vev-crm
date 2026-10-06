@@ -1152,8 +1152,16 @@ export async function processSequences() {
     await Q.hydrateNextSequenceRun({ limit: 50 });
   }
 
+  if (typeof Q.pauseLegacyRecoveredMissingDestinationSequences === 'function') {
+    await Q.pauseLegacyRecoveredMissingDestinationSequences({ limit: 100 });
+  }
+
   if (typeof Q.recoverMissingDestinationSequences === 'function') {
-    await Q.recoverMissingDestinationSequences({ limit: 50 });
+    await Q.recoverMissingDestinationSequences({ limit: 5 });
+  }
+
+  if (typeof Q.resumeSalesQueuePausedSequences === 'function') {
+    await Q.resumeSalesQueuePausedSequences({ limit: 5 });
   }
 
   if (typeof Q.processSequenceLeadsBatch === 'function') {

@@ -173,11 +173,13 @@ import {
 let cancelSequences = null;
 let cancelAllSequences = null;
 let scheduleSequenceForLead = null;
+let repairLeadSequence = null;
 try {
   const q = await import('./queue.js');
   cancelSequences = q.cancelSequences || null;
   cancelAllSequences = q.cancelAllSequences || null;
   scheduleSequenceForLead = q.scheduleSequenceForLead || null;
+  repairLeadSequence = q.repairLeadSequence || null;
 } catch {
   /* noop */
 }
@@ -4664,6 +4666,34 @@ app.post('/api/crm/lead-business/send-sample-link', async (req, res) => {
     });
   } catch (error) {
     console.error('[crm/send-sample-link] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/repair-sequence', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId o phone.' });
+  }
+  if (typeof repairLeadSequence !== 'function') {
+    return res.status(503).json({ error: 'El reparador de secuencias no está disponible.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const result = await repairLeadSequence(leadCtx.leadId, {
+      source: 'crm_button',
+    });
+    return res.json({
+      ...result,
+      leadId: leadCtx.leadId,
+    });
+  } catch (error) {
+    console.error('[crm/repair-sequence] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });

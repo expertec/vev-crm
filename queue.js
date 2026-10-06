@@ -22,6 +22,52 @@ const WA_UNAVAILABLE_RETRY_MS = Math.max(30_000, Number(process.env.WA_UNAVAILAB
 
 /* ----------------------------- utilidades ------------------------------ */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const SEQUENCE_RECOVERY_TIMEZONE = 'America/Monterrey';
+
+function getTimeZoneParts(date = new Date(), timeZone = SEQUENCE_RECOVERY_TIMEZONE) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const out = {};
+  for (const part of parts) {
+    if (part.type !== 'literal') out[part.type] = Number(part.value);
+  }
+  return out;
+}
+
+function getTimeZoneOffsetMs(date = new Date(), timeZone = SEQUENCE_RECOVERY_TIMEZONE) {
+  const parts = getTimeZoneParts(date, timeZone);
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return asUtc - date.getTime();
+}
+
+function zonedStartOfTodayUtc({ now = new Date(), timeZone = SEQUENCE_RECOVERY_TIMEZONE } = {}) {
+  const parts = getTimeZoneParts(now, timeZone);
+  const firstGuess = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, 0, 0, 0));
+  const offset = getTimeZoneOffsetMs(firstGuess, timeZone);
+  return new Date(firstGuess.getTime() - offset);
+}
+
+function timestampToDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value?.toDate === 'function') return value.toDate();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function isTodayOrNewerTimestamp(value, now = new Date()) {
+  const date = timestampToDate(value);
+  if (!date) return false;
+  return date >= zonedStartOfTodayUtc({ now });
+}
 
 function createWhatsAppUnavailableError(message) {
   const err = new Error(message || 'WhatsApp no está conectado');
@@ -1177,13 +1223,11 @@ function normalizeSecuencias(raw) {
     .filter(s => !!s.trigger);
 }
 
-function shouldPauseAutomationForSales(lead = {}) {
+function shouldHardStopAutomation(lead = {}) {
   const queueStatus = String(lead?.queue?.status || '').trim();
-  const routingStatus = String(lead?.routing?.status || lead?.salesBrainCurrent?.routing?.status || '').trim();
   const status = String(lead?.estado || '').trim().toLowerCase();
   const tags = Array.isArray(lead?.etiquetas) ? lead.etiquetas.map((tag) => String(tag || '').trim().toLowerCase()) : [];
   return queueStatus === 'claimed'
-    || routingStatus === 'ready_for_agent'
     || status === 'compro'
     || status === 'cliente'
     || status === 'no interesado'
@@ -1192,6 +1236,10 @@ function shouldPauseAutomationForSales(lead = {}) {
     || lead?.humanControl === true
     || tags.includes('detenersecuencia')
     || tags.includes('stopsequences');
+}
+
+function shouldPauseAutomationForSales(lead = {}) {
+  return shouldHardStopAutomation(lead);
 }
 
 async function recordSequencePausedForAgent(leadRef, leadId, reason = 'sales_queue') {
@@ -1518,51 +1566,223 @@ export async function hydrateNextSequenceRun({ limit = 50 } = {}) {
 function recoverBlockedSequencesFromLead(leadData = {}) {
   const blocked = normalizeSecuencias(leadData.sequenceBlockedSequences);
   if (blocked.length > 0) return blocked;
-
-  const sent = leadData.sequenceBlockedSentSteps && typeof leadData.sequenceBlockedSentSteps === 'object'
-    ? leadData.sequenceBlockedSentSteps
-    : {};
-  const currentSent = leadData.sequenceSentSteps && typeof leadData.sequenceSentSteps === 'object'
-    ? leadData.sequenceSentSteps
-    : {};
-  const sentKeys = [...Object.keys(sent), ...Object.keys(currentSent)];
-  const triggers = [
-    ...(Array.isArray(leadData.sequenceScheduledTriggers) ? leadData.sequenceScheduledTriggers : []),
-    ...(Array.isArray(leadData.sequenceDeliveredTriggers) ? leadData.sequenceDeliveredTriggers : []),
-    ...sentKeys.map((key) => String(key || '').split(':')[0]),
-  ].map((trigger) => String(trigger || '').trim()).filter(Boolean);
-
-  const trigger = triggers[triggers.length - 1] || '';
-  if (!trigger) return [];
-
-  let nextIndex = 0;
-  const prefix = `${trigger}:`;
-  for (const key of sentKeys) {
-    if (!String(key || '').startsWith(prefix)) continue;
-    const index = Number(String(key).slice(prefix.length));
-    if (Number.isFinite(index)) nextIndex = Math.max(nextIndex, index + 1);
-  }
-
-  return [{
-    trigger,
-    startTime: new Date().toISOString(),
-    index: nextIndex,
-    completed: false,
-    status: 'running',
-  }];
+  return [];
 }
 
-export async function recoverMissingDestinationSequences({ limit = 50 } = {}) {
+function resumePausedSequencesForAutomation(leadData = {}) {
+  const sequences = normalizeSecuencias(leadData.secuenciasActivas);
+  if (!sequences.length) return [];
+  return sequences.map((seq) => (
+    seq?.status === 'paused_for_agent'
+      ? { ...seq, status: 'running', resumedAt: new Date().toISOString() }
+      : seq
+  ));
+}
+
+function getSequenceRepairDiagnostic(leadData = {}) {
+  const sequences = normalizeSecuencias(leadData.secuenciasActivas);
+  const blockedSequences = normalizeSecuencias(leadData.sequenceBlockedSequences);
+  const destination = resolveLeadJidAndPhone(leadData);
+  return {
+    hasDestination: Boolean(destination?.jid),
+    destination: destination?.jid || '',
+    sequenceBlockedReason: String(leadData.sequenceBlockedReason || ''),
+    sequencePausedReason: String(leadData.sequencePausedReason || ''),
+    activeSequences: sequences.map((seq) => ({
+      trigger: seq.trigger,
+      index: seq.index,
+      status: seq.status,
+      completed: seq.completed,
+    })),
+    blockedSequences: blockedSequences.map((seq) => ({
+      trigger: seq.trigger,
+      index: seq.index,
+      status: seq.status,
+      completed: seq.completed,
+    })),
+    hasNextRun: Boolean(leadData.nextSequenceRunAt),
+    hardStop: shouldHardStopAutomation(leadData),
+  };
+}
+
+async function prepareSequencesForRun(sequences = []) {
+  for (const seq of sequences) {
+    if (!_sequenceDefCache.has(seq.trigger) || !isSeqCacheFresh(seq.trigger)) {
+      await getSequenceDefinition(seq.trigger);
+    }
+  }
+  return computeNextRunForLead(sequences) || new Date();
+}
+
+export async function repairLeadSequence(leadId, { source = 'manual' } = {}) {
+  const safeLeadId = String(leadId || '').trim();
+  if (!safeLeadId) {
+    throw new Error('Falta leadId para reparar la secuencia.');
+  }
+
+  const leadRef = db.collection('leads').doc(safeLeadId);
+  const snap = await leadRef.get();
+  if (!snap.exists) {
+    throw new Error('Lead no encontrado.');
+  }
+
+  const data = { id: snap.id, ...(snap.data() || {}) };
+  const before = getSequenceRepairDiagnostic(data);
+  if (before.hardStop) {
+    return {
+      success: true,
+      repaired: false,
+      issue: 'hard_stop',
+      message: 'No se reactivó porque el lead tiene control humano, cliente/compró/no interesado o stop.',
+      before,
+    };
+  }
+
+  const destination = resolveLeadJidAndPhone(data);
+  if (!destination?.jid) {
+    return {
+      success: true,
+      repaired: false,
+      issue: 'missing_destination_unresolved',
+      message: 'El lead sigue sin destino de WhatsApp resoluble.',
+      before,
+    };
+  }
+
+  let issue = '';
+  let sequences = normalizeSecuencias(data.secuenciasActivas);
+  let patch = null;
+
+  if (String(data.sequenceBlockedReason || '') === 'missing_destination') {
+    const restored = recoverBlockedSequencesFromLead(data);
+    if (restored.length > 0) {
+      sequences = restored;
+      const nextAt = await prepareSequencesForRun(sequences);
+      patch = {
+        secuenciasActivas: sequences,
+        hasActiveSequences: true,
+        nextSequenceRunAt: nextAt,
+        sequenceSentSteps: data.sequenceBlockedSentSteps || data.sequenceSentSteps || {},
+        sequenceRecoveredAt: Timestamp.now(),
+        sequenceRecoveredReason: `${source}_missing_destination`,
+        sequenceBlockedReason: FieldValue.delete(),
+        sequenceBlockedDetail: FieldValue.delete(),
+        sequenceLock: FieldValue.delete(),
+      };
+      issue = 'missing_destination';
+    }
+  }
+
+  if (!patch && (String(data.sequencePausedReason || '') === 'sales_queue' || sequences.some((seq) => seq.status === 'paused_for_agent'))) {
+    sequences = resumePausedSequencesForAutomation(data);
+    if (sequences.length > 0) {
+      const nextAt = await prepareSequencesForRun(sequences);
+      patch = {
+        secuenciasActivas: sequences,
+        hasActiveSequences: true,
+        nextSequenceRunAt: nextAt,
+        sequenceResumedAt: Timestamp.now(),
+        sequenceResumedReason: `${source}_sales_queue`,
+        sequencePausedReason: FieldValue.delete(),
+        sequenceLock: FieldValue.delete(),
+      };
+      issue = String(data.sequencePausedReason || '') === 'sales_queue'
+        ? 'sales_queue'
+        : 'paused_for_agent';
+    }
+  }
+
+  if (!patch && sequences.length > 0) {
+    const nextAt = await prepareSequencesForRun(sequences);
+    if (nextAt) {
+      patch = {
+        secuenciasActivas: sequences,
+        hasActiveSequences: true,
+        nextSequenceRunAt: nextAt,
+        sequenceHydratedAt: Timestamp.now(),
+        sequenceHydratedReason: `${source}_missing_next_run`,
+        sequenceLock: FieldValue.delete(),
+      };
+      issue = data.nextSequenceRunAt ? 'active_sequence_requeued' : 'missing_next_run';
+    }
+  }
+
+  if (!patch) {
+    return {
+      success: true,
+      repaired: false,
+      issue: 'no_repair_strategy',
+      message: 'No hay secuencia activa, snapshot bloqueado o pausa recuperable para este lead.',
+      before,
+    };
+  }
+
+  await leadRef.set(patch, { merge: true });
+  await persistSystemMessage(safeLeadId, `[sequence] reparación manual aplicada: ${issue}`).catch(() => {});
+
+  const processResult = await processLeadSequences(safeLeadId).catch((error) => ({
+    processed: 0,
+    error: error?.message || String(error),
+  }));
+  const afterSnap = await leadRef.get();
+  const after = getSequenceRepairDiagnostic({ id: afterSnap.id, ...(afterSnap.data() || {}) });
+
+  return {
+    success: true,
+    repaired: true,
+    issue,
+    processed: Number(processResult?.processed || 0),
+    processResult,
+    before,
+    after,
+  };
+}
+
+export async function pauseLegacyRecoveredMissingDestinationSequences({ limit = 50 } = {}) {
+  const snap = await db.collection('leads')
+    .where('sequenceRecoveredReason', '==', 'missing_destination_resolved')
+    .limit(limit)
+    .get();
+
+  if (snap.empty) return 0;
+
+  let paused = 0;
+  for (const doc of snap.docs) {
+    const data = doc.data() || {};
+    const hadReliableSnapshot = normalizeSecuencias(data.sequenceBlockedSequences).length > 0;
+    const blockedToday = isTodayOrNewerTimestamp(data.sequenceBlockedAt);
+    const activeSequences = normalizeSecuencias(data.secuenciasActivas);
+    if ((hadReliableSnapshot && blockedToday) || activeSequences.length === 0) continue;
+
+    await doc.ref.set({
+      secuenciasActivas: [],
+      hasActiveSequences: false,
+      nextSequenceRunAt: FieldValue.delete(),
+      sequenceRecoveryPausedAt: Timestamp.now(),
+      sequenceRecoveryPausedReason: hadReliableSnapshot
+        ? 'missing_destination_recovery_not_from_today'
+        : 'legacy_missing_destination_without_snapshot',
+    }, { merge: true });
+    await persistSystemMessage(doc.id, '[sequence] recuperación legacy pausada: no había snapshot confiable');
+    paused += 1;
+  }
+
+  return paused;
+}
+
+export async function recoverMissingDestinationSequences({ limit = 50, scanLimit = Math.max(limit * 20, 100) } = {}) {
   const snap = await db.collection('leads')
     .where('sequenceBlockedReason', '==', 'missing_destination')
-    .limit(limit)
+    .limit(scanLimit)
     .get();
 
   if (snap.empty) return 0;
 
   let recovered = 0;
   for (const doc of snap.docs) {
+    if (recovered >= limit) break;
     const data = { id: doc.id, ...(doc.data() || {}) };
+    if (!isTodayOrNewerTimestamp(data.sequenceBlockedAt)) continue;
     const destination = resolveLeadJidAndPhone(data);
     if (!destination?.jid) continue;
 
@@ -1590,6 +1810,46 @@ export async function recoverMissingDestinationSequences({ limit = 50 } = {}) {
   }
 
   return recovered;
+}
+
+export async function resumeSalesQueuePausedSequences({ limit = 5, scanLimit = Math.max(limit * 20, 100) } = {}) {
+  const snap = await db.collection('leads')
+    .where('sequencePausedReason', '==', 'sales_queue')
+    .limit(scanLimit)
+    .get();
+
+  if (snap.empty) return 0;
+
+  let resumed = 0;
+  for (const doc of snap.docs) {
+    if (resumed >= limit) break;
+    const data = { id: doc.id, ...(doc.data() || {}) };
+    if (!isTodayOrNewerTimestamp(data.sequencePausedAt)) continue;
+    if (shouldHardStopAutomation(data)) continue;
+
+    const sequences = resumePausedSequencesForAutomation(data);
+    if (!sequences.length) continue;
+
+    for (const seq of sequences) {
+      if (!_sequenceDefCache.has(seq.trigger) || !isSeqCacheFresh(seq.trigger)) {
+        await getSequenceDefinition(seq.trigger);
+      }
+    }
+
+    const nextAt = computeNextRunForLead(sequences) || new Date();
+    await doc.ref.set({
+      secuenciasActivas: sequences,
+      hasActiveSequences: true,
+      nextSequenceRunAt: nextAt,
+      sequenceResumedAt: Timestamp.now(),
+      sequenceResumedReason: 'sales_queue_without_human_claim',
+      sequencePausedReason: FieldValue.delete(),
+    }, { merge: true });
+    await persistSystemMessage(doc.id, '[sequence] reactivada: pausa sales_queue sin reclamo humano');
+    resumed += 1;
+  }
+
+  return resumed;
 }
 
 export async function backfillMissingSequences({ limit = 50, trigger = null } = {}) {
