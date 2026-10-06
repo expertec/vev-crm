@@ -4527,8 +4527,11 @@ app.post('/api/crm/lead-business/send-sample-link', async (req, res) => {
     });
 
     const negocio = negocioCtx.negocioData || {};
+    const shouldForceFormLink = parseBooleanInput(forceFormLink, false);
     const targetPhone = normalizePhoneDigits(
-      negocio.contactWhatsapp || negocio.leadPhone || leadCtx.phoneDigits || leadCtx.leadData?.telefono || ''
+      shouldForceFormLink
+        ? (leadCtx.phoneDigits || leadCtx.leadData?.telefono || negocio.leadPhone || negocio.contactWhatsapp || '')
+        : (negocio.contactWhatsapp || negocio.leadPhone || leadCtx.phoneDigits || leadCtx.leadData?.telefono || '')
     );
     if (!targetPhone) {
       return res.status(400).json({ error: 'No se encontró teléfono para enviar la muestra.' });
@@ -4541,7 +4544,6 @@ app.post('/api/crm/lead-business/send-sample-link', async (req, res) => {
       .replace(/^_+|_+$/g, '');
     const normalizedTrigger = String(onReadyTrigger || '').trim();
     const sampleSlug = String(negocio.slug || negocio?.schema?.slug || negocio?.briefWeb?.slug || '').trim();
-    const shouldForceFormLink = parseBooleanInput(forceFormLink, false);
     const publicSampleTracking = !shouldForceFormLink && sampleSlug && negocioCtx.negocioId
       ? await ensureSampleOpenTracking(
           { id: negocioCtx.negocioId, ...negocio },
