@@ -482,13 +482,18 @@ async function generateAiSampleImageUrl({
   primaryColor = '',
   templateId = 'info',
   leadId = '',
+  referenceImageUrl = '',
 } = {}) {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error('Falta OPENAI_API_KEY para generar imágenes con IA.');
   }
+  const safeReferenceImageUrl = String(referenceImageUrl || '').trim();
   const prompt = [
     'Crea una imagen hero profesional, limpia y comercial para una muestra de sitio web.',
     'Formato horizontal, sin texto, sin logos inventados, estilo fotografía/editorial realista.',
+    safeReferenceImageUrl
+      ? 'Usa la imagen de referencia como inspiración visual real del negocio: conserva el giro, ambiente, productos o local si aparecen, pero mejora composición, luz y calidad para hero web.'
+      : '',
     `Negocio: ${String(companyName || 'Negocio local').trim()}.`,
     `Descripción: ${String(businessStory || 'Servicios profesionales').trim()}.`,
     objective ? `Objetivo: ${String(objective).trim()}.` : '',
@@ -496,26 +501,66 @@ async function generateAiSampleImageUrl({
     `Tipo de sitio: ${String(templateId || 'info').trim()}.`,
   ].filter(Boolean).join('\n');
 
-  const response = await axios.post(
-    'https://api.openai.com/v1/images/generations',
-    {
-      model: String(process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1'),
-      prompt,
-      size: String(process.env.OPENAI_IMAGE_SIZE || '1024x1024'),
-      n: 1,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 120_000,
-      maxContentLength: 25 * 1024 * 1024,
-      maxBodyLength: 25 * 1024 * 1024,
+  let imageData = null;
+  if (safeReferenceImageUrl) {
+    try {
+      const source = await axios.get(safeReferenceImageUrl, {
+        responseType: 'arraybuffer',
+        timeout: 30_000,
+        maxContentLength: 15 * 1024 * 1024,
+        maxBodyLength: 15 * 1024 * 1024,
+      });
+      const referencePng = await sharp(Buffer.from(source.data))
+        .rotate()
+        .resize(1024, 1024, { fit: 'cover' })
+        .png()
+        .toBuffer();
+      const form = new FormData();
+      form.append('model', String(process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1'));
+      form.append('prompt', prompt);
+      form.append('size', String(process.env.OPENAI_IMAGE_SIZE || '1024x1024'));
+      form.append('n', '1');
+      form.append('image', new Blob([referencePng], { type: 'image/png' }), 'reference.png');
+      const editResponse = await fetch('https://api.openai.com/v1/images/edits', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        },
+        body: form,
+      });
+      const editData = await editResponse.json().catch(() => ({}));
+      if (!editResponse.ok) {
+        throw new Error(editData?.error?.message || `OpenAI image edit ${editResponse.status}`);
+      }
+      imageData = editData;
+    } catch (referenceError) {
+      console.warn('[generateAiSampleImageUrl] referencia no usable, generando sin imagen:', referenceError?.message || referenceError);
     }
-  );
+  }
 
-  const item = response?.data?.data?.[0] || {};
+  if (!imageData) {
+    const response = await axios.post(
+      'https://api.openai.com/v1/images/generations',
+      {
+        model: String(process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1'),
+        prompt,
+        size: String(process.env.OPENAI_IMAGE_SIZE || '1024x1024'),
+        n: 1,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 120_000,
+        maxContentLength: 25 * 1024 * 1024,
+        maxBodyLength: 25 * 1024 * 1024,
+      }
+    );
+    imageData = response?.data || null;
+  }
+
+  const item = imageData?.data?.[0] || {};
   if (item.url) return String(item.url);
   const b64 = String(item.b64_json || '').trim();
   if (!b64) throw new Error('OpenAI no devolvió imagen.');
@@ -4845,6 +4890,7 @@ app.post('/api/crm/lead-business/generate-sample-image', async (req, res) => {
     objective = '',
     primaryColor = '',
     templateId = 'info',
+    referenceImageUrl = '',
   } = req.body || {};
 
   if (!String(leadId || '').trim() && !String(phone || '').trim()) {
@@ -4862,6 +4908,7 @@ app.post('/api/crm/lead-business/generate-sample-image', async (req, res) => {
       objective,
       primaryColor,
       templateId,
+      referenceImageUrl,
       leadId: leadCtx.leadId || phone,
     });
     return res.json({
