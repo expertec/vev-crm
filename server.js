@@ -7899,6 +7899,16 @@ app.post('/api/web/sample-submit', async (req, res) => {
         console.warn('[web/sample-submit] intake sequence cancellations:', cancelError?.message || cancelError);
       });
     }
+    if (typeof scheduleSequenceForLead === 'function') {
+      await scheduleSequenceForLead(
+        leadCtx.leadId,
+        'FormSubmitted',
+        new Date(),
+        { source: 'sample-submit' }
+      ).catch((sequenceError) => {
+        console.warn('[web/sample-submit] FormSubmitted sequence:', sequenceError?.message || sequenceError);
+      });
+    }
 
     if (hasSummarySampleOnReadyTrigger) {
       await leadCtx.leadRef.update({
@@ -8451,12 +8461,10 @@ app.post('/api/web/sample-sent', async (req, res) => {
       });
     }
 
-    const startAt = new Date(
-      Date.now() + 15 * 60 * 1000
-    );
+    const startAt = new Date();
     await scheduleSequenceForLead(
       finalLeadId,
-      'WebEnviada',
+      'Web_SampleNotOpened',
       startAt
     );
 
@@ -8480,7 +8488,7 @@ app.post('/api/web/sample-sent', async (req, res) => {
       timestamp: new Date(),
       metadata: {
         leadPhone: leadPhone || '',
-        sequenceTrigger: 'WebEnviada',
+        sequenceTrigger: 'Web_SampleNotOpened',
         scheduledAt: startAt.toISOString(),
         idempotencyKey: `sample_sent_${finalLeadId}`,
       },
@@ -8655,14 +8663,8 @@ app.post('/api/track/link-open', async (req, res) => {
         if (cancelSequences) {
           await cancelSequences(leadId, [
             'WebEnviada',
+            'Web_SampleNotOpened',
           ]);
-        }
-        if (scheduleSequenceForLead) {
-          await scheduleSequenceForLead(
-            leadId,
-            'LinkAbierto',
-            new Date()
-          );
         }
       } catch (seqErr) {
         console.warn(

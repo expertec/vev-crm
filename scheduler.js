@@ -886,8 +886,9 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
   const readyStageKey = String(negocio?.sampleOnReadyStageKey || '').trim();
   const textoSitioListo = isFunnelSample
     ? (
-      `Tu muestra está disponible aquí:\n${linkPagina}\n\n`
-      + 'Revísala y me dices qué ajustes quieres.'
+      `¡Tu muestra ya está lista! 🎉\n\n`
+      + `Puedes verla aquí 👇\n${linkPagina}\n\n`
+      + 'Es una primera propuesta, así que revísala con calma. Si quieres cambiar algo después, lo vemos contigo.'
     )
     : (
       `¡Tu página está lista! 🎉\n\n`
@@ -1005,6 +1006,15 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
           leadPatch.funnelUpdatedAt = FieldValue.serverTimestamp();
         }
         await leadRef.set(leadPatch, { merge: true }).catch(() => {});
+
+        if (typeof Q.scheduleSequenceForLead === 'function') {
+          await Q.scheduleSequenceForLead(
+            leadId,
+            'Web_SampleNotOpened',
+            new Date(),
+            { source: 'sample-ready' }
+          ).catch(() => {});
+        }
 
         if (readyTrigger && typeof Q.scheduleSequenceForLead === 'function') {
           await Q.scheduleSequenceForLead(
