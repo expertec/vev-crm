@@ -459,16 +459,38 @@ async function cropRemoteImageToDataUrl(imageUrl = '', crop = {}) {
   const metadata = await image.metadata();
   const width = Math.max(1, Number(metadata.width || 0));
   const height = Math.max(1, Number(metadata.height || 0));
-  const zoom = clampNumber(crop.zoom, 1, 3, 1);
-  const centerX = clampNumber(crop.x, 0, 100, 50) / 100;
-  const centerY = clampNumber(crop.y, 0, 100, 50) / 100;
-  const side = Math.max(1, Math.floor(Math.min(width, height) / zoom));
-  const maxLeft = Math.max(0, width - side);
-  const maxTop = Math.max(0, height - side);
-  const left = Math.round(Math.min(maxLeft, Math.max(0, centerX * width - side / 2)));
-  const top = Math.round(Math.min(maxTop, Math.max(0, centerY * height - side / 2)));
+  let left = 0;
+  let top = 0;
+  let cropWidth = width;
+  let cropHeight = height;
+  if (
+    Number.isFinite(Number(crop.left))
+    && Number.isFinite(Number(crop.top))
+    && Number.isFinite(Number(crop.width))
+    && Number.isFinite(Number(crop.height))
+  ) {
+    const cropLeftPct = clampNumber(crop.left, 0, 100, 0) / 100;
+    const cropTopPct = clampNumber(crop.top, 0, 100, 0) / 100;
+    const cropWidthPct = clampNumber(crop.width, 1, 100, 100) / 100;
+    const cropHeightPct = clampNumber(crop.height, 1, 100, 100) / 100;
+    left = Math.round(Math.min(width - 1, Math.max(0, cropLeftPct * width)));
+    top = Math.round(Math.min(height - 1, Math.max(0, cropTopPct * height)));
+    cropWidth = Math.max(1, Math.round(Math.min(width - left, cropWidthPct * width)));
+    cropHeight = Math.max(1, Math.round(Math.min(height - top, cropHeightPct * height)));
+  } else {
+    const zoom = clampNumber(crop.zoom, 1, 3, 1);
+    const centerX = clampNumber(crop.x, 0, 100, 50) / 100;
+    const centerY = clampNumber(crop.y, 0, 100, 50) / 100;
+    const side = Math.max(1, Math.floor(Math.min(width, height) / zoom));
+    const maxLeft = Math.max(0, width - side);
+    const maxTop = Math.max(0, height - side);
+    left = Math.round(Math.min(maxLeft, Math.max(0, centerX * width - side / 2)));
+    top = Math.round(Math.min(maxTop, Math.max(0, centerY * height - side / 2)));
+    cropWidth = side;
+    cropHeight = side;
+  }
   const output = await image
-    .extract({ left, top, width: side, height: side })
+    .extract({ left, top, width: cropWidth, height: cropHeight })
     .resize(512, 512, { fit: 'cover' })
     .png()
     .toBuffer();
@@ -483,16 +505,24 @@ async function generateAiSampleImageUrl({
   templateId = 'info',
   leadId = '',
   referenceImageUrl = '',
+  referenceImageUrls = [],
 } = {}) {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error('Falta OPENAI_API_KEY para generar imágenes con IA.');
   }
-  const safeReferenceImageUrl = String(referenceImageUrl || '').trim();
+  const safeReferenceImageUrls = Array.from(new Set([
+    ...(
+      Array.isArray(referenceImageUrls)
+        ? referenceImageUrls.map((url) => String(url || '').trim()).filter(Boolean)
+        : []
+    ),
+    String(referenceImageUrl || '').trim(),
+  ].filter(Boolean))).slice(0, 3);
   const prompt = [
     'Crea una imagen hero profesional, limpia y comercial para una muestra de sitio web.',
     'Formato horizontal, sin texto, sin logos inventados, estilo fotografía/editorial realista.',
-    safeReferenceImageUrl
-      ? 'Usa la imagen de referencia como inspiración visual real del negocio: conserva el giro, ambiente, productos o local si aparecen, pero mejora composición, luz y calidad para hero web.'
+    safeReferenceImageUrls.length
+      ? `Usa ${safeReferenceImageUrls.length === 1 ? 'la imagen de referencia' : 'las imágenes de referencia'} como inspiración visual real del negocio: conserva giro, ambiente, productos, local, materiales o estilo si aparecen, pero mejora composición, luz y calidad para hero web.`
       : '',
     `Negocio: ${String(companyName || 'Negocio local').trim()}.`,
     `Descripción: ${String(businessStory || 'Servicios profesionales').trim()}.`,
@@ -502,17 +532,37 @@ async function generateAiSampleImageUrl({
   ].filter(Boolean).join('\n');
 
   let imageData = null;
-  if (safeReferenceImageUrl) {
+  if (safeReferenceImageUrls.length) {
     try {
-      const source = await axios.get(safeReferenceImageUrl, {
-        responseType: 'arraybuffer',
-        timeout: 30_000,
-        maxContentLength: 15 * 1024 * 1024,
-        maxBodyLength: 15 * 1024 * 1024,
-      });
-      const referencePng = await sharp(Buffer.from(source.data))
-        .rotate()
-        .resize(1024, 1024, { fit: 'cover' })
+      const references = [];
+      for (const url of safeReferenceImageUrls) {
+        try {
+          const source = await axios.get(url, {
+            responseType: 'arraybuffer',
+            timeout: 30_000,
+            maxContentLength: 15 * 1024 * 1024,
+            maxBodyLength: 15 * 1024 * 1024,
+          });
+          const tile = await sharp(Buffer.from(source.data))
+            .rotate()
+            .resize(512, 512, { fit: 'cover' })
+            .png()
+            .toBuffer();
+          references.push(tile);
+        } catch (singleReferenceError) {
+          console.warn('[generateAiSampleImageUrl] referencia omitida:', singleReferenceError?.message || singleReferenceError);
+        }
+      }
+      if (!references.length) throw new Error('No se pudo preparar ninguna referencia.');
+      const referencePng = await sharp({
+        create: {
+          width: 512 * references.length,
+          height: 512,
+          channels: 4,
+          background: '#ffffff',
+        },
+      })
+        .composite(references.map((input, index) => ({ input, left: 512 * index, top: 0 })))
         .png()
         .toBuffer();
       const form = new FormData();
@@ -4891,6 +4941,7 @@ app.post('/api/crm/lead-business/generate-sample-image', async (req, res) => {
     primaryColor = '',
     templateId = 'info',
     referenceImageUrl = '',
+    referenceImageUrls = [],
   } = req.body || {};
 
   if (!String(leadId || '').trim() && !String(phone || '').trim()) {
@@ -4909,6 +4960,7 @@ app.post('/api/crm/lead-business/generate-sample-image', async (req, res) => {
       primaryColor,
       templateId,
       referenceImageUrl,
+      referenceImageUrls,
       leadId: leadCtx.leadId || phone,
     });
     return res.json({
