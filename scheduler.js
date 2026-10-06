@@ -992,10 +992,15 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
           ).catch(() => {});
         }
         if (typeof Q.scheduleSequenceForLead === 'function') {
-          await Q.scheduleSequenceForLead(leadId, 'WebEnviada', new Date()).catch(() => {});
+          await Q.scheduleSequenceForLead(
+            leadId,
+            'Web_SampleNotOpened',
+            new Date(),
+            { source: 'sample-ready' }
+          ).catch(() => {});
         }
         await leadRef.set(
-          { etiquetas: FieldValue.arrayUnion('WebEnviada') },
+          { etiquetas: FieldValue.arrayUnion('WebLinkSent') },
           { merge: true }
         ).catch(() => {});
       } else {

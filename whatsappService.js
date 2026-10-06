@@ -2166,6 +2166,9 @@ export async function connectToWhatsApp() {
 
             await leadRef.set({ etiquetas: FieldValue.arrayUnion(...etiquetaUnion) }, { merge: true });
 
+            if (hasSameTrigger(current.secuenciasActivas, 'LinkAbierto')) {
+              toCancel = Array.from(new Set([...(toCancel || []), 'LinkAbierto']));
+            }
             if (toCancel.length) await cancelSequences(leadId, toCancel).catch(() => {});
 
             const isMetaAutoTrigger = triggerSource === 'meta_ad';

@@ -8109,7 +8109,7 @@ app.post('/api/web/after-form', async (req, res) => {
     // (antes estos leads quedaban sin canal de seguimiento → 0% conversión).
     try {
       if (typeof scheduleSequenceForLead === 'function' && leadPhoneDigits && leadPhoneDigits.length >= 10) {
-        const webTrigger = String(process.env.WEB_FORM_TRIGGER || '').trim() || 'WebEnviada';
+        const webTrigger = String(process.env.WEB_FORM_TRIGGER || '').trim() || 'FormSubmitted';
         await scheduleSequenceForLead(finalLeadId, webTrigger, new Date(), {
           source: 'web_form',
           allowReschedule: false,
@@ -8426,7 +8426,7 @@ app.post('/api/web/after-form', async (req, res) => {
   }
 });
 
-// Activar WebEnviada tras mandar link
+// Activar seguimiento de muestra no abierta tras mandar link
 app.post('/api/web/sample-sent', async (req, res) => {
   try {
     const { leadId, leadPhone } = req.body || {};
@@ -8665,6 +8665,14 @@ app.post('/api/track/link-open', async (req, res) => {
             'WebEnviada',
             'Web_SampleNotOpened',
           ]);
+        }
+        if (scheduleSequenceForLead) {
+          await scheduleSequenceForLead(
+            leadId,
+            'LinkAbierto',
+            new Date(),
+            { source: 'sample-opened' }
+          );
         }
       } catch (seqErr) {
         console.warn(
