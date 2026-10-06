@@ -7,6 +7,7 @@ import { Timestamp } from 'firebase-admin/firestore';
 import * as Q from './queue.js';
 import puppeteer from 'puppeteer';
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import {
   WEB_SALES_EVENTS,
@@ -93,6 +94,68 @@ function buildLinkPagina(leadData = {}) {
   const slug = resolveSampleSlug(leadData);
   if (!slug) return '';
   return `${getSampleSiteBaseUrl()}/${encodeURIComponent(slug)}`;
+}
+
+function generateSampleOpenToken() {
+  return randomBytes(32).toString('hex');
+}
+
+function generateSamplePublicCode() {
+  return randomBytes(9).toString('base64url');
+}
+
+function isValidSampleOpenToken(value = '') {
+  return /^[a-f0-9]{64}$/i.test(String(value || '').trim());
+}
+
+function isValidSamplePublicCode(value = '') {
+  return /^[A-Za-z0-9_-]{10,24}$/.test(String(value || '').trim());
+}
+
+async function generateUniqueSamplePublicCode(currentNegocioId = '') {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const publicCode = generateSamplePublicCode();
+    const snap = await db
+      .collection('Negocios')
+      .where('sampleOpenTracking.publicCode', '==', publicCode)
+      .limit(1)
+      .get();
+    if (snap.empty || snap.docs[0]?.id === currentNegocioId) return publicCode;
+  }
+  throw new Error('No fue posible generar publicCode único para apertura de muestra');
+}
+
+async function ensureSampleOpenTracking(negocio = {}, { slug = '', leadId = '', leadPhone = '' } = {}) {
+  const negocioId = String(negocio?.id || '').trim();
+  if (!negocioId) return { token: '', sampleUrl: '' };
+
+  const current = negocio?.sampleOpenTracking && typeof negocio.sampleOpenTracking === 'object'
+    ? negocio.sampleOpenTracking
+    : {};
+  const token = isValidSampleOpenToken(current.token) ? String(current.token).trim() : generateSampleOpenToken();
+  const publicCode = isValidSamplePublicCode(current.publicCode)
+    ? String(current.publicCode).trim()
+    : await generateUniqueSamplePublicCode(negocioId);
+  const sampleUrl = `https://negociosweb.mx/m/${encodeURIComponent(publicCode)}`;
+  const patch = {
+    sampleOpenTracking: {
+      ...current,
+      token,
+      publicCode,
+      negocioId,
+      leadId: String(leadId || ''),
+      leadPhone: String(leadPhone || ''),
+      slug: String(slug || ''),
+      sampleUrl,
+      createdAt: current.createdAt || FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    sampleOpenToken: token,
+    sampleOpenUrl: sampleUrl,
+  };
+
+  await db.collection('Negocios').doc(negocioId).set(patch, { merge: true });
+  return { token, sampleUrl };
 }
 
 function normalizeSlug(value = '') {
@@ -807,7 +870,16 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
 
   const e164 = toE164(phoneRaw);
   const jid = e164ToJid(e164);
-  const sitioUrl = `https://negociosweb.mx/site/${slug}`;
+  const tracking = await ensureSampleOpenTracking(negocio, {
+    slug,
+    leadId: String(negocio?.leadId || jid || ''),
+    leadPhone: String(phoneRaw || ''),
+  }).catch((trackingError) => {
+    console.warn('[enviarSitioWebPorWhatsApp] No se pudo preparar token de apertura:', trackingError?.message || trackingError);
+    return { token: '', sampleUrl: '' };
+  });
+  const sitioUrlBase = `https://negociosweb.mx/site/${slug}`;
+  const sitioUrl = tracking.sampleUrl || sitioUrlBase;
   const linkPagina = sitioUrl;
   const isFunnelSample = negocio?.sampleFlowType === 'funnel' || negocio?.suppressDefaultFollowups === true;
   const readyTrigger = String(negocio?.sampleOnReadyTrigger || '').trim();
@@ -824,7 +896,7 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
     );
 
   try {
-    console.log(`📤 [ENVIANDO WHATSAPP] A: ${e164} | URL: ${sitioUrl}`);
+    console.log(`📤 [ENVIANDO WHATSAPP] A: ${e164} | URL: ${sitioUrlBase} | token=${tracking.token ? 'yes' : 'no'}`);
 
     let previewUrl = String(negocio?.previewImageUrl || '').trim();
     if (!previewUrl && negocio?.id) {
@@ -863,7 +935,7 @@ export async function enviarSitioWebPorWhatsApp(negocio) {
       throw new Error('No se pudo entregar mensaje de sitio listo');
     }
     
-    console.log(`✅ WhatsApp enviado a ${e164}: ${sitioUrl}`);
+    console.log(`✅ WhatsApp enviado a ${e164}: ${sitioUrlBase}`);
     const leadIdForWebSales = jid;
     await recordWebSalesEvent({
       leadId: leadIdForWebSales,

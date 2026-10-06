@@ -66,6 +66,7 @@ import {
   sendVideoNote,
   refreshLeadProfilePicture,
   refreshLeadProfilePicturesBatch,
+  setWhatsappLeadConversionTracker,
 } from './whatsappService.js';
 
 // ================ SUSCRIPCIONES STRIPE ================
@@ -712,6 +713,85 @@ async function resolveNegocioByIdentity({
     negocioId: negocioSnap?.id || '',
     negocioRef: negocioSnap?.ref || null,
     negocioData: negocioSnap?.data?.() || null,
+  };
+}
+
+function isValidSampleOpenToken(value = '') {
+  return /^[a-f0-9]{64}$/i.test(String(value || '').trim());
+}
+
+function isValidSamplePublicCode(value = '') {
+  return /^[A-Za-z0-9_-]{10,24}$/.test(String(value || '').trim());
+}
+
+function resolveNegocioSlug(negocioData = {}) {
+  return String(
+    negocioData?.slug
+      || negocioData?.schema?.slug
+      || negocioData?.briefWeb?.slug
+      || ''
+  ).trim();
+}
+
+async function resolveNegocioBySampleOpenToken(token = '') {
+  const safeToken = String(token || '').trim();
+  if (!isValidSampleOpenToken(safeToken)) {
+    return { error: 'invalid-format' };
+  }
+
+  const snap = await db
+    .collection('Negocios')
+    .where('sampleOpenTracking.token', '==', safeToken)
+    .limit(1)
+    .get();
+
+  if (snap.empty) {
+    return { error: 'not-found' };
+  }
+
+  const negocioSnap = snap.docs[0];
+  const negocioData = negocioSnap.data() || {};
+  const tracking = negocioData.sampleOpenTracking && typeof negocioData.sampleOpenTracking === 'object'
+    ? negocioData.sampleOpenTracking
+    : {};
+
+  return {
+    negocioSnap,
+    negocioId: negocioSnap.id,
+    negocioRef: negocioSnap.ref,
+    negocioData,
+    tracking,
+  };
+}
+
+async function resolveNegocioBySamplePublicCode(publicCode = '') {
+  const safePublicCode = String(publicCode || '').trim();
+  if (!isValidSamplePublicCode(safePublicCode)) {
+    return { error: 'invalid-format' };
+  }
+
+  const snap = await db
+    .collection('Negocios')
+    .where('sampleOpenTracking.publicCode', '==', safePublicCode)
+    .limit(1)
+    .get();
+
+  if (snap.empty) {
+    return { error: 'not-found' };
+  }
+
+  const negocioSnap = snap.docs[0];
+  const negocioData = negocioSnap.data() || {};
+  const tracking = negocioData.sampleOpenTracking && typeof negocioData.sampleOpenTracking === 'object'
+    ? negocioData.sampleOpenTracking
+    : {};
+
+  return {
+    negocioSnap,
+    negocioId: negocioSnap.id,
+    negocioRef: negocioSnap.ref,
+    negocioData,
+    tracking,
   };
 }
 
@@ -1455,6 +1535,10 @@ const DEFAULT_META_QUALIFIED_MARKERS = [
   'lead_calificado',
 ];
 
+const META_CAPI_WHATSAPP_LEAD_EVENT_NAME = 'WhatsAppLead';
+const META_CAPI_FORM_SUBMITTED_EVENT_NAME = 'FormSubmitted';
+const META_CAPI_SAMPLE_OPENED_EVENT_NAME = 'SampleOpened';
+
 function normalizeMetaKey(value = '') {
   return String(value || '')
     .normalize('NFD')
@@ -1613,6 +1697,72 @@ function shouldTrackMetaQualified({ status = '', stageName = '', stageKey = '' }
     .filter(Boolean);
 
   return candidates.some((candidate) => config.qualifiedMarkers.has(candidate));
+}
+
+function compactMetaCustomData(data = {}) {
+  return Object.entries(data).reduce((acc, [key, value]) => {
+    if (value === undefined || value === null || value === '') return acc;
+    if (typeof value === 'number' && !Number.isFinite(value)) return acc;
+    acc[key] = value;
+    return acc;
+  }, {});
+}
+
+function getLeadMetaAttribution(leadData = {}) {
+  const last = leadData?.lastMetaAttribution;
+  const first = leadData?.metaAttribution;
+  if (last && typeof last === 'object') return last;
+  if (first && typeof first === 'object') return first;
+  return {};
+}
+
+function hasMetaObject(value) {
+  return Boolean(value && typeof value === 'object' && Object.keys(value).length > 0);
+}
+
+function isLeadMetaAdsAttributed(leadData = {}) {
+  if (!leadData || typeof leadData !== 'object') return false;
+  const source = String(leadData.source || '').toLowerCase();
+  const campaign = String(leadData.campaign || '').toLowerCase();
+  const etiquetas = Array.isArray(leadData.etiquetas)
+    ? leadData.etiquetas.map((item) => String(item || '').toLowerCase())
+    : [];
+
+  return Boolean(
+    source === 'meta_ads'
+      || campaign === 'whatsapp_click_to_chat'
+      || etiquetas.includes('metaads')
+      || leadData.lastInboundFromAd === true
+      || hasMetaObject(leadData.metaAttribution)
+      || hasMetaObject(leadData.lastMetaAttribution)
+      || leadData.metaAdId
+      || leadData.metaSourceId
+      || leadData.metaAdSetId
+      || leadData.metaCampaignId
+      || leadData.metaCampaignName
+      || leadData.metaCtwaClid
+  );
+}
+
+function buildLeadMetaAttributionCustomData(leadData = {}) {
+  const attr = getLeadMetaAttribution(leadData);
+  return compactMetaCustomData({
+    meta_source: attr.source,
+    meta_indicator: attr.indicator,
+    meta_path: attr.path,
+    meta_source_id: leadData.metaSourceId || attr.sourceId,
+    meta_ad_id: leadData.metaAdId || attr.adId || attr.sourceId,
+    meta_adset_id: leadData.metaAdSetId || attr.adSetId || attr.adsetId,
+    meta_campaign_id: leadData.metaCampaignId || attr.campaignId,
+    meta_campaign_name: leadData.metaCampaignName || attr.campaignName,
+    meta_ad_name: attr.adName,
+    meta_source_url: attr.sourceUrl,
+    meta_ctwa_clid: leadData.metaCtwaClid || attr.ctwaClid,
+    meta_trigger: attr.trigger || leadData.lastMetaSequenceTrigger,
+    meta_route_id: attr.routeId || leadData.lastMetaRouteId,
+    meta_route_name: attr.routeName,
+    meta_route_source: attr.routeSource || leadData.lastMetaRouteSource,
+  });
 }
 
 async function postMetaConversionEvent({
@@ -2071,6 +2221,406 @@ async function trackLeadQualifiedEvent({
               lastAttemptAt: Timestamp.now(),
               lastError: String(error?.message || error),
               source: String(source || 'crm').trim(),
+            },
+          },
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
+    return { ok: false, skipped: false, error: String(error?.message || error) };
+  }
+}
+
+export async function trackLeadWhatsappLeadEvent({
+  leadId = '',
+  leadPhone = '',
+  source = 'whatsapp_inbound',
+  requestContext = {},
+} = {}) {
+  const config = getMetaCapiConfig();
+  if (!config.enabled) {
+    logMetaCapiOutcome('whatsapp-lead', { status: 'skip', reason: 'not-configured', lead: leadId || leadPhone });
+    return { ok: false, skipped: true, reason: 'not-configured' };
+  }
+
+  let leadRef = null;
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone: leadPhone });
+    leadRef = leadCtx?.leadRef || null;
+    if (!leadRef || !leadCtx?.leadId) {
+      logMetaCapiOutcome('whatsapp-lead', { status: 'skip', reason: 'lead-not-found', lead: leadId || leadPhone, source });
+      return { ok: false, skipped: true, reason: 'lead-not-found' };
+    }
+
+    const leadSnap = leadCtx.leadSnap || await leadRef.get();
+    if (!leadSnap.exists) {
+      logMetaCapiOutcome('whatsapp-lead', { status: 'skip', reason: 'lead-not-found', lead: leadCtx?.leadId || leadId || leadPhone, source });
+      return { ok: false, skipped: true, reason: 'lead-not-found' };
+    }
+
+    const leadData = leadSnap.data() || {};
+    const whatsappLeadMeta =
+      leadData?.metaConversions?.whatsappLead && typeof leadData.metaConversions.whatsappLead === 'object'
+        ? leadData.metaConversions.whatsappLead
+        : {};
+    if (whatsappLeadMeta?.sentAt) {
+      logMetaCapiOutcome('whatsapp-lead', { status: 'skip', reason: 'already-sent', lead: leadCtx.leadId, source });
+      return { ok: false, skipped: true, reason: 'already-sent' };
+    }
+    if (!isLeadMetaAdsAttributed(leadData)) {
+      logMetaCapiOutcome('whatsapp-lead', { status: 'skip', reason: 'not-meta-ads', lead: leadCtx.leadId, source });
+      return { ok: false, skipped: true, reason: 'not-meta-ads' };
+    }
+
+    const userData = buildMetaUserData({
+      leadId: leadCtx.leadId,
+      phone: leadCtx.phoneDigits || leadData.telefono || '',
+      name: leadData.nombre || '',
+    });
+    if (!hasMetaUserData(userData)) {
+      logMetaCapiOutcome('whatsapp-lead', {
+        status: 'skip',
+        reason: 'missing-user-data',
+        lead: leadCtx.leadId,
+        source,
+      });
+      return { ok: false, skipped: true, reason: 'missing-user-data' };
+    }
+
+    const eventTime = Math.floor(Date.now() / 1000);
+    const eventSeed = normalizeMetaKey(leadCtx.leadId || leadCtx.phoneDigits || 'lead');
+    const eventId = `whatsapp_lead:${eventSeed}:${eventTime}`;
+    const eventName = META_CAPI_WHATSAPP_LEAD_EVENT_NAME;
+    const result = await postMetaConversionEvent({
+      eventName,
+      eventId,
+      eventTime,
+      userData,
+      customData: compactMetaCustomData({
+        source: String(source || 'whatsapp_inbound').trim(),
+        lead_id: String(leadCtx.leadId || ''),
+        lead_source: String(leadData.source || '').trim(),
+        campaign: String(leadData.campaign || '').trim(),
+        channel: 'whatsapp_crm',
+        ...buildLeadMetaAttributionCustomData(leadData),
+      }),
+      requestContext,
+    });
+
+    await leadRef.set(
+      {
+        metaConversions: {
+          whatsappLead: {
+            sentAt: Timestamp.now(),
+            lastAttemptAt: Timestamp.now(),
+            lastError: '',
+            eventId,
+            eventName,
+            source: String(source || 'whatsapp_inbound').trim(),
+            fbtraceId: String(result?.body?.fbtrace_id || '').trim(),
+          },
+        },
+      },
+      { merge: true }
+    );
+
+    logMetaCapiOutcome('whatsapp-lead', {
+      status: 'sent',
+      lead: leadCtx.leadId,
+      source,
+      event: eventName,
+    });
+
+    return { ok: true, skipped: false, eventId };
+  } catch (error) {
+    console.error('[meta-capi/whatsapp-lead] Error:', error?.message || error);
+    if (leadRef) {
+      await leadRef.set(
+        {
+          metaConversions: {
+            whatsappLead: {
+              lastAttemptAt: Timestamp.now(),
+              lastError: String(error?.message || error),
+              source: String(source || 'whatsapp_inbound').trim(),
+            },
+          },
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
+    return { ok: false, skipped: false, error: String(error?.message || error) };
+  }
+}
+
+setWhatsappLeadConversionTracker(trackLeadWhatsappLeadEvent);
+
+async function trackLeadFormSubmittedEvent({
+  leadId = '',
+  leadPhone = '',
+  negocioId = '',
+  summary = {},
+  source = 'sample_submit',
+  requestContext = {},
+} = {}) {
+  const config = getMetaCapiConfig();
+  if (!config.enabled) {
+    logMetaCapiOutcome('form-submitted', { status: 'skip', reason: 'not-configured', lead: leadId || leadPhone });
+    return { ok: false, skipped: true, reason: 'not-configured' };
+  }
+
+  let leadRef = null;
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone: leadPhone });
+    leadRef = leadCtx?.leadRef || null;
+    if (!leadRef || !leadCtx?.leadId) {
+      logMetaCapiOutcome('form-submitted', { status: 'skip', reason: 'lead-not-found', lead: leadId || leadPhone, source });
+      return { ok: false, skipped: true, reason: 'lead-not-found' };
+    }
+
+    const leadSnap = leadCtx.leadSnap || await leadRef.get();
+    if (!leadSnap.exists) {
+      logMetaCapiOutcome('form-submitted', { status: 'skip', reason: 'lead-not-found', lead: leadCtx?.leadId || leadId || leadPhone, source });
+      return { ok: false, skipped: true, reason: 'lead-not-found' };
+    }
+
+    const leadData = leadSnap.data() || {};
+    const formSubmittedMeta =
+      leadData?.metaConversions?.formSubmitted && typeof leadData.metaConversions.formSubmitted === 'object'
+        ? leadData.metaConversions.formSubmitted
+        : {};
+    if (formSubmittedMeta?.sentAt) {
+      logMetaCapiOutcome('form-submitted', { status: 'skip', reason: 'already-sent', lead: leadCtx.leadId, source });
+      return { ok: false, skipped: true, reason: 'already-sent' };
+    }
+
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+    const safeSummary = summary && typeof summary === 'object' ? summary : {};
+    const displayName = String(
+      leadData.nombre
+        || negocioCtx.negocioData?.companyInfo
+        || safeSummary.companyName
+        || ''
+    ).trim();
+    const email = String(
+      negocioCtx.negocioData?.contactEmail
+        || safeSummary.contactEmail
+        || ''
+    ).trim();
+    const userData = buildMetaUserData({
+      leadId: leadCtx.leadId,
+      phone: leadCtx.phoneDigits || leadData.telefono || leadPhone,
+      email,
+      name: displayName,
+    });
+    if (!hasMetaUserData(userData)) {
+      logMetaCapiOutcome('form-submitted', {
+        status: 'skip',
+        reason: 'missing-user-data',
+        lead: leadCtx.leadId,
+        source,
+      });
+      return { ok: false, skipped: true, reason: 'missing-user-data' };
+    }
+
+    const eventTime = Math.floor(Date.now() / 1000);
+    const eventSeed = normalizeMetaKey(leadCtx.leadId || leadCtx.phoneDigits || 'lead');
+    const eventId = `form_submitted:${eventSeed}:${eventTime}`;
+    const eventName = META_CAPI_FORM_SUBMITTED_EVENT_NAME;
+    const result = await postMetaConversionEvent({
+      eventName,
+      eventId,
+      eventTime,
+      userData,
+      customData: compactMetaCustomData({
+        source: String(source || 'sample_submit').trim(),
+        lead_id: String(leadCtx.leadId || ''),
+        negocio_id: String(negocioCtx.negocioId || negocioId || '').trim(),
+        slug: String(negocioCtx.negocioData?.slug || safeSummary.slug || '').trim(),
+        form: 'sample_submit',
+        sample_flow_mode: String(leadData?.sampleFlow?.mode || '').trim(),
+        channel: 'whatsapp_crm',
+        ...buildLeadMetaAttributionCustomData(leadData),
+      }),
+      requestContext,
+    });
+
+    await leadRef.set(
+      {
+        metaConversions: {
+          formSubmitted: {
+            sentAt: Timestamp.now(),
+            lastAttemptAt: Timestamp.now(),
+            lastError: '',
+            eventId,
+            eventName,
+            source: String(source || 'sample_submit').trim(),
+            fbtraceId: String(result?.body?.fbtrace_id || '').trim(),
+          },
+        },
+      },
+      { merge: true }
+    );
+
+    logMetaCapiOutcome('form-submitted', {
+      status: 'sent',
+      lead: leadCtx.leadId,
+      source,
+      event: eventName,
+    });
+
+    return { ok: true, skipped: false, eventId };
+  } catch (error) {
+    console.error('[meta-capi/form-submitted] Error:', error?.message || error);
+    if (leadRef) {
+      await leadRef.set(
+        {
+          metaConversions: {
+            formSubmitted: {
+              lastAttemptAt: Timestamp.now(),
+              lastError: String(error?.message || error),
+              source: String(source || 'sample_submit').trim(),
+            },
+          },
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
+    return { ok: false, skipped: false, error: String(error?.message || error) };
+  }
+}
+
+async function trackLeadSampleOpenedEvent({
+  leadId = '',
+  leadPhone = '',
+  negocioId = '',
+  slug = '',
+  tokenVerified = false,
+  source = 'sample_open',
+  requestContext = {},
+} = {}) {
+  if (!tokenVerified) {
+    logMetaCapiOutcome('sample-opened', { status: 'skip', reason: 'token-not-verified', lead: leadId || leadPhone });
+    return { ok: false, skipped: true, reason: 'token-not-verified' };
+  }
+
+  const config = getMetaCapiConfig();
+  if (!config.enabled) {
+    logMetaCapiOutcome('sample-opened', { status: 'skip', reason: 'not-configured', lead: leadId || leadPhone });
+    return { ok: false, skipped: true, reason: 'not-configured' };
+  }
+
+  let leadRef = null;
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone: leadPhone });
+    leadRef = leadCtx?.leadRef || null;
+    if (!leadRef || !leadCtx?.leadId) {
+      logMetaCapiOutcome('sample-opened', { status: 'skip', reason: 'lead-not-found', lead: leadId || leadPhone, source });
+      return { ok: false, skipped: true, reason: 'lead-not-found' };
+    }
+
+    const leadSnap = leadCtx.leadSnap || await leadRef.get();
+    if (!leadSnap.exists) {
+      logMetaCapiOutcome('sample-opened', { status: 'skip', reason: 'lead-not-found', lead: leadCtx?.leadId || leadId || leadPhone, source });
+      return { ok: false, skipped: true, reason: 'lead-not-found' };
+    }
+
+    const leadData = leadSnap.data() || {};
+    const sampleOpenedMeta =
+      leadData?.metaConversions?.sampleOpened && typeof leadData.metaConversions.sampleOpened === 'object'
+        ? leadData.metaConversions.sampleOpened
+        : {};
+    if (sampleOpenedMeta?.sentAt) {
+      logMetaCapiOutcome('sample-opened', { status: 'skip', reason: 'already-sent', lead: leadCtx.leadId, source });
+      return { ok: false, skipped: true, reason: 'already-sent' };
+    }
+
+    const negocioCtx = await resolveNegocioByIdentity({
+      negocioId,
+      leadId: leadCtx.leadId,
+      phoneDigits: leadCtx.phoneDigits,
+    });
+    const displayName = String(
+      leadData.nombre
+        || negocioCtx.negocioData?.companyInfo
+        || ''
+    ).trim();
+    const email = String(negocioCtx.negocioData?.contactEmail || '').trim();
+    const userData = buildMetaUserData({
+      leadId: leadCtx.leadId,
+      phone: leadCtx.phoneDigits || leadData.telefono || leadPhone,
+      email,
+      name: displayName,
+    });
+    if (!hasMetaUserData(userData)) {
+      logMetaCapiOutcome('sample-opened', {
+        status: 'skip',
+        reason: 'missing-user-data',
+        lead: leadCtx.leadId,
+        source,
+      });
+      return { ok: false, skipped: true, reason: 'missing-user-data' };
+    }
+
+    const eventTime = Math.floor(Date.now() / 1000);
+    const eventSeed = normalizeMetaKey(leadCtx.leadId || leadCtx.phoneDigits || 'lead');
+    const eventId = `sample_opened:${eventSeed}:${eventTime}`;
+    const eventName = META_CAPI_SAMPLE_OPENED_EVENT_NAME;
+    const result = await postMetaConversionEvent({
+      eventName,
+      eventId,
+      eventTime,
+      userData,
+      customData: compactMetaCustomData({
+        source: String(source || 'sample_open').trim(),
+        lead_id: String(leadCtx.leadId || ''),
+        negocio_id: String(negocioCtx.negocioId || negocioId || '').trim(),
+        slug: String(slug || negocioCtx.negocioData?.slug || '').trim(),
+        token_verified: true,
+        channel: 'whatsapp_crm',
+        ...buildLeadMetaAttributionCustomData(leadData),
+      }),
+      requestContext,
+    });
+
+    await leadRef.set(
+      {
+        metaConversions: {
+          sampleOpened: {
+            sentAt: Timestamp.now(),
+            lastAttemptAt: Timestamp.now(),
+            lastError: '',
+            eventId,
+            eventName,
+            source: String(source || 'sample_open').trim(),
+            fbtraceId: String(result?.body?.fbtrace_id || '').trim(),
+          },
+        },
+      },
+      { merge: true }
+    );
+
+    logMetaCapiOutcome('sample-opened', {
+      status: 'sent',
+      lead: leadCtx.leadId,
+      source,
+      event: eventName,
+    });
+
+    return { ok: true, skipped: false, eventId };
+  } catch (error) {
+    console.error('[meta-capi/sample-opened] Error:', error?.message || error);
+    if (leadRef) {
+      await leadRef.set(
+        {
+          metaConversions: {
+            sampleOpened: {
+              lastAttemptAt: Timestamp.now(),
+              lastError: String(error?.message || error),
+              source: String(source || 'sample_open').trim(),
             },
           },
         },
@@ -7301,6 +7851,20 @@ app.post('/api/web/sample-submit', async (req, res) => {
       });
     }
 
+    await trackLeadFormSubmittedEvent({
+      leadId: leadCtx.leadId,
+      leadPhone: expectedPhone,
+      negocioId: finalNegocioId,
+      summary: safeSummary,
+      source: 'sample_submit',
+      requestContext: {
+        ip: req.ip,
+        userAgent: req.get('user-agent') || '',
+      },
+    }).catch((metaError) => {
+      console.warn('[web/sample-submit] meta FormSubmitted:', metaError?.message || metaError);
+    });
+
     return res.json({
       success: true,
       ok: true,
@@ -7892,10 +8456,84 @@ app.post('/api/web/sample-sent', async (req, res) => {
 // tracking: link abierto
 app.post('/api/track/link-open', async (req, res) => {
   try {
-    let { leadId, leadPhone, slug } =
+    let { leadId, leadPhone, slug, token, publicCode } =
       req.body || {};
+    const safePublicCode = String(publicCode || '').trim();
+    const safeToken = String(token || '').trim();
+    let leadRef = null;
+    let leadSnap = null;
+    let negocioId = '';
+    let tokenVerified = false;
+    let publicCodeResponseSlug = '';
 
-    if (slug && !leadPhone && !leadId) {
+    if (safePublicCode) {
+      if (!isValidSamplePublicCode(safePublicCode)) {
+        return res.status(400).json({ error: 'Código inválido.' });
+      }
+
+      const negocioCtx = await resolveNegocioBySamplePublicCode(safePublicCode);
+      if (negocioCtx?.error || !negocioCtx?.negocioSnap) {
+        return res.status(404).json({ error: 'Código inválido.' });
+      }
+
+      const negocioData = negocioCtx.negocioData || {};
+      const tracking = negocioCtx.tracking || {};
+      negocioId = String(negocioCtx.negocioId || tracking.negocioId || '').trim();
+      slug = String(resolveNegocioSlug(negocioData) || tracking.slug || '').trim();
+      publicCodeResponseSlug = slug;
+      leadId = String(tracking.leadId || negocioData.leadId || '').trim();
+      leadPhone = normalizePhoneDigits(
+        tracking.leadPhone || negocioData.leadPhone || negocioData.contactWhatsapp || ''
+      );
+
+      const leadCtx = await resolveLeadByIdentity({ leadId, phone: leadPhone });
+      if (!leadCtx?.leadRef || !leadCtx?.leadId) {
+        return res.status(404).json({ error: 'Lead no encontrado' });
+      }
+      leadId = leadCtx.leadId;
+      leadPhone = leadCtx.phoneDigits || leadPhone;
+      leadRef = leadCtx.leadRef;
+      leadSnap = leadCtx.leadSnap || await leadRef.get();
+      tokenVerified = true;
+    } else if (safeToken) {
+      if (!isValidSampleOpenToken(safeToken)) {
+        return res.status(400).json({ error: 'Token inválido.' });
+      }
+
+      const safeSlug = String(slug || '').trim();
+      if (!safeSlug) {
+        return res.status(400).json({ error: 'Falta slug.' });
+      }
+
+      const negocioCtx = await resolveNegocioBySampleOpenToken(safeToken);
+      if (negocioCtx?.error || !negocioCtx?.negocioSnap) {
+        return res.status(404).json({ error: 'Token inválido.' });
+      }
+
+      const negocioData = negocioCtx.negocioData || {};
+      const tracking = negocioCtx.tracking || {};
+      const expectedSlug = String(resolveNegocioSlug(negocioData) || tracking.slug || '').trim();
+      if (!expectedSlug || safeSlug !== expectedSlug) {
+        return res.status(403).json({ error: 'Token inválido para esta muestra.' });
+      }
+
+      negocioId = String(negocioCtx.negocioId || tracking.negocioId || '').trim();
+      leadId = String(tracking.leadId || negocioData.leadId || '').trim();
+      leadPhone = normalizePhoneDigits(
+        tracking.leadPhone || negocioData.leadPhone || negocioData.contactWhatsapp || ''
+      );
+      slug = expectedSlug;
+
+      const leadCtx = await resolveLeadByIdentity({ leadId, phone: leadPhone });
+      if (!leadCtx?.leadRef || !leadCtx?.leadId) {
+        return res.status(404).json({ error: 'Lead no encontrado' });
+      }
+      leadId = leadCtx.leadId;
+      leadPhone = leadCtx.phoneDigits || leadPhone;
+      leadRef = leadCtx.leadRef;
+      leadSnap = leadCtx.leadSnap || await leadRef.get();
+      tokenVerified = true;
+    } else if (slug && !leadPhone && !leadId) {
       const snap = await db
         .collection('Negocios')
         .where('slug', '==', String(slug))
@@ -7917,10 +8555,14 @@ app.post('/api/track/link-open', async (req, res) => {
           'Falta leadId/leadPhone/slug',
       });
 
-    const leadRef = db
-      .collection('leads')
-      .doc(leadId);
-    const leadSnap = await leadRef.get();
+    if (!leadRef) {
+      leadRef = db
+        .collection('leads')
+        .doc(leadId);
+    }
+    if (!leadSnap) {
+      leadSnap = await leadRef.get();
+    }
     if (!leadSnap.exists)
       return res.status(404).json({
         error: 'Lead no encontrado',
@@ -7937,6 +8579,7 @@ app.post('/api/track/link-open', async (req, res) => {
       metadata: {
         leadPhone: leadPhone || '',
         slug: slug || '',
+        ...(tokenVerified ? { negocioId, tokenVerified: true } : {}),
       },
       requestContext: {
         ip: req.ip,
@@ -7947,29 +8590,53 @@ app.post('/api/track/link-open', async (req, res) => {
       return null;
     });
 
-    try {
-      if (cancelSequences) {
-        await cancelSequences(leadId, [
-          'WebEnviada',
-        ]);
-      }
-      if (scheduleSequenceForLead) {
-        await scheduleSequenceForLead(
-          leadId,
-          'LinkAbierto',
-          new Date()
+    if (webEvent?.ignored !== true) {
+      try {
+        if (cancelSequences) {
+          await cancelSequences(leadId, [
+            'WebEnviada',
+          ]);
+        }
+        if (scheduleSequenceForLead) {
+          await scheduleSequenceForLead(
+            leadId,
+            'LinkAbierto',
+            new Date()
+          );
+        }
+      } catch (seqErr) {
+        console.warn(
+          '[track/link-open] secuencias:',
+          seqErr?.message
         );
       }
-    } catch (seqErr) {
-      console.warn(
-        '[track/link-open] secuencias:',
-        seqErr?.message
-      );
-    }
 
-    if (webEvent?.sequenceCancellations?.length) {
-      await applyWebSalesSequenceCancellations(leadId, webEvent.sequenceCancellations).catch((cancelError) => {
-        console.warn('[track/link-open] webSales cancellations:', cancelError?.message || cancelError);
+      if (webEvent?.sequenceCancellations?.length) {
+        await applyWebSalesSequenceCancellations(leadId, webEvent.sequenceCancellations).catch((cancelError) => {
+          console.warn('[track/link-open] webSales cancellations:', cancelError?.message || cancelError);
+        });
+      }
+
+      if (tokenVerified && webEvent) {
+        await trackLeadSampleOpenedEvent({
+          leadId,
+          leadPhone,
+          negocioId,
+          slug,
+          tokenVerified: true,
+          source: 'sample_open_token',
+          requestContext: {
+            ip: req.ip,
+            userAgent: req.get('user-agent') || '',
+          },
+        }).catch((metaError) => {
+          console.warn('[track/link-open] meta SampleOpened:', metaError?.message || metaError);
+        });
+      }
+    } else {
+      console.log('[track/link-open] apertura ignorada; no se programan secuencias ni CAPI', {
+        slug: slug || '',
+        tokenVerified,
       });
     }
 
@@ -7978,6 +8645,7 @@ app.post('/api/track/link-open', async (req, res) => {
       already: alreadyOpened,
       openCount: webEvent?.webSales?.sample?.openCount || null,
       ignored: webEvent?.ignored === true,
+      ...(publicCodeResponseSlug ? { slug: publicCodeResponseSlug } : {}),
     });
   } catch (err) {
     console.error(

@@ -56,11 +56,16 @@ let reconnectTimer = null;
 let socketGeneration = 0;
 let manualLogoutRequested = false;
 let manualLogoutSuppressReconnectUntil = 0;
+let whatsappLeadConversionTracker = null;
 
 const localAuthFolder = '/var/data';
 const { FieldValue } = admin.firestore;
 const bucket = admin.storage().bucket();
 const WA_SESSION_REJECTED = 405;
+
+export function setWhatsappLeadConversionTracker(handler) {
+  whatsappLeadConversionTracker = typeof handler === 'function' ? handler : null;
+}
 
 function getDisconnectReasonName(reason) {
   if (reason === WA_SESSION_REJECTED) return 'sessionRejected';
@@ -784,6 +789,19 @@ function buildMetaAttributionPatch(attribution = {}, {
   });
 
   return patch;
+}
+
+async function trackWhatsappLeadConversionOnce({ leadId = '', leadPhone = '' } = {}) {
+  try {
+    if (typeof whatsappLeadConversionTracker !== 'function') return;
+    await whatsappLeadConversionTracker({
+      leadId,
+      leadPhone,
+      source: 'whatsapp_inbound_meta_ads',
+    });
+  } catch (error) {
+    console.warn('[WA] Meta CAPI WhatsAppLead no bloqueante:', error?.message || error);
+  }
 }
 
 async function resolveMetaTriggerForInbound({
@@ -1729,6 +1747,10 @@ export async function connectToWhatsApp() {
 
                 console.log(`[WA] ✅ Lead actualizado desde mensaje no desencriptado: ${leadId}`);
               }
+
+              if (shouldTreatAsMetaAdInbound) {
+                void trackWhatsappLeadConversionOnce({ leadId, leadPhone: normNum });
+              }
             }
             messageHandledOk = false;
             continue;
@@ -2232,6 +2254,10 @@ export async function connectToWhatsApp() {
           await leadRef.update(upd);
 
           console.log('[WA] Guardado mensaje →', leadId, { mediaType, hasText: !!content, hasMedia: !!mediaUrl });
+
+          if (shouldTreatAsMetaAdInbound) {
+            void trackWhatsappLeadConversionOnce({ leadId, leadPhone: normNum });
+          }
 
           if (processSequencesAfterPersist) {
             processLeadSequences(leadId)
