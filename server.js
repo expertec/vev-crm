@@ -444,6 +444,22 @@ function clampNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, number));
 }
 
+const SAMPLE_THEME_TONES = {
+  light: ['light-white', 'light-cream', 'light-gray', 'light-sand', 'light-blue'],
+  dark: ['dark-blue', 'dark-black', 'dark-brown', 'dark-slate', 'dark-forest'],
+};
+
+function normalizeSampleThemeMode(value = '') {
+  return String(value || '').trim().toLowerCase() === 'dark' ? 'dark' : 'light';
+}
+
+function normalizeSampleThemeTone(value = '', mode = 'light') {
+  const safeMode = normalizeSampleThemeMode(mode);
+  const options = SAMPLE_THEME_TONES[safeMode] || SAMPLE_THEME_TONES.light;
+  const normalized = String(value || '').trim().toLowerCase();
+  return options.includes(normalized) ? normalized : options[0];
+}
+
 async function cropRemoteImageToDataUrl(imageUrl = '', crop = {}) {
   const safeUrl = String(imageUrl || '').trim();
   if (!safeUrl) return '';
@@ -497,6 +513,83 @@ async function cropRemoteImageToDataUrl(imageUrl = '', crop = {}) {
   return `data:image/png;base64,${output.toString('base64')}`;
 }
 
+function dataUrlToImageBuffer(dataUrl = '') {
+  const matches = String(dataUrl || '').match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/);
+  if (!matches) return { buffer: Buffer.from(String(dataUrl || ''), 'base64'), mime: 'image/png' };
+  return { buffer: Buffer.from(matches[2], 'base64'), mime: matches[1] || 'image/png' };
+}
+
+async function generateAiSampleLogoUrl({
+  companyName = '',
+  businessStory = '',
+  primaryColor = '',
+  leadId = '',
+  logoImageUrl = '',
+  logoCrop = {},
+} = {}) {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error('Falta OPENAI_API_KEY para regenerar logos con IA.');
+  }
+  const safeLogoImageUrl = String(logoImageUrl || '').trim();
+  if (!safeLogoImageUrl) {
+    throw new Error('Falta el logo base para mejorar.');
+  }
+
+  const croppedLogo = await cropRemoteImageToDataUrl(safeLogoImageUrl, logoCrop || {});
+  const { buffer: logoBuffer, mime } = dataUrlToImageBuffer(croppedLogo);
+  if (!logoBuffer?.length) throw new Error('No se pudo preparar el logo base.');
+
+  const prompt = [
+    'Mejora este logo para usarlo en un sitio web profesional.',
+    'Mantén la identidad visual, formas, simbolos, composicion y colores principales del logo original.',
+    'No inventes un logo nuevo. No agregues textos, slogans, marcas de agua ni elementos que no existan en la referencia.',
+    'Limpia bordes, mejora nitidez, contraste y calidad. Entrega un logo centrado, cuadrado, con fondo transparente o limpio.',
+    companyName ? `Negocio: ${String(companyName).trim()}.` : '',
+    businessStory ? `Contexto del negocio: ${String(businessStory).trim()}.` : '',
+    primaryColor ? `Color de marca sugerido: ${String(primaryColor).trim()}.` : '',
+  ].filter(Boolean).join('\n');
+
+  const form = new FormData();
+  form.append('model', String(process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1'));
+  form.append('prompt', prompt);
+  form.append('size', String(process.env.OPENAI_LOGO_IMAGE_SIZE || process.env.OPENAI_IMAGE_SIZE || '1024x1024'));
+  form.append('n', '1');
+  form.append('image', new Blob([logoBuffer], { type: mime || 'image/png' }), 'logo-reference.png');
+
+  const editResponse = await fetch('https://api.openai.com/v1/images/edits', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: form,
+  });
+  const editData = await editResponse.json().catch(() => ({}));
+  if (!editResponse.ok) {
+    throw new Error(editData?.error?.message || `OpenAI logo edit ${editResponse.status}`);
+  }
+
+  const item = editData?.data?.[0] || {};
+  let base64 = String(item.b64_json || '').trim();
+  if (!base64 && item.url) {
+    const generated = await axios.get(String(item.url), {
+      responseType: 'arraybuffer',
+      timeout: 60_000,
+      maxContentLength: 25 * 1024 * 1024,
+      maxBodyLength: 25 * 1024 * 1024,
+    });
+    base64 = Buffer.from(generated.data).toString('base64');
+  }
+  if (!base64) throw new Error('OpenAI no devolvio logo.');
+
+  const uploadedUrl = await uploadBase64Image({
+    base64: `data:image/png;base64,${base64}`,
+    folder: `web-assets/ai-logo/${String(leadId || 'lead').replace(/[^a-zA-Z0-9_-]+/g, '_')}`,
+    filenamePrefix: 'logo',
+  });
+  if (!uploadedUrl) throw new Error('No se pudo guardar el logo generado.');
+  return uploadedUrl;
+}
+
 async function generateAiSampleImageUrl({
   companyName = '',
   businessStory = '',
@@ -520,7 +613,8 @@ async function generateAiSampleImageUrl({
   ].filter(Boolean))).slice(0, 3);
   const prompt = [
     'Crea una imagen hero profesional, limpia y comercial para una muestra de sitio web.',
-    'Formato horizontal, sin texto, sin logos inventados, estilo fotografía/editorial realista.',
+    'Formato horizontal, sin texto, sin letras, sin palabras, sin rótulos, sin señalética legible, sin logotipos inventados y sin pantallas/mockups con texto.',
+    'Debe funcionar como fondo visual de una portada web, con espacio limpio para que el sitio coloque texto encima después.',
     safeReferenceImageUrls.length
       ? `Usa ${safeReferenceImageUrls.length === 1 ? 'la imagen de referencia' : 'las imágenes de referencia'} como inspiración visual real del negocio: conserva giro, ambiente, productos, local, materiales o estilo si aparecen, pero mejora composición, luz y calidad para hero web.`
       : '',
@@ -4973,6 +5067,44 @@ app.post('/api/crm/lead-business/generate-sample-image', async (req, res) => {
   }
 });
 
+app.post('/api/crm/lead-business/generate-sample-logo', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    companyName = '',
+    businessStory = '',
+    primaryColor = '',
+    logoImageUrl = '',
+    logoCrop = {},
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId o phone.' });
+  }
+  if (!String(logoImageUrl || '').trim()) {
+    return res.status(400).json({ error: 'Falta el logo base.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const logoUrl = await generateAiSampleLogoUrl({
+      companyName,
+      businessStory,
+      primaryColor,
+      logoImageUrl,
+      logoCrop,
+      leadId: leadCtx.leadId || phone,
+    });
+    return res.json({
+      success: true,
+      logoUrl,
+    });
+  } catch (error) {
+    console.error('[crm/generate-sample-logo] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 app.post('/api/crm/lead-business/create-sample', async (req, res) => {
   const {
     leadId = '',
@@ -5076,6 +5208,14 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       }
     }
 
+    const requestedThemeMode = normalizeSampleThemeMode(
+      summary.themeMode || currentNegocio.themeMode || currentNegocio?.schema?.themeMode || 'light'
+    );
+    const requestedThemeTone = normalizeSampleThemeTone(
+      summary.themeTone || currentNegocio.themeTone || currentNegocio?.schema?.themeTone || '',
+      requestedThemeMode
+    );
+
     const safeSummary = {
       ...summary,
       companyName: String(summary.companyName || currentNegocio.companyInfo || leadData.nombre || '').trim(),
@@ -5083,6 +5223,8 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       objective: String(summary.objective || currentNegocio.businessObjective || '').trim(),
       keyItems: Array.isArray(summary.keyItems) ? summary.keyItems : [],
       primaryColor: String(summary.primaryColor || currentNegocio.primaryColor || '#2563eb').trim(),
+      themeMode: requestedThemeMode,
+      themeTone: requestedThemeTone,
       contactWhatsapp: normalizePhoneDigits(summary.contactWhatsapp || currentNegocio.contactWhatsapp || expectedPhone),
       contactEmail: String(summary.contactEmail || currentNegocio.contactEmail || '').trim(),
       slug: finalSlug,
@@ -5102,6 +5244,8 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       businessObjective: safeSummary.objective,
       keyItems: safeSummary.keyItems,
       primaryColor: safeSummary.primaryColor,
+      themeMode: safeSummary.themeMode,
+      themeTone: safeSummary.themeTone,
       templateId: safeSummary.templateId,
       logoURL: safeSummary.logoURL,
       photoURLs: uploadedPhotos,
@@ -5200,15 +5344,22 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
     let sampleReadyError = '';
     let sentVia = '';
     try {
-      const schema = await generateCompleteSchema({
+      const generatedSchema = await generateCompleteSchema({
         id: finalNegocioId,
         ...currentNegocio,
         ...negocioPatch,
         sampleOpenUrl: trackedSampleUrl,
       });
+      const schema = {
+        ...generatedSchema,
+        themeMode: safeSummary.themeMode,
+        themeTone: safeSummary.themeTone,
+      };
       await finalNegocioRef.set(
         {
           schema,
+          themeMode: safeSummary.themeMode,
+          themeTone: safeSummary.themeTone,
           status: 'Procesado',
           processedAt: Timestamp.now(),
           lastGeneratedAt: Timestamp.now(),
@@ -5357,6 +5508,8 @@ app.post('/api/crm/lead-business/update', async (req, res) => {
     businessStory = '',
     descripcion = '',
     templateId = '',
+    themeMode = '',
+    themeTone = '',
     schema = null,
     slug = '',
     planStartAt = '',
@@ -5394,8 +5547,21 @@ app.post('/api/crm/lead-business/update', async (req, res) => {
     const story = String(descripcion || businessStory || '').trim();
     if (story) patch.businessStory = story;
     if (String(templateId || '').trim()) patch.templateId = String(templateId || '').trim();
+    if (String(themeMode || '').trim()) {
+      patch.themeMode = normalizeSampleThemeMode(themeMode);
+      patch.themeTone = normalizeSampleThemeTone(themeTone || negocioCtx.negocioData?.themeTone || negocioCtx.negocioData?.schema?.themeTone || '', patch.themeMode);
+    } else if (String(themeTone || '').trim()) {
+      patch.themeMode = normalizeSampleThemeMode(negocioCtx.negocioData?.themeMode || negocioCtx.negocioData?.schema?.themeMode || 'light');
+      patch.themeTone = normalizeSampleThemeTone(themeTone, patch.themeMode);
+    }
     if (String(slug || '').trim()) patch.slug = String(slug || '').trim();
-    if (schema && typeof schema === 'object') patch.schema = schema;
+    if (schema && typeof schema === 'object') {
+      patch.schema = {
+        ...schema,
+        ...(patch.themeMode ? { themeMode: patch.themeMode } : {}),
+        ...(patch.themeTone ? { themeTone: patch.themeTone } : {}),
+      };
+    }
 
     if (startTs) {
       patch.planStartAt = startTs;

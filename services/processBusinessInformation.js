@@ -58,6 +58,22 @@ function normalizeTemplateId(value) {
   return 'info';
 }
 
+const THEME_TONES = {
+  light: ['light-white', 'light-cream', 'light-gray', 'light-sand', 'light-blue'],
+  dark: ['dark-blue', 'dark-black', 'dark-brown', 'dark-slate', 'dark-forest'],
+};
+
+function normalizeThemeMode(value = '') {
+  return String(value || '').trim().toLowerCase() === 'dark' ? 'dark' : 'light';
+}
+
+function normalizeThemeTone(value = '', mode = 'light') {
+  const safeMode = normalizeThemeMode(mode);
+  const options = THEME_TONES[safeMode] || THEME_TONES.light;
+  const normalized = String(value || '').trim().toLowerCase();
+  return options.includes(normalized) ? normalized : options[0];
+}
+
 function normalizeWhatsapp(value) {
   return safeTrim(value, 30).replace(/[^\d+]/g, '');
 }
@@ -170,6 +186,8 @@ function normalizeNegocioPayload(negocioId, data = {}) {
   const contactEmail = normalizeEmail(data.contactEmail || data?.schema?.contact?.email || '');
   const palette = sanitizeArray(data.palette || [], (color) => sanitizeColor(color)).slice(0, 6);
   const primaryColor = sanitizeColor(data.primaryColor || palette[0] || '');
+  const themeMode = normalizeThemeMode(data.themeMode || data?.schema?.themeMode || 'light');
+  const themeTone = normalizeThemeTone(data.themeTone || data?.schema?.themeTone || '', themeMode);
   const businessSector = safeTrim(
     data.businessSector || data?.schema?.businessSector || data?.schema?.brand?.sector || '',
     100
@@ -201,6 +219,8 @@ function normalizeNegocioPayload(negocioId, data = {}) {
     location,
     palette,
     primaryColor,
+    themeMode,
+    themeTone,
     slug: inferSlug(negocioId, data),
     existingSchema: isPlainObject(data.schema) ? data.schema : {},
     currentSchemaVersion: Number(data.schemaVersion || 0),
@@ -662,4 +682,3 @@ export async function processBusinessInformation({
     idempotencyHash,
   };
 }
-

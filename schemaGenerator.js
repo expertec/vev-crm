@@ -60,6 +60,22 @@ function pickPrimaryColor(data) {
   return fromPalette || '#16a34a';
 }
 
+const THEME_TONES = {
+  light: ['light-white', 'light-cream', 'light-gray', 'light-sand', 'light-blue'],
+  dark: ['dark-blue', 'dark-black', 'dark-brown', 'dark-slate', 'dark-forest'],
+};
+
+function normalizeThemeMode(value = '') {
+  return String(value || '').trim().toLowerCase() === 'dark' ? 'dark' : 'light';
+}
+
+function normalizeThemeTone(value = '', mode = 'light') {
+  const safeMode = normalizeThemeMode(mode);
+  const options = THEME_TONES[safeMode] || THEME_TONES.light;
+  const normalized = String(value || '').trim().toLowerCase();
+  return options.includes(normalized) ? normalized : options[0];
+}
+
 // ============ Asignación de íconos a CATEGORÍAS (server-side) ============
 function pickAntIconForCategory(label = '', sectorHint = '') {
   const n = String(label || '').toLowerCase();
@@ -422,12 +438,16 @@ function buildBaseSchema(data, aiContent, templateId = 'info') {
       ];
 
   const primary = pickPrimaryColor(data);
+  const themeMode = normalizeThemeMode(data.themeMode || data?.schema?.themeMode || 'light');
+  const themeTone = normalizeThemeTone(data.themeTone || data?.schema?.themeTone || '', themeMode);
   const colors = normalizeColors(
     { primary },
     { primary, secondary: '#0ea5e9', accent: '#f59e0b', text: '#111827' }
   );
 
   return {
+    themeMode,
+    themeTone,
     slug: data.slug,
     brand: {
       name: brand,
