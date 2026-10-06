@@ -7883,6 +7883,22 @@ app.post('/api/web/sample-submit', async (req, res) => {
         console.warn('[web/sample-submit] webSales cancellations:', cancelError?.message || cancelError);
       });
     }
+    if (typeof cancelSequences === 'function') {
+      await cancelSequences(leadCtx.leadId, [
+        'LeadWeb',
+        'NuevoLead',
+        'NuevoLeadWeb',
+        'LeadWhatsapp',
+        'WebPromo',
+        'leadweb',
+        'nuevolead',
+        'nuevoleadweb',
+        'leadwhatsapp',
+        'webpromo',
+      ]).catch((cancelError) => {
+        console.warn('[web/sample-submit] intake sequence cancellations:', cancelError?.message || cancelError);
+      });
+    }
 
     if (hasSummarySampleOnReadyTrigger) {
       await leadCtx.leadRef.update({

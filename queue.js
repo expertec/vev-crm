@@ -366,10 +366,15 @@ const FORM_COMPLETED_BLOCKED_TRIGGERS = new Set([
 function hasLeadCompletedForm(leadData = {}) {
   const etapa = String(leadData?.etapa || '').toLowerCase();
   if (etapa === 'form_submitted') return true;
+  if (leadData?.sampleSubmittedAt || leadData?.sampleFlow?.submittedAt) return true;
+  if (leadData?.metaConversions?.formSubmitted?.sentAt) return true;
+  if (leadData?.webSales?.sample?.formCompletedAt) return true;
   const tags = Array.isArray(leadData?.etiquetas)
     ? leadData.etiquetas.map((t) => String(t || '').toLowerCase())
     : [];
-  return tags.includes('formok') || tags.includes('formulariocompletado');
+  return tags.includes('formok')
+    || tags.includes('formulariocompletado')
+    || tags.includes('muestraformularioenviado');
 }
 
 function shouldStopTriggerAfterForm(trigger = '') {
