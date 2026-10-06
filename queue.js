@@ -257,18 +257,23 @@ function extractJidFromLead(lead) {
   const candidates = [
     lead?.resolvedJid,
     lead?.jid,
+    lead?.lidJid,
     lead?.id,
     lead?.leadId
   ];
 
+  let lidCandidate = null;
   for (const cand of candidates) {
     const normalized = normalizeJid(cand);
     if (!normalized) continue;
-    if (isLidJid(normalized)) continue;
+    if (isLidJid(normalized)) {
+      lidCandidate ||= normalized;
+      continue;
+    }
     if (isSendableJid(normalized)) return normalized;
   }
 
-  return null;
+  return lidCandidate;
 }
 
 function resolveLeadJidAndPhone(lead) {
@@ -1230,8 +1235,9 @@ async function persistSystemMessage(leadId, content) {
   }
 }
 
-async function disableLeadSequencesMissingTarget(leadRef, leadData = {}, reason = '') {
+async function disableLeadSequencesMissingTarget(leadRef, leadData = {}, reason = '', activeSequences = null, sentSteps = null) {
   const safeReason = String(reason || 'Lead sin JID ni teléfono').trim();
+  const blockedSequences = normalizeSecuencias(activeSequences || leadData?.secuenciasActivas);
   await leadRef.set({
     hasActiveSequences: false,
     secuenciasActivas: [],
@@ -1246,6 +1252,10 @@ async function disableLeadSequencesMissingTarget(leadRef, leadData = {}, reason 
       telefono: cleanLeadPhone(leadData?.telefono || ''),
       lidJid: String(leadData?.lidJid || ''),
     },
+    ...(blockedSequences.length ? { sequenceBlockedSequences: blockedSequences } : {}),
+    ...(sentSteps && typeof sentSteps === 'object' && Object.keys(sentSteps).length
+      ? { sequenceBlockedSentSteps: sentSteps }
+      : {}),
   }, { merge: true });
 }
 
@@ -1329,7 +1339,9 @@ export async function processLeadSequences(leadId) {
       await disableLeadSequencesMissingTarget(
         leadRef,
         data,
-        `Lead sin JID ni teléfono: ${leadId}`
+        `Lead sin JID ni teléfono: ${leadId}`,
+        secuencias,
+        sentSteps
       );
       await persistSystemMessage(leadId, '[sequence] pausada: destino WhatsApp no resoluble');
       return { processed: 0, reason: 'missing_destination' };
@@ -1469,7 +1481,7 @@ export async function processSequenceLeadsBatch({ limit = MAX_SEQUENCE_BATCH } =
 
       if (/Lead sin JID ni teléfono/i.test(msg)) {
         const leadData = doc.data() || {};
-        await disableLeadSequencesMissingTarget(doc.ref, leadData, msg).catch(() => {});
+        await disableLeadSequencesMissingTarget(doc.ref, leadData, msg, leadData.secuenciasActivas, leadData.sequenceSentSteps).catch(() => {});
         await persistSystemMessage(doc.id, '[sequence] desactivada automáticamente por destino inválido').catch(() => {});
       }
     }
@@ -1501,6 +1513,83 @@ export async function hydrateNextSequenceRun({ limit = 50 } = {}) {
     updated += 1;
   }
   return updated;
+}
+
+function recoverBlockedSequencesFromLead(leadData = {}) {
+  const blocked = normalizeSecuencias(leadData.sequenceBlockedSequences);
+  if (blocked.length > 0) return blocked;
+
+  const sent = leadData.sequenceBlockedSentSteps && typeof leadData.sequenceBlockedSentSteps === 'object'
+    ? leadData.sequenceBlockedSentSteps
+    : {};
+  const currentSent = leadData.sequenceSentSteps && typeof leadData.sequenceSentSteps === 'object'
+    ? leadData.sequenceSentSteps
+    : {};
+  const sentKeys = [...Object.keys(sent), ...Object.keys(currentSent)];
+  const triggers = [
+    ...(Array.isArray(leadData.sequenceScheduledTriggers) ? leadData.sequenceScheduledTriggers : []),
+    ...(Array.isArray(leadData.sequenceDeliveredTriggers) ? leadData.sequenceDeliveredTriggers : []),
+    ...sentKeys.map((key) => String(key || '').split(':')[0]),
+  ].map((trigger) => String(trigger || '').trim()).filter(Boolean);
+
+  const trigger = triggers[triggers.length - 1] || '';
+  if (!trigger) return [];
+
+  let nextIndex = 0;
+  const prefix = `${trigger}:`;
+  for (const key of sentKeys) {
+    if (!String(key || '').startsWith(prefix)) continue;
+    const index = Number(String(key).slice(prefix.length));
+    if (Number.isFinite(index)) nextIndex = Math.max(nextIndex, index + 1);
+  }
+
+  return [{
+    trigger,
+    startTime: new Date().toISOString(),
+    index: nextIndex,
+    completed: false,
+    status: 'running',
+  }];
+}
+
+export async function recoverMissingDestinationSequences({ limit = 50 } = {}) {
+  const snap = await db.collection('leads')
+    .where('sequenceBlockedReason', '==', 'missing_destination')
+    .limit(limit)
+    .get();
+
+  if (snap.empty) return 0;
+
+  let recovered = 0;
+  for (const doc of snap.docs) {
+    const data = { id: doc.id, ...(doc.data() || {}) };
+    const destination = resolveLeadJidAndPhone(data);
+    if (!destination?.jid) continue;
+
+    const sequences = recoverBlockedSequencesFromLead(data);
+    const activeSequences = normalizeSecuencias(data.secuenciasActivas);
+    if (activeSequences.length > 0 || sequences.length === 0) continue;
+
+    for (const seq of sequences) {
+      if (!_sequenceDefCache.has(seq.trigger) || !isSeqCacheFresh(seq.trigger)) {
+        await getSequenceDefinition(seq.trigger);
+      }
+    }
+    const nextAt = computeNextRunForLead(sequences) || new Date();
+    await doc.ref.set({
+      secuenciasActivas: sequences,
+      hasActiveSequences: true,
+      nextSequenceRunAt: nextAt,
+      sequenceRecoveredAt: Timestamp.now(),
+      sequenceRecoveredReason: 'missing_destination_resolved',
+      sequenceBlockedReason: FieldValue.delete(),
+      sequenceBlockedDetail: FieldValue.delete(),
+    }, { merge: true });
+    await persistSystemMessage(doc.id, '[sequence] recuperada: destino WhatsApp resuelto');
+    recovered += 1;
+  }
+
+  return recovered;
 }
 
 export async function backfillMissingSequences({ limit = 50, trigger = null } = {}) {

@@ -1152,6 +1152,10 @@ export async function processSequences() {
     await Q.hydrateNextSequenceRun({ limit: 50 });
   }
 
+  if (typeof Q.recoverMissingDestinationSequences === 'function') {
+    await Q.recoverMissingDestinationSequences({ limit: 50 });
+  }
+
   if (typeof Q.processSequenceLeadsBatch === 'function') {
     totalProcessed += await Q.processSequenceLeadsBatch({ limit: 25 });
   } else if (typeof Q.processDueSequenceJobs === 'function') {
