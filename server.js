@@ -84,6 +84,7 @@ import {
   generateSiteSchemas,
   archivarNegociosAntiguos,
   enviarSitiosPendientes,
+  ensureSampleOpenTracking,
 } from './scheduler.js';
 
 // ================ 🆕 SISTEMA DE PIN ================
@@ -4538,15 +4539,41 @@ app.post('/api/crm/lead-business/send-sample-link', async (req, res) => {
       .replace(/[^a-z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '');
     const normalizedTrigger = String(onReadyTrigger || '').trim();
-    const resolvedSampleUrl = String(sampleUrl || '').trim() || buildSampleFormUrl(targetPhone);
+    const sampleSlug = String(negocio.slug || negocio?.schema?.slug || negocio?.briefWeb?.slug || '').trim();
+    const publicSampleTracking = sampleSlug && negocioCtx.negocioId
+      ? await ensureSampleOpenTracking(
+          { id: negocioCtx.negocioId, ...negocio },
+          {
+            slug: sampleSlug,
+            leadId: String(negocio.leadId || leadCtx.leadId || ''),
+            leadPhone: targetPhone,
+          }
+        ).catch((trackingError) => {
+          console.warn('[crm/send-sample-link] No se pudo preparar enlace público de muestra:', trackingError?.message || trackingError);
+          return null;
+        })
+      : null;
+    const isPublicSampleLink = Boolean(publicSampleTracking?.sampleUrl);
+    const resolvedSampleUrl = String(
+      publicSampleTracking?.sampleUrl
+        || sampleUrl
+        || ''
+    ).trim() || buildSampleFormUrl(targetPhone);
     if (!resolvedSampleUrl) {
       return res.status(500).json({ error: 'No se pudo construir la URL de muestra.' });
     }
 
-    const finalMessage = String(message || '').trim() || buildSampleInviteMessage({
-      companyName: String(negocio.companyInfo || leadCtx.leadData?.nombre || ''),
-      sampleUrl: resolvedSampleUrl,
-    });
+    const companyName = String(negocio.companyInfo || leadCtx.leadData?.nombre || '');
+    const finalMessage = String(message || '').trim() || (isPublicSampleLink
+      ? (
+        `Hola ${companyName || 'tu negocio'}.\n\n`
+        + `Aquí tienes tu muestra:\n${resolvedSampleUrl}\n\n`
+        + 'Revísala y me dices qué ajustes quieres.'
+      )
+      : buildSampleInviteMessage({
+          companyName,
+          sampleUrl: resolvedSampleUrl,
+        }));
 
     const sent = await sendWhatsappFallbackMessage({
       leadId: String(leadCtx.leadId || negocio.leadId || ''),

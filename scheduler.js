@@ -125,7 +125,7 @@ async function generateUniqueSamplePublicCode(currentNegocioId = '') {
   throw new Error('No fue posible generar publicCode único para apertura de muestra');
 }
 
-async function ensureSampleOpenTracking(negocio = {}, { slug = '', leadId = '', leadPhone = '' } = {}) {
+export async function ensureSampleOpenTracking(negocio = {}, { slug = '', leadId = '', leadPhone = '' } = {}) {
   const negocioId = String(negocio?.id || '').trim();
   if (!negocioId) return { token: '', sampleUrl: '' };
 
