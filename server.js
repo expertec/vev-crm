@@ -13,6 +13,7 @@ import ffprobeInstaller from '@ffprobe-installer/ffprobe';
 import dayjs from 'dayjs';
 import slugify from 'slugify';
 import axios from 'axios';
+import sharp from 'sharp';
 import { createHash } from 'node:crypto';
 import { Timestamp } from 'firebase-admin/firestore';
 
@@ -86,6 +87,7 @@ import {
   enviarSitiosPendientes,
   ensureSampleOpenTracking,
 } from './scheduler.js';
+import { generateCompleteSchema } from './schemaGenerator.js';
 
 // ================ 🆕 SISTEMA DE PIN ================
 import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
@@ -174,15 +176,19 @@ let cancelSequences = null;
 let cancelAllSequences = null;
 let scheduleSequenceForLead = null;
 let repairLeadSequence = null;
+let processLeadSequences = null;
 try {
   const q = await import('./queue.js');
   cancelSequences = q.cancelSequences || null;
   cancelAllSequences = q.cancelAllSequences || null;
   scheduleSequenceForLead = q.scheduleSequenceForLead || null;
   repairLeadSequence = q.repairLeadSequence || null;
+  processLeadSequences = q.processLeadSequences || null;
 } catch {
   /* noop */
 }
+
+const SEQUENCE_REPAIR_FALLBACK_TRIGGER = 'secuencia_respaldo';
 
 async function applyWebSalesSequenceCancellations(leadId = '', cancellations = []) {
   const safeLeadId = String(leadId || '').trim();
@@ -430,6 +436,97 @@ async function uploadBase64Image({
     console.error('[uploadBase64Image] error:', err);
     return null;
   }
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+async function cropRemoteImageToDataUrl(imageUrl = '', crop = {}) {
+  const safeUrl = String(imageUrl || '').trim();
+  if (!safeUrl) return '';
+
+  const response = await axios.get(safeUrl, {
+    responseType: 'arraybuffer',
+    timeout: 30_000,
+    maxContentLength: 15 * 1024 * 1024,
+    maxBodyLength: 15 * 1024 * 1024,
+  });
+  const input = Buffer.from(response.data);
+  const image = sharp(input).rotate();
+  const metadata = await image.metadata();
+  const width = Math.max(1, Number(metadata.width || 0));
+  const height = Math.max(1, Number(metadata.height || 0));
+  const zoom = clampNumber(crop.zoom, 1, 3, 1);
+  const centerX = clampNumber(crop.x, 0, 100, 50) / 100;
+  const centerY = clampNumber(crop.y, 0, 100, 50) / 100;
+  const side = Math.max(1, Math.floor(Math.min(width, height) / zoom));
+  const maxLeft = Math.max(0, width - side);
+  const maxTop = Math.max(0, height - side);
+  const left = Math.round(Math.min(maxLeft, Math.max(0, centerX * width - side / 2)));
+  const top = Math.round(Math.min(maxTop, Math.max(0, centerY * height - side / 2)));
+  const output = await image
+    .extract({ left, top, width: side, height: side })
+    .resize(512, 512, { fit: 'cover' })
+    .png()
+    .toBuffer();
+  return `data:image/png;base64,${output.toString('base64')}`;
+}
+
+async function generateAiSampleImageUrl({
+  companyName = '',
+  businessStory = '',
+  objective = '',
+  primaryColor = '',
+  templateId = 'info',
+  leadId = '',
+} = {}) {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error('Falta OPENAI_API_KEY para generar imágenes con IA.');
+  }
+  const prompt = [
+    'Crea una imagen hero profesional, limpia y comercial para una muestra de sitio web.',
+    'Formato horizontal, sin texto, sin logos inventados, estilo fotografía/editorial realista.',
+    `Negocio: ${String(companyName || 'Negocio local').trim()}.`,
+    `Descripción: ${String(businessStory || 'Servicios profesionales').trim()}.`,
+    objective ? `Objetivo: ${String(objective).trim()}.` : '',
+    primaryColor ? `Usa una atmósfera visual compatible con el color ${String(primaryColor).trim()}.` : '',
+    `Tipo de sitio: ${String(templateId || 'info').trim()}.`,
+  ].filter(Boolean).join('\n');
+
+  const response = await axios.post(
+    'https://api.openai.com/v1/images/generations',
+    {
+      model: String(process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1'),
+      prompt,
+      size: String(process.env.OPENAI_IMAGE_SIZE || '1024x1024'),
+      n: 1,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 120_000,
+      maxContentLength: 25 * 1024 * 1024,
+      maxBodyLength: 25 * 1024 * 1024,
+    }
+  );
+
+  const item = response?.data?.data?.[0] || {};
+  if (item.url) return String(item.url);
+  const b64 = String(item.b64_json || '').trim();
+  if (!b64) throw new Error('OpenAI no devolvió imagen.');
+
+  const uploadedUrl = await uploadBase64Image({
+    base64: `data:image/png;base64,${b64}`,
+    folder: `web-assets/ai-hero/${String(leadId || 'lead').replace(/[^a-zA-Z0-9_-]+/g, '_')}`,
+    filenamePrefix: 'hero',
+  });
+  if (!uploadedUrl) throw new Error('No se pudo guardar la imagen generada.');
+  return uploadedUrl;
 }
 
 async function getOpenAI() {
@@ -4688,12 +4785,91 @@ app.post('/api/crm/lead-business/repair-sequence', async (req, res) => {
     const result = await repairLeadSequence(leadCtx.leadId, {
       source: 'crm_button',
     });
+    const canUseFallback = !result?.repaired
+      && result?.issue !== 'hard_stop'
+      && result?.issue !== 'missing_destination_unresolved'
+      && result?.before?.hasDestination
+      && typeof scheduleSequenceForLead === 'function';
+    if (canUseFallback) {
+      const fallbackSteps = await scheduleSequenceForLead(
+        leadCtx.leadId,
+        SEQUENCE_REPAIR_FALLBACK_TRIGGER,
+        new Date(),
+        {
+          allowReschedule: true,
+          debug: true,
+          source: 'crm_button_repair_fallback',
+        }
+      ).catch((fallbackError) => {
+        console.warn('[crm/repair-sequence] fallback:', fallbackError?.message || fallbackError);
+        return 0;
+      });
+      let fallbackProcessResult = null;
+      if (fallbackSteps > 0 && typeof processLeadSequences === 'function') {
+        fallbackProcessResult = await processLeadSequences(leadCtx.leadId).catch((processError) => ({
+          processed: 0,
+          error: processError?.message || String(processError),
+        }));
+      }
+      return res.json({
+        ...result,
+        success: true,
+        repaired: fallbackSteps > 0,
+        fallbackActivated: fallbackSteps > 0,
+        fallbackTrigger: SEQUENCE_REPAIR_FALLBACK_TRIGGER,
+        fallbackSteps,
+        fallbackProcessed: Number(fallbackProcessResult?.processed || 0),
+        fallbackProcessResult,
+        leadId: leadCtx.leadId,
+        message: fallbackSteps > 0
+          ? `No había reparación directa; se activó ${SEQUENCE_REPAIR_FALLBACK_TRIGGER}.`
+          : `${result?.message || 'No se pudo reparar la secuencia.'} Tampoco se pudo activar ${SEQUENCE_REPAIR_FALLBACK_TRIGGER}.`,
+      });
+    }
     return res.json({
       ...result,
       leadId: leadCtx.leadId,
     });
   } catch (error) {
     console.error('[crm/repair-sequence] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+app.post('/api/crm/lead-business/generate-sample-image', async (req, res) => {
+  const {
+    leadId = '',
+    phone = '',
+    companyName = '',
+    businessStory = '',
+    objective = '',
+    primaryColor = '',
+    templateId = 'info',
+  } = req.body || {};
+
+  if (!String(leadId || '').trim() && !String(phone || '').trim()) {
+    return res.status(400).json({ error: 'Falta leadId o phone.' });
+  }
+  if (!String(companyName || businessStory || '').trim()) {
+    return res.status(400).json({ error: 'Falta información del negocio para generar la imagen.' });
+  }
+
+  try {
+    const leadCtx = await resolveLeadByIdentity({ leadId, phone });
+    const imageUrl = await generateAiSampleImageUrl({
+      companyName,
+      businessStory,
+      objective,
+      primaryColor,
+      templateId,
+      leadId: leadCtx.leadId || phone,
+    });
+    return res.json({
+      success: true,
+      imageUrl,
+    });
+  } catch (error) {
+    console.error('[crm/generate-sample-image] Error:', error);
     return res.status(500).json({ error: error.message || String(error) });
   }
 });
@@ -4755,6 +4931,17 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
     let uploadedPhotos = [];
     try {
       const assets = summary?.assets || {};
+      const logoCrop = summary?.logoCrop || {};
+      if (logoCrop?.sourceUrl) {
+        const croppedLogo = await cropRemoteImageToDataUrl(logoCrop.sourceUrl, logoCrop);
+        if (croppedLogo) {
+          uploadedLogoURL = await uploadBase64Image({
+            base64: croppedLogo,
+            folder: `web-assets/${finalSlug.toLowerCase()}`,
+            filenamePrefix: 'logo_crop',
+          });
+        }
+      }
       if (assets.logo) {
         uploadedLogoURL = await uploadBase64Image({
           base64: assets.logo,
@@ -4834,7 +5021,7 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
 
     const windowDays = Math.max(1, Number(process.env.SAMPLE_WINDOW_DAYS || 14));
     const sampleExpiresAt = new Date(now.getTime() + windowDays * 24 * 60 * 60 * 1000);
-    await ensureSampleOpenTracking(
+    const sampleTracking = await ensureSampleOpenTracking(
       { id: finalNegocioId, ...currentNegocio, ...negocioPatch },
       {
         slug: finalSlug,
@@ -4843,7 +5030,9 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       }
     ).catch((trackingError) => {
       console.warn('[crm/create-sample] No se pudo preparar link público de muestra:', trackingError?.message || trackingError);
+      return null;
     });
+    const trackedSampleUrl = String(sampleTracking?.sampleUrl || '').trim();
 
     await leadCtx.leadRef.set(
       {
@@ -4907,7 +5096,111 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
         console.warn('[crm/create-sample] intake sequence cancellations:', cancelError?.message || cancelError);
       });
     }
-    if (typeof scheduleSequenceForLead === 'function') {
+
+    let sampleReadySent = false;
+    let sampleReadyError = '';
+    let sentVia = '';
+    try {
+      const schema = await generateCompleteSchema({
+        id: finalNegocioId,
+        ...currentNegocio,
+        ...negocioPatch,
+        sampleOpenUrl: trackedSampleUrl,
+      });
+      await finalNegocioRef.set(
+        {
+          schema,
+          status: 'Procesado',
+          processedAt: Timestamp.now(),
+          lastGeneratedAt: Timestamp.now(),
+          updatedAt: Timestamp.now(),
+        },
+        { merge: true }
+      );
+      await recordWebSalesEvent({
+        leadRef: leadCtx.leadRef,
+        leadId: leadCtx.leadId,
+        type: WEB_SALES_EVENTS.SAMPLE_GENERATED,
+        source: 'crm',
+        timestamp: now,
+        metadata: {
+          negocioId: finalNegocioId,
+          slug: finalSlug,
+          idempotencyKey: `sample_generated_${finalNegocioId}`,
+        },
+      }).catch((eventError) => {
+        console.warn('[crm/create-sample] webSales sample_generated:', eventError?.message || eventError);
+      });
+
+      if (!trackedSampleUrl) {
+        throw new Error('No se pudo construir el enlace trackeado /m/{publicCode}.');
+      }
+      const sampleUrlToSend = trackedSampleUrl;
+      const readyMessage = (
+        `¡Tu muestra ya está lista! 🎉\n\n`
+        + `Puedes verla aquí 👇\n${sampleUrlToSend}\n\n`
+        + 'Es una primera propuesta, así que revísala con calma. Si quieres cambiar algo después, lo vemos contigo.'
+      );
+      const sent = await sendWhatsappFallbackMessage({
+        leadId: String(leadCtx.leadId || ''),
+        phoneDigits: expectedPhone,
+        message: readyMessage,
+      });
+      sentVia = sent?.method || '';
+      sampleReadySent = true;
+
+      await finalNegocioRef.set(
+        {
+          status: 'Web enviada',
+          siteSentAt: Timestamp.now(),
+          sampleLinkSentAt: Timestamp.now(),
+          sampleLinkSentUrl: sampleUrlToSend,
+          siteSendMode: 'crm_chat_create_sample',
+          updatedAt: Timestamp.now(),
+        },
+        { merge: true }
+      );
+      await leadCtx.leadRef.set(
+        {
+          sampleLinkSentAt: now,
+          sampleLinkSentUrl: sampleUrlToSend,
+          webLinkSentAt: now,
+          etiquetas: admin.firestore.FieldValue.arrayUnion('MuestraLista', 'WebLinkSent', 'SampleLinkSent'),
+        },
+        { merge: true }
+      );
+      await recordWebSalesEvent({
+        leadRef: leadCtx.leadRef,
+        leadId: leadCtx.leadId,
+        type: WEB_SALES_EVENTS.SAMPLE_SENT,
+        source: 'crm',
+        timestamp: now,
+        metadata: {
+          negocioId: finalNegocioId,
+          slug: finalSlug,
+          sampleUrl: sampleUrlToSend,
+          isFunnelSample: true,
+          idempotencyKey: `sample_sent_${finalNegocioId}`,
+        },
+      }).catch((eventError) => {
+        console.warn('[crm/create-sample] webSales sample_sent:', eventError?.message || eventError);
+      });
+      if (typeof scheduleSequenceForLead === 'function') {
+        await scheduleSequenceForLead(
+          leadCtx.leadId,
+          'Web_SampleNotOpened',
+          new Date(),
+          { source: 'crm-create-sample-ready' }
+        ).catch((sequenceError) => {
+          console.warn('[crm/create-sample] Web_SampleNotOpened sequence:', sequenceError?.message || sequenceError);
+        });
+      }
+    } catch (readyError) {
+      sampleReadyError = String(readyError?.message || readyError);
+      console.warn('[crm/create-sample] No se pudo generar/enviar muestra inmediata:', sampleReadyError);
+    }
+
+    if (!sampleReadySent && typeof scheduleSequenceForLead === 'function') {
       await scheduleSequenceForLead(
         leadCtx.leadId,
         'FormSubmitted',
@@ -4939,6 +5232,10 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       leadId: String(leadCtx.leadId || ''),
       negocioId: finalNegocioId,
       slug: finalSlug,
+      sampleUrl: trackedSampleUrl,
+      sampleReadySent,
+      sentVia,
+      ...(sampleReadyError ? { sampleReadyError } : {}),
       negocio: serializeNegocio(finalNegocioId, updatedSnap.data() || {}, {
         leadId: leadCtx.leadId,
         phoneDigits: expectedPhone,
