@@ -522,53 +522,100 @@ function dataUrlToImageBuffer(dataUrl = '') {
 async function generateAiSampleLogoUrl({
   companyName = '',
   businessStory = '',
+  objective = '',
+  keyItemsText = '',
   primaryColor = '',
   leadId = '',
   logoImageUrl = '',
   logoCrop = {},
 } = {}) {
   if (!process.env.OPENAI_API_KEY) {
-    throw new Error('Falta OPENAI_API_KEY para regenerar logos con IA.');
+    throw new Error('Falta OPENAI_API_KEY para generar logos con IA.');
   }
   const safeLogoImageUrl = String(logoImageUrl || '').trim();
-  if (!safeLogoImageUrl) {
-    throw new Error('Falta el logo base para mejorar.');
+  const safeCompanyName = String(companyName || '').trim();
+  const safeBusinessStory = String(businessStory || '').trim();
+  const safeObjective = String(objective || '').trim();
+  const safeKeyItemsText = String(keyItemsText || '').trim();
+
+  let imageData = null;
+
+  if (safeLogoImageUrl) {
+    const croppedLogo = await cropRemoteImageToDataUrl(safeLogoImageUrl, logoCrop || {});
+    const { buffer: logoBuffer, mime } = dataUrlToImageBuffer(croppedLogo);
+    if (!logoBuffer?.length) throw new Error('No se pudo preparar el logo base.');
+
+    const prompt = [
+      'Mejora este logo para usarlo en un sitio web profesional.',
+      'Mantén la identidad visual, formas, simbolos, composicion y colores principales del logo original.',
+      'No inventes un logo nuevo. No agregues textos, slogans, marcas de agua ni elementos que no existan en la referencia.',
+      'Limpia bordes, mejora nitidez, contraste y calidad. Entrega un logo centrado, cuadrado, con fondo transparente o limpio.',
+      safeCompanyName ? `Negocio: ${safeCompanyName}.` : '',
+      safeBusinessStory ? `Contexto del negocio: ${safeBusinessStory}.` : '',
+      safeObjective ? `Objetivo comercial: ${safeObjective}.` : '',
+      safeKeyItemsText ? `Productos o servicios clave: ${safeKeyItemsText}.` : '',
+      primaryColor ? `Color de marca sugerido: ${String(primaryColor).trim()}.` : '',
+    ].filter(Boolean).join('\n');
+
+    const form = new FormData();
+    form.append('model', String(process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1'));
+    form.append('prompt', prompt);
+    form.append('size', String(process.env.OPENAI_LOGO_IMAGE_SIZE || process.env.OPENAI_IMAGE_SIZE || '1024x1024'));
+    form.append('n', '1');
+    form.append('image', new Blob([logoBuffer], { type: mime || 'image/png' }), 'logo-reference.png');
+
+    const editResponse = await fetch('https://api.openai.com/v1/images/edits', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: form,
+    });
+    const editData = await editResponse.json().catch(() => ({}));
+    if (!editResponse.ok) {
+      throw new Error(editData?.error?.message || `OpenAI logo edit ${editResponse.status}`);
+    }
+    imageData = editData;
+  } else {
+    if (!safeCompanyName) {
+      throw new Error('Falta el nombre del negocio para crear el logo.');
+    }
+    const prompt = [
+      'Crea un logotipo profesional, original y comercial para una marca de negocio.',
+      `Incluye el nombre exacto del negocio como texto principal: "${safeCompanyName}".`,
+      'Debe ser legible como logo de sitio web, moderno, limpio, centrado y en formato cuadrado.',
+      'Crea un isotipo o símbolo simple relacionado con el giro del negocio y combinalo con el nombre.',
+      'No incluyas slogans, texto extra, marcas de agua, mockups, fotografías, personas ni fondos cargados.',
+      'Evita copiar marcas registradas o estilos reconocibles de terceros.',
+      safeBusinessStory ? `Contexto del negocio: ${safeBusinessStory}.` : '',
+      safeObjective ? `Objetivo comercial: ${safeObjective}.` : '',
+      safeKeyItemsText ? `Productos o servicios clave: ${safeKeyItemsText}.` : '',
+      primaryColor ? `Color de marca sugerido: ${String(primaryColor).trim()}.` : '',
+      'Entrega una composición pulida con fondo transparente o limpio, lista para usarse en una muestra web.',
+    ].filter(Boolean).join('\n');
+
+    const response = await axios.post(
+      'https://api.openai.com/v1/images/generations',
+      {
+        model: String(process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1'),
+        prompt,
+        size: String(process.env.OPENAI_LOGO_IMAGE_SIZE || process.env.OPENAI_IMAGE_SIZE || '1024x1024'),
+        n: 1,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 120_000,
+        maxContentLength: 25 * 1024 * 1024,
+        maxBodyLength: 25 * 1024 * 1024,
+      }
+    );
+    imageData = response?.data || null;
   }
 
-  const croppedLogo = await cropRemoteImageToDataUrl(safeLogoImageUrl, logoCrop || {});
-  const { buffer: logoBuffer, mime } = dataUrlToImageBuffer(croppedLogo);
-  if (!logoBuffer?.length) throw new Error('No se pudo preparar el logo base.');
-
-  const prompt = [
-    'Mejora este logo para usarlo en un sitio web profesional.',
-    'Mantén la identidad visual, formas, simbolos, composicion y colores principales del logo original.',
-    'No inventes un logo nuevo. No agregues textos, slogans, marcas de agua ni elementos que no existan en la referencia.',
-    'Limpia bordes, mejora nitidez, contraste y calidad. Entrega un logo centrado, cuadrado, con fondo transparente o limpio.',
-    companyName ? `Negocio: ${String(companyName).trim()}.` : '',
-    businessStory ? `Contexto del negocio: ${String(businessStory).trim()}.` : '',
-    primaryColor ? `Color de marca sugerido: ${String(primaryColor).trim()}.` : '',
-  ].filter(Boolean).join('\n');
-
-  const form = new FormData();
-  form.append('model', String(process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1'));
-  form.append('prompt', prompt);
-  form.append('size', String(process.env.OPENAI_LOGO_IMAGE_SIZE || process.env.OPENAI_IMAGE_SIZE || '1024x1024'));
-  form.append('n', '1');
-  form.append('image', new Blob([logoBuffer], { type: mime || 'image/png' }), 'logo-reference.png');
-
-  const editResponse = await fetch('https://api.openai.com/v1/images/edits', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: form,
-  });
-  const editData = await editResponse.json().catch(() => ({}));
-  if (!editResponse.ok) {
-    throw new Error(editData?.error?.message || `OpenAI logo edit ${editResponse.status}`);
-  }
-
-  const item = editData?.data?.[0] || {};
+  const item = imageData?.data?.[0] || {};
   let base64 = String(item.b64_json || '').trim();
   if (!base64 && item.url) {
     const generated = await axios.get(String(item.url), {
@@ -5073,6 +5120,8 @@ app.post('/api/crm/lead-business/generate-sample-logo', async (req, res) => {
     phone = '',
     companyName = '',
     businessStory = '',
+    objective = '',
+    keyItemsText = '',
     primaryColor = '',
     logoImageUrl = '',
     logoCrop = {},
@@ -5081,8 +5130,8 @@ app.post('/api/crm/lead-business/generate-sample-logo', async (req, res) => {
   if (!String(leadId || '').trim() && !String(phone || '').trim()) {
     return res.status(400).json({ error: 'Falta leadId o phone.' });
   }
-  if (!String(logoImageUrl || '').trim()) {
-    return res.status(400).json({ error: 'Falta el logo base.' });
+  if (!String(logoImageUrl || companyName || businessStory || '').trim()) {
+    return res.status(400).json({ error: 'Falta información del negocio para generar el logo.' });
   }
 
   try {
@@ -5090,6 +5139,8 @@ app.post('/api/crm/lead-business/generate-sample-logo', async (req, res) => {
     const logoUrl = await generateAiSampleLogoUrl({
       companyName,
       businessStory,
+      objective,
+      keyItemsText,
       primaryColor,
       logoImageUrl,
       logoCrop,
@@ -5231,6 +5282,7 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       templateId: String(summary.templateId || currentNegocio.templateId || 'info').toLowerCase(),
       logoURL: String(uploadedLogoURL || summary.logoURL || currentNegocio.logoURL || '').trim(),
       photoURLs: uploadedPhotos,
+      designVersion: 'v2',
       source: 'crm_chat_sample_builder',
     };
 
@@ -5246,6 +5298,7 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       primaryColor: safeSummary.primaryColor,
       themeMode: safeSummary.themeMode,
       themeTone: safeSummary.themeTone,
+      designVersion: safeSummary.designVersion,
       templateId: safeSummary.templateId,
       logoURL: safeSummary.logoURL,
       photoURLs: uploadedPhotos,
@@ -5354,12 +5407,14 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
         ...generatedSchema,
         themeMode: safeSummary.themeMode,
         themeTone: safeSummary.themeTone,
+        designVersion: safeSummary.designVersion,
       };
       await finalNegocioRef.set(
         {
           schema,
           themeMode: safeSummary.themeMode,
           themeTone: safeSummary.themeTone,
+          designVersion: safeSummary.designVersion,
           status: 'Procesado',
           processedAt: Timestamp.now(),
           lastGeneratedAt: Timestamp.now(),
