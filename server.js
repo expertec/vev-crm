@@ -5109,26 +5109,80 @@ app.post('/api/crm/lead-business/generate-sample-image', async (req, res) => {
 
   try {
     const leadCtx = await resolveLeadByIdentity({ leadId, phone });
-    const imageUrl = await generateAiSampleImageUrl({
-      companyName,
-      businessStory,
-      objective,
-      keyItemsText,
-      primaryColor,
-      themeMode,
-      themeTone,
-      templateId,
-      referenceImageUrl,
-      referenceImageUrls,
-      leadId: leadCtx.leadId || phone,
+    const referenceCount = Array.isArray(referenceImageUrls)
+      ? referenceImageUrls.map((url) => String(url || '').trim()).filter(Boolean).length
+      : 0;
+    console.log('[crm/generate-sample-image] request:', {
+      leadId: String(leadCtx.leadId || leadId || ''),
+      phone: normalizePhoneDigits(phone || leadCtx.phoneDigits || ''),
+      companyName: String(companyName || '').trim(),
+      templateId: String(templateId || '').trim(),
+      referenceCount,
+      hasSingleReference: Boolean(String(referenceImageUrl || '').trim()),
     });
+    let imageUrl = '';
+    let imageWarning = '';
+    try {
+      imageUrl = await generateAiSampleImageUrl({
+        companyName,
+        businessStory,
+        objective,
+        keyItemsText,
+        primaryColor,
+        themeMode,
+        themeTone,
+        templateId,
+        referenceImageUrl,
+        referenceImageUrls,
+        leadId: leadCtx.leadId || phone,
+      });
+      console.log('[crm/generate-sample-image] success:', {
+        leadId: String(leadCtx.leadId || leadId || ''),
+        imageUrl: String(imageUrl || '').slice(0, 180),
+      });
+    } catch (imageError) {
+      imageWarning = String(imageError?.response?.data?.error?.message || imageError?.message || imageError).trim();
+      console.warn('[crm/generate-sample-image] OpenAI fallo, usando respaldo contextual:', {
+        leadId: String(leadCtx.leadId || leadId || ''),
+        status: imageError?.response?.status || '',
+        code: imageError?.response?.data?.error?.code || imageError?.code || '',
+        type: imageError?.response?.data?.error?.type || '',
+        message: imageWarning,
+      });
+      const fallbackSummary = {
+        companyName,
+        businessStory,
+        objective,
+        keyItems: String(keyItemsText || '')
+          .split(/\r?\n|,/)
+          .map((item) => item.trim())
+          .filter(Boolean)
+          .slice(0, 8),
+        primaryColor,
+        themeMode,
+        themeTone,
+        templateId,
+      };
+      const stockUrls = await getStockPhotoUrls(fallbackSummary, 1).catch((stockError) => {
+        console.warn('[crm/generate-sample-image] respaldo stock fallo:', stockError?.message || stockError);
+        return [];
+      });
+      imageUrl = String(stockUrls?.[0] || buildUnsplashFeaturedQueries(fallbackSummary)?.[0] || '').trim();
+      if (!imageUrl) throw imageError;
+      console.log('[crm/generate-sample-image] fallback success:', {
+        leadId: String(leadCtx.leadId || leadId || ''),
+        imageUrl: imageUrl.slice(0, 180),
+      });
+    }
     return res.json({
       success: true,
       imageUrl,
+      ...(imageWarning ? { imageWarning, fallback: true } : {}),
     });
   } catch (error) {
     console.error('[crm/generate-sample-image] Error:', error);
-    return res.status(500).json({ error: error.message || String(error) });
+    const detail = String(error?.response?.data?.error?.message || error?.message || error).trim();
+    return res.status(500).json({ error: detail || 'No se pudo generar la imagen.' });
   }
 });
 
