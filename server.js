@@ -548,6 +548,7 @@ async function generateAiSampleLogoUrl({
     const prompt = [
       'Mejora este logo para usarlo en un sitio web profesional.',
       'Mantén la identidad visual, formas, simbolos, composicion y colores principales del logo original.',
+      'No lo rehagas desde cero, no cambies la marca, no cambies el texto principal y no conviertas el logo en otro concepto.',
       'No inventes un logo nuevo. No agregues textos, slogans, marcas de agua ni elementos que no existan en la referencia.',
       'Limpia bordes, mejora nitidez, contraste y calidad. Entrega un logo centrado, cuadrado, con fondo transparente o limpio.',
       safeCompanyName ? `Negocio: ${safeCompanyName}.` : '',
@@ -581,7 +582,7 @@ async function generateAiSampleLogoUrl({
       throw new Error('Falta el nombre del negocio para crear el logo.');
     }
     const prompt = [
-      'Crea un logotipo profesional, original y comercial para una marca de negocio.',
+      'Crea un logotipo profesional, llamativo, original y comercial para una marca de negocio.',
       `Incluye el nombre exacto del negocio como texto principal: "${safeCompanyName}".`,
       'Debe ser legible como logo de sitio web, moderno, limpio, centrado y en formato cuadrado.',
       'Crea un isotipo o símbolo simple relacionado con el giro del negocio y combinalo con el nombre.',
@@ -641,7 +642,10 @@ async function generateAiSampleImageUrl({
   companyName = '',
   businessStory = '',
   objective = '',
+  keyItemsText = '',
   primaryColor = '',
+  themeMode = '',
+  themeTone = '',
   templateId = 'info',
   leadId = '',
   referenceImageUrl = '',
@@ -658,17 +662,25 @@ async function generateAiSampleImageUrl({
     ),
     String(referenceImageUrl || '').trim(),
   ].filter(Boolean))).slice(0, 3);
+  const hasReferenceImages = safeReferenceImageUrls.length > 0;
+  const safeKeyItemsText = String(keyItemsText || '').trim();
+  const safeThemeMode = String(themeMode || '').trim();
+  const safeThemeTone = String(themeTone || '').trim();
   const prompt = [
-    'Crea una imagen hero profesional, limpia y comercial para una muestra de sitio web.',
-    'Formato horizontal, sin texto, sin letras, sin palabras, sin rótulos, sin señalética legible, sin logotipos inventados y sin pantallas/mockups con texto.',
+    hasReferenceImages
+      ? 'Crea una imagen hero profesional, limpia y comercial para una muestra de sitio web.'
+      : 'Crea una imagen hero fotorealista, profesional, limpia y comercial para una muestra de sitio web.',
+    'Formato horizontal, estilo fotografía realista, sin texto, sin letras, sin palabras, sin rótulos, sin señalética legible, sin logotipos inventados y sin pantallas/mockups con texto.',
     'Debe funcionar como fondo visual de una portada web, con espacio limpio para que el sitio coloque texto encima después.',
-    safeReferenceImageUrls.length
+    hasReferenceImages
       ? `Usa ${safeReferenceImageUrls.length === 1 ? 'la imagen de referencia' : 'las imágenes de referencia'} como inspiración visual real del negocio: conserva giro, ambiente, productos, local, materiales o estilo si aparecen, pero mejora composición, luz y calidad para hero web.`
-      : '',
+      : 'No hay imágenes de referencia del cliente: crea una escena fotorealista plausible basada únicamente en el giro, productos, servicios, objetivo y estilo del negocio. Debe verse como fotografía editorial/comercial real, no ilustración ni render 3D.',
     `Negocio: ${String(companyName || 'Negocio local').trim()}.`,
     `Descripción: ${String(businessStory || 'Servicios profesionales').trim()}.`,
     objective ? `Objetivo: ${String(objective).trim()}.` : '',
+    safeKeyItemsText ? `Productos o servicios clave: ${safeKeyItemsText}.` : '',
     primaryColor ? `Usa una atmósfera visual compatible con el color ${String(primaryColor).trim()}.` : '',
+    safeThemeMode || safeThemeTone ? `Estilo visual del sitio: ${[safeThemeMode, safeThemeTone].filter(Boolean).join(' / ')}.` : '',
     `Tipo de sitio: ${String(templateId || 'info').trim()}.`,
   ].filter(Boolean).join('\n');
 
@@ -5079,7 +5091,10 @@ app.post('/api/crm/lead-business/generate-sample-image', async (req, res) => {
     companyName = '',
     businessStory = '',
     objective = '',
+    keyItemsText = '',
     primaryColor = '',
+    themeMode = '',
+    themeTone = '',
     templateId = 'info',
     referenceImageUrl = '',
     referenceImageUrls = [],
@@ -5098,7 +5113,10 @@ app.post('/api/crm/lead-business/generate-sample-image', async (req, res) => {
       companyName,
       businessStory,
       objective,
+      keyItemsText,
       primaryColor,
+      themeMode,
+      themeTone,
       templateId,
       referenceImageUrl,
       referenceImageUrls,
