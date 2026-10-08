@@ -167,11 +167,18 @@ export function createMailboxController({ service, logger = console }) {
 
     message: async (req, res) => {
       try {
-        const item = await service.getMessage({
-          empresaId: req.mailbox.empresaId,
-          correoId: req.mailbox.correoId,
-          messageId: req.params?.id,
-        });
+        const folder = String(req.query?.folder || '').toLowerCase();
+        const item = folder === 'sent'
+          ? await service.getSentMessage({
+            empresaId: req.mailbox.empresaId,
+            mailboxEmail: req.mailbox.email,
+            messageId: req.params?.id,
+          })
+          : await service.getMessage({
+            empresaId: req.mailbox.empresaId,
+            correoId: req.mailbox.correoId,
+            messageId: req.params?.id,
+          });
         return res.status(200).json({ success: true, item });
       } catch (error) {
         return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
@@ -183,8 +190,10 @@ export function createMailboxController({ service, logger = console }) {
         const item = await service.getAttachment({
           empresaId: req.mailbox.empresaId,
           correoId: req.mailbox.correoId,
+          mailboxEmail: req.mailbox.email,
           messageId: req.params?.id,
           attachmentId: req.params?.attachmentId,
+          folder: req.query?.folder,
         });
         res.setHeader('Content-Type', item.contentType || 'application/octet-stream');
         res.setHeader('Content-Disposition', contentDispositionAttachment(item.filename));
@@ -211,6 +220,7 @@ export function createMailboxController({ service, logger = console }) {
       try {
         const result = await service.send({
           empresaId: req.mailbox.empresaId,
+          correoId: req.mailbox.correoId,
           mailboxEmail: req.mailbox.email,
           to: req.body?.to,
           cc: req.body?.cc,

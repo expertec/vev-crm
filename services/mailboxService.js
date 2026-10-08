@@ -99,11 +99,22 @@ function serializeAttachment(attachment = {}) {
   return {
     id: cleanString(attachment.id || attachment.attachmentId, 120),
     filename: safeFileName(attachment.filename || attachment.name),
-    contentType: normalizeContentType(attachment.contentType || attachment.type),
+    contentType: normalizeContentType(attachment.contentType || attachment.type || attachment.mimeType),
+    type: normalizeContentType(attachment.contentType || attachment.type || attachment.mimeType),
     sizeBytes: Number(attachment.sizeBytes || attachment.size || 0) || 0,
+    size: Number(attachment.size || attachment.sizeBytes || 0) || 0,
     contentId: cleanString(attachment.contentId, 200),
     disposition: cleanString(attachment.disposition || 'attachment', 40),
+    storagePath: cleanString(attachment.storagePath, 1000),
   };
+}
+
+function sentAttachmentId({ providerMessageId = '', filename = '', contentType = '', size = 0, index = 0 } = {}) {
+  return `sent_${String(index + 1).padStart(2, '0')}_${crypto
+    .createHash('sha1')
+    .update(`${providerMessageId}:${filename}:${contentType}:${size}:${index}`)
+    .digest('hex')
+    .slice(0, 12)}`;
 }
 
 export class MailboxServiceError extends Error {
@@ -330,8 +341,11 @@ export class MailboxService {
     return { stored: mailboxEnabled, forwardTo };
   }
 
-  async getAttachment({ empresaId, correoId, messageId, attachmentId }) {
-    const message = await this.repo.getInboxMessage({ empresaId, correoId, messageId });
+  async getAttachment({ empresaId, correoId, mailboxEmail = '', messageId, attachmentId, folder = 'inbox' }) {
+    const targetFolder = String(folder || 'inbox').toLowerCase() === 'sent' ? 'sent' : 'inbox';
+    const message = targetFolder === 'sent'
+      ? await this.getSentMessageRecord({ empresaId, mailboxEmail, messageId })
+      : await this.repo.getInboxMessage({ empresaId, correoId, messageId });
     if (!message) {
       throw new MailboxServiceError('Mensaje no encontrado', {
         code: 'MAILBOX_MESSAGE_NOT_FOUND',
@@ -339,9 +353,10 @@ export class MailboxService {
       });
     }
 
-    const safeAttachmentId = cleanString(attachmentId, 120);
+    const safeAttachmentId = cleanString(attachmentId, 180);
     const attachment = (Array.isArray(message.attachments) ? message.attachments : [])
-      .find((item) => cleanString(item?.id || item?.attachmentId, 120) === safeAttachmentId);
+      .find((item) => [item?.id, item?.attachmentId, item?.filename, item?.name]
+        .some((value) => cleanString(value, 180) === safeAttachmentId));
     if (!attachment?.storagePath) {
       throw new MailboxServiceError('Adjunto no encontrado', {
         code: 'MAILBOX_ATTACHMENT_NOT_FOUND',
@@ -349,7 +364,7 @@ export class MailboxService {
       });
     }
 
-    const buffer = await this.repo.downloadInboundAttachment({ storagePath: attachment.storagePath });
+    const buffer = await this.repo.downloadAttachmentByPath({ storagePath: attachment.storagePath });
     if (!buffer) {
       throw new MailboxServiceError('Adjunto no encontrado', {
         code: 'MAILBOX_ATTACHMENT_NOT_FOUND',
@@ -361,6 +376,14 @@ export class MailboxService {
       ...serializeAttachment(attachment),
       buffer,
     };
+  }
+
+  async getSentMessageRecord({ empresaId, mailboxEmail, messageId }) {
+    const message = await this.corporate.repository.getCorporateEmailMessageById(empresaId, messageId);
+    if (!message) return null;
+    const address = normalizeEmail(mailboxEmail);
+    if (address && normalizeEmail(message.fromAlias || message.from) !== address) return null;
+    return message;
   }
 
   async setupMailbox({ adminSecret, ...params }) {
@@ -714,7 +737,7 @@ export class MailboxService {
     return this.serializeInbound({ ...message, read: true });
   }
 
-  async send({ empresaId, mailboxEmail, to, cc, bcc, subject, text, html, attachments = [] }) {
+  async send({ empresaId, correoId = '', mailboxEmail, to, cc, bcc, subject, text, html, attachments = [] }) {
     const recipientCount = uniqueEmails([
       ...(Array.isArray(to) ? to : String(to || '').split(/[,;\s]+/)),
       ...(Array.isArray(cc) ? cc : String(cc || '').split(/[,;\s]+/)),
@@ -728,7 +751,7 @@ export class MailboxService {
     }
 
     // El remitente se fuerza al correo del buzón autenticado (no arbitrario).
-    return this.corporate.sendCorporateEmail({
+    const result = await this.corporate.sendCorporateEmail({
       empresaId,
       fromAlias: mailboxEmail,
       to,
@@ -740,6 +763,72 @@ export class MailboxService {
       attachments,
       createdBy: mailboxEmail,
     });
+
+    if (result?.message?.id && Array.isArray(attachments) && attachments.length > 0) {
+      await this.persistSentAttachments({
+        empresaId,
+        correoId: cleanString(correoId, 240) || (await this.repo.findCorporateEmailByAddress(mailboxEmail))?.correoId || '',
+        messageId: result.message.id,
+        providerMessageId: result.messageId || result.message.providerMessageId || '',
+        attachments,
+      }).catch((error) => {
+        this.logger.error?.('[mailbox] no se pudieron guardar adjuntos enviados:', error?.message || error);
+      });
+    }
+
+    return result;
+  }
+
+  async persistSentAttachments({ empresaId, correoId, messageId, providerMessageId = '', attachments = [] }) {
+    const safeCorreoId = cleanString(correoId, 240);
+    if (!safeCorreoId || !messageId) return [];
+    const storedAttachments = [];
+    for (const [index, attachment] of (Array.isArray(attachments) ? attachments : []).entries()) {
+      const buffer = Buffer.isBuffer(attachment?.buffer) ? attachment.buffer : null;
+      if (!buffer?.length) continue;
+      const filename = safeFileName(attachment?.filename || attachment?.name || `adjunto-${index + 1}`);
+      const contentType = normalizeContentType(attachment?.contentType || attachment?.type || attachment?.mimetype);
+      const attachmentId = sentAttachmentId({
+        providerMessageId: providerMessageId || messageId,
+        filename,
+        contentType,
+        size: buffer.length,
+        index,
+      });
+      const saved = await this.repo.saveSentAttachment({
+        empresaId,
+        correoId: safeCorreoId,
+        messageId,
+        attachmentId,
+        filename,
+        contentType,
+        buffer,
+      });
+      storedAttachments.push({
+        id: attachmentId,
+        filename,
+        contentType,
+        type: contentType,
+        sizeBytes: buffer.length,
+        size: buffer.length,
+        disposition: 'attachment',
+        storagePath: saved.storagePath,
+      });
+    }
+    if (storedAttachments.length > 0) {
+      const current = await this.corporate.repository.getCorporateEmailMessageById(empresaId, messageId);
+      const byFilename = new Map(storedAttachments.map((item) => [item.filename, item]));
+      const nextAttachments = (Array.isArray(current?.attachments) ? current.attachments : storedAttachments).map((item) => {
+        const stored = byFilename.get(safeFileName(item?.filename || item?.name));
+        return stored ? { ...item, ...stored } : item;
+      });
+      await this.corporate.repository.createCorporateEmailMessage({
+        empresaId,
+        messageId,
+        payload: { attachments: nextAttachments },
+      });
+    }
+    return storedAttachments;
   }
 
   serializeMailingList(item = {}) {
@@ -1059,6 +1148,17 @@ export class MailboxService {
     return (Array.isArray(all) ? all : []).filter(
       (item) => normalizeEmail(item?.fromAlias) === address
     );
+  }
+
+  async getSentMessage({ empresaId, mailboxEmail, messageId }) {
+    const message = await this.getSentMessageRecord({ empresaId, mailboxEmail, messageId });
+    if (!message) {
+      throw new MailboxServiceError('Mensaje no encontrado', {
+        code: 'MAILBOX_MESSAGE_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+    return this.corporate.serializeCorporateEmailMessage(message);
   }
 
   async getContacts({ empresaId, mailboxEmail, limit = 200 }) {

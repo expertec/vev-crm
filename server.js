@@ -16,8 +16,11 @@ import axios from 'axios';
 import sharp from 'sharp';
 import { createHash } from 'node:crypto';
 import { Timestamp } from 'firebase-admin/firestore';
+import CapiParamBuilder from 'capi-param-builder-nodejs';
 
 dotenv.config();
+
+const { ParamBuilder: MetaParamBuilder, PII_DATA_TYPE: META_PII_DATA_TYPE } = CapiParamBuilder;
 
 // ================ FFmpeg ================
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
@@ -1985,6 +1988,80 @@ function hashSha256(value = '') {
   return createHash('sha256').update(String(value)).digest('hex');
 }
 
+function parseMetaParamBuilderDomains() {
+  const raw = [
+    process.env.META_CAPI_PARAM_BUILDER_DOMAINS,
+    process.env.SAMPLE_FORM_BASE_URL,
+    process.env.PUBLIC_SAMPLE_FORM_URL,
+    process.env.NEXT_PUBLIC_SITE_URL,
+    process.env.SITE_PUBLIC_BASE_URL,
+    process.env.SAMPLE_SITE_BASE_URL,
+  ].filter(Boolean).join(',');
+
+  return Array.from(new Set(
+    String(raw || '')
+      .split(/[,\s;]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => {
+        try {
+          return new URL(item).hostname;
+        } catch {
+          return item.replace(/^https?:\/\//i, '').split('/')[0].split(':')[0];
+        }
+      })
+      .filter(Boolean)
+  ));
+}
+
+const META_PARAM_BUILDER_DOMAINS = parseMetaParamBuilderDomains();
+
+function createMetaParamBuilder() {
+  return META_PARAM_BUILDER_DOMAINS.length > 0
+    ? new MetaParamBuilder(META_PARAM_BUILDER_DOMAINS)
+    : new MetaParamBuilder();
+}
+
+function buildRequestContext(req, { browser = false } = {}) {
+  if (!req) return {};
+  return {
+    ip: req.ip,
+    userAgent: req.get?.('user-agent') || '',
+    ...(browser ? { req } : {}),
+  };
+}
+
+function getMetaBuilderHashedPii(value = '', type = '') {
+  const raw = String(value || '').trim();
+  if (!raw || !type) return '';
+  try {
+    return createMetaParamBuilder().getNormalizedAndHashedPII(raw, type) || '';
+  } catch (error) {
+    console.warn('[meta-capi] Parameter Builder PII fallback:', error?.message || error);
+    return '';
+  }
+}
+
+function getMetaRequestParameters(requestContext = {}) {
+  const req = requestContext?.req || requestContext?.request || null;
+  if (!req) return {};
+
+  try {
+    const builder = createMetaParamBuilder();
+    builder.processRequestFromContext(req);
+    return {
+      fbc: builder.getFbc() || '',
+      fbp: builder.getFbp() || '',
+      clientIpAddress: builder.getClientIpAddress() || '',
+      eventSourceUrl: builder.getEventSourceUrl() || '',
+      referrerUrl: builder.getReferrerUrl() || '',
+    };
+  } catch (error) {
+    console.warn('[meta-capi] Parameter Builder request fallback:', error?.message || error);
+    return {};
+  }
+}
+
 function normalizeMetaEmail(value = '') {
   return String(value || '').trim().toLowerCase();
 }
@@ -2010,13 +2087,34 @@ function buildMetaUserData({ leadId = '', phone = '', email = '', name = '' } = 
   const normalizedEmail = normalizeMetaEmail(email);
   const { first, last } = splitPersonName(name);
 
-  if (normalizedPhone) userData.ph = [hashSha256(normalizedPhone)];
-  if (normalizedEmail) userData.em = [hashSha256(normalizedEmail)];
-  if (first) userData.fn = hashSha256(first.trim().toLowerCase());
-  if (last) userData.ln = hashSha256(last.trim().toLowerCase());
+  if (normalizedPhone) {
+    userData.ph = [
+      getMetaBuilderHashedPii(normalizedPhone, META_PII_DATA_TYPE.PHONE)
+        || hashSha256(normalizedPhone),
+    ];
+  }
+  if (normalizedEmail) {
+    userData.em = [
+      getMetaBuilderHashedPii(normalizedEmail, META_PII_DATA_TYPE.EMAIL)
+        || hashSha256(normalizedEmail),
+    ];
+  }
+  if (first) {
+    const normalizedFirst = first.trim().toLowerCase();
+    userData.fn = getMetaBuilderHashedPii(normalizedFirst, META_PII_DATA_TYPE.FIRST_NAME)
+      || hashSha256(normalizedFirst);
+  }
+  if (last) {
+    const normalizedLast = last.trim().toLowerCase();
+    userData.ln = getMetaBuilderHashedPii(normalizedLast, META_PII_DATA_TYPE.LAST_NAME)
+      || hashSha256(normalizedLast);
+  }
 
   const externalIdSeed = String(leadId || normalizedPhone || normalizedEmail).trim();
-  if (externalIdSeed) userData.external_id = hashSha256(externalIdSeed);
+  if (externalIdSeed) {
+    userData.external_id = getMetaBuilderHashedPii(externalIdSeed, META_PII_DATA_TYPE.EXTERNAL_ID)
+      || hashSha256(externalIdSeed);
+  }
 
   return userData;
 }
@@ -2132,6 +2230,10 @@ async function postMetaConversionEvent({
     return { ok: false, skipped: true, reason: 'missing-user-data' };
   }
 
+  const builderParams = getMetaRequestParameters(requestContext);
+  const clientIpAddress = builderParams.clientIpAddress || requestContext.ip || '';
+  const userAgent = requestContext.userAgent || requestContext.req?.get?.('user-agent') || requestContext.req?.headers?.['user-agent'] || '';
+
   const payload = {
     data: [
       {
@@ -2139,10 +2241,14 @@ async function postMetaConversionEvent({
         event_time: eventTime,
         event_id: eventId,
         action_source: config.actionSource,
+        ...(builderParams.eventSourceUrl ? { event_source_url: builderParams.eventSourceUrl } : {}),
+        ...(builderParams.referrerUrl ? { referrer_url: builderParams.referrerUrl } : {}),
         user_data: {
           ...userData,
-          ...(requestContext.ip ? { client_ip_address: String(requestContext.ip) } : {}),
-          ...(requestContext.userAgent ? { client_user_agent: String(requestContext.userAgent) } : {}),
+          ...(builderParams.fbc ? { fbc: builderParams.fbc } : {}),
+          ...(builderParams.fbp ? { fbp: builderParams.fbp } : {}),
+          ...(clientIpAddress ? { client_ip_address: String(clientIpAddress) } : {}),
+          ...(userAgent ? { client_user_agent: String(userAgent) } : {}),
         },
         custom_data: customData,
       },
@@ -8898,10 +9004,7 @@ app.post('/api/web/sample-submit', async (req, res) => {
       negocioId: finalNegocioId,
       summary: safeSummary,
       source: 'sample_submit',
-      requestContext: {
-        ip: req.ip,
-        userAgent: req.get('user-agent') || '',
-      },
+      requestContext: buildRequestContext(req, { browser: true }),
     }).catch((metaError) => {
       console.warn('[web/sample-submit] meta FormSubmitted:', metaError?.message || metaError);
     });
@@ -9666,10 +9769,7 @@ app.post('/api/track/link-open', async (req, res) => {
           slug,
           tokenVerified: true,
           source: 'sample_open_token',
-          requestContext: {
-            ip: req.ip,
-            userAgent: req.get('user-agent') || '',
-          },
+          requestContext: buildRequestContext(req, { browser: true }),
         }).catch((metaError) => {
           console.warn('[track/link-open] meta SampleOpened:', metaError?.message || metaError);
         });

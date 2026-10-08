@@ -8,8 +8,10 @@ function buildService() {
   const inboundMessages = [];
   const sentMessages = [];
   const inboundAttachments = [];
+  const sentAttachments = [];
   const mailingLists = new Map();
   const drafts = new Map();
+  const corporateMessages = new Map();
   const mailboxRecords = new Map([
     ['empresa-1/ventas_cliente_com', {
       id: 'ventas_cliente_com',
@@ -28,6 +30,14 @@ function buildService() {
     async saveInboundAttachment(payload) {
       inboundAttachments.push(payload);
       return { storagePath: `mailbox/test/${payload.attachmentId}` };
+    },
+    async saveSentAttachment(payload) {
+      sentAttachments.push(payload);
+      return { storagePath: `mailbox/sent/${payload.messageId}/${payload.attachmentId}` };
+    },
+    async downloadAttachmentByPath({ storagePath }) {
+      const found = sentAttachments.find((item) => `mailbox/sent/${item.messageId}/${item.attachmentId}` === storagePath);
+      return found?.buffer || null;
     },
     async saveInboundMessage(payload) {
       inboundMessages.push(payload);
@@ -84,13 +94,42 @@ function buildService() {
   };
 
   const corporateEmailService = {
+    repository: {
+      async getCorporateEmailMessageById(_empresaId, messageId) {
+        return corporateMessages.get(messageId) || null;
+      },
+      async createCorporateEmailMessage({ messageId, payload }) {
+        const next = { ...(corporateMessages.get(messageId) || { id: messageId }), ...payload };
+        corporateMessages.set(messageId, next);
+        return next;
+      },
+    },
+    serializeCorporateEmailMessage(record = {}) {
+      return record;
+    },
     async importCorporateEmailMessage(payload) {
       sentMessages.push(payload);
       return { id: `sent_${sentMessages.length}`, duplicate: false, ...payload };
     },
     async sendCorporateEmail(payload) {
       sentMessages.push(payload);
-      return { provider: 'test', ...payload };
+      const messageId = `msg_${sentMessages.length}`;
+      const message = {
+        id: messageId,
+        providerMessageId: `provider_${sentMessages.length}`,
+        fromAlias: payload.fromAlias,
+        to: payload.to,
+        cc: payload.cc,
+        bcc: payload.bcc,
+        subject: payload.subject,
+        attachments: (payload.attachments || []).map((item) => ({
+          filename: item.filename,
+          type: item.type,
+          size: item.size,
+        })),
+      };
+      corporateMessages.set(messageId, message);
+      return { provider: 'test', ...payload, messageId: message.providerMessageId, message };
     },
   };
 
@@ -103,10 +142,12 @@ function buildService() {
     }),
     inboundMessages,
     inboundAttachments,
+    sentAttachments,
     mailingLists,
     drafts,
     mailboxRecords,
     sentMessages,
+    corporateMessages,
   };
 }
 
@@ -256,6 +297,45 @@ test('send rejects more recipients than mailbox limit', async () => {
     }),
     /Máximo 100 destinatarios/
   );
+});
+
+test('send stores sent attachment bytes and exposes them for download', async () => {
+  const { service, sentAttachments, corporateMessages } = buildService();
+
+  const result = await service.send({
+    empresaId: 'empresa-1',
+    correoId: 'ventas_cliente_com',
+    mailboxEmail: 'ventas@cliente.com',
+    to: ['cliente@example.com'],
+    subject: 'Archivo',
+    text: 'Adjunto archivo',
+    attachments: [{
+      filename: 'captura.png',
+      type: 'image/png',
+      size: 5,
+      buffer: Buffer.from('hello'),
+    }],
+  });
+
+  assert.equal(sentAttachments.length, 1);
+  assert.equal(sentAttachments[0].filename, 'captura.png');
+  const storedMessage = corporateMessages.get(result.message.id);
+  assert.equal(storedMessage.attachments.length, 1);
+  assert.ok(storedMessage.attachments[0].id);
+  assert.ok(storedMessage.attachments[0].storagePath);
+
+  const downloaded = await service.getAttachment({
+    empresaId: 'empresa-1',
+    correoId: 'ventas_cliente_com',
+    mailboxEmail: 'ventas@cliente.com',
+    messageId: result.message.id,
+    attachmentId: storedMessage.attachments[0].id,
+    folder: 'sent',
+  });
+
+  assert.equal(downloaded.filename, 'captura.png');
+  assert.equal(downloaded.contentType, 'image/png');
+  assert.equal(downloaded.buffer.toString(), 'hello');
 });
 
 test('changePassword verifies current password and updates mailbox credentials', async () => {

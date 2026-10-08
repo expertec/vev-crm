@@ -94,6 +94,18 @@ export function createMailboxRouter({ logger = console } = {}) {
   router.put('/mailbox/password', controller.requireAuth, controller.changePassword);
   router.get('/mailbox/inbox', controller.requireAuth, controller.inbox);
   router.get('/mailbox/sent', controller.requireAuth, controller.sent);
+  router.get('/mailbox/sent/messages/:id', controller.requireAuth, (req, _res, next) => {
+    req.query.folder = 'sent';
+    next();
+  }, controller.message);
+  router.get('/mailbox/sent/messages/:id/attachments/:attachmentId', controller.requireAuth, (req, _res, next) => {
+    req.query.folder = 'sent';
+    next();
+  }, controller.attachment);
+  router.get('/mailbox/sent/:id/attachments/:attachmentId', controller.requireAuth, (req, _res, next) => {
+    req.query.folder = 'sent';
+    next();
+  }, controller.attachment);
   router.get('/mailbox/messages/:id', controller.requireAuth, controller.message);
   router.get('/mailbox/messages/:id/attachments/:attachmentId', controller.requireAuth, controller.attachment);
   router.post('/mailbox/send', controller.requireAuth, runUpload(sendUpload.array('attachments', 3)), controller.send);

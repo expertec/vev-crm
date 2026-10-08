@@ -346,9 +346,13 @@ export class CorporateEmailService {
       createdBy: cleanString(record.createdBy || '', 200),
       attachments: Array.isArray(record.attachments)
         ? record.attachments.map((item) => ({
+          id: cleanString(item?.id || item?.attachmentId || item?.filename || '', 180),
           filename: cleanString(item?.filename || '', 180),
-          type: cleanString(item?.type || '', 160),
-          size: Number(item?.size || 0) || 0,
+          type: cleanString(item?.type || item?.contentType || '', 160),
+          contentType: cleanString(item?.contentType || item?.type || '', 160),
+          size: Number(item?.size || item?.sizeBytes || 0) || 0,
+          sizeBytes: Number(item?.sizeBytes || item?.size || 0) || 0,
+          storagePath: cleanString(item?.storagePath || '', 1000),
         })).filter((item) => item.filename)
         : [],
       createdAt: toIso(record.createdAt),
