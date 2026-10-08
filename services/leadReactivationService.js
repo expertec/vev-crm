@@ -30,6 +30,9 @@ const COUNTER_COLLECTION = 'automationCounters';
 const LOCK_COLLECTION = 'automationLocks';
 const LOCK_DOC_ID = 'leadReactivation24x7';
 const LOCK_TTL_MS = 8 * 60 * 1000;
+const FULL_SCAN_FALLBACK_ENABLED = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.AI_REACTIVATION_ALLOW_FULL_SCAN_FALLBACK || '').trim().toLowerCase()
+);
 
 // Muestra YA generada (el lead lleno el form y tiene slug): reenvia el sitio.
 const SAMPLE_READY_VARIANTS = [
@@ -1002,6 +1005,14 @@ async function loadLeadsForWindow(db, window, { limit = 0 } = {}) {
       leads: snap.docs.map(serializeLead),
     };
   } catch (error) {
+    if (!FULL_SCAN_FALLBACK_ENABLED) {
+      return {
+        mode: 'query_failed_no_full_scan',
+        queryError: String(error?.message || error || ''),
+        leads: [],
+      };
+    }
+
     const scan = await collection.get();
     const filtered = scan.docs
       .map(serializeLead)
@@ -1044,6 +1055,14 @@ async function loadLeadsForAlwaysOn(db, {
       leads: rows,
     };
   } catch (error) {
+    if (!FULL_SCAN_FALLBACK_ENABLED) {
+      return {
+        mode: 'query_failed_no_full_scan',
+        queryError: String(error?.message || error || ''),
+        leads: [],
+      };
+    }
+
     const scan = await collection.get();
     const rows = scan.docs
       .map(serializeLead)
@@ -1537,6 +1556,34 @@ export async function runLeadReactivationAutomationTick({
       now,
       dbOverride: db,
     });
+
+    if (result?.query?.queryError) {
+      await persistAutomationStatus(db, settings, {
+        mode: 'always_on_tick',
+        summary: {
+          skippedReason: 'lead_query_failed',
+          query: result.query,
+          antiBan: {
+            window: windowState,
+            dailyCap: capInfo.cap,
+            dailyCapMax: capInfo.dailyCap,
+            warmupDay: capInfo.warmupDay,
+            warmupActive: capInfo.warmupActive,
+            sentTodayBefore: sentToday,
+            sentTodayAfter: sentToday,
+            runLimit,
+          },
+        },
+        error: result.query.queryError,
+      });
+      return {
+        ok: false,
+        skipped: true,
+        reason: 'lead_query_failed',
+        query: result.query,
+        settings,
+      };
+    }
 
     // Registrar lo realmente programado contra el tope diario.
     const scheduledCount = Number(result?.summary?.scheduledCount || 0);

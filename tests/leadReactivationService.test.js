@@ -6,6 +6,7 @@ import {
   evaluateLeadForAlwaysOn,
   evaluateLeadForReactivation,
   getPreviousCalendarWeekWindow,
+  runAlwaysOnLeadReactivation,
 } from '../services/leadReactivationService.js';
 
 test('calcula la semana calendario anterior respecto a 2026-05-26 en America/Monterrey', () => {
@@ -163,4 +164,48 @@ test('always-on omite leads fuera de etapas objetivo', () => {
 
   assert.equal(result.eligible, false);
   assert.equal(result.reason, 'outside_target_stage');
+});
+
+test('always-on no hace full scan cuando falla la query principal', async () => {
+  let fullScanCalled = false;
+  const failingQuery = {
+    where() {
+      return this;
+    },
+    orderBy() {
+      return this;
+    },
+    limit() {
+      return this;
+    },
+    async get() {
+      throw new Error('missing index');
+    },
+  };
+  const db = {
+    collection(name) {
+      assert.equal(name, 'leads');
+      return {
+        where() {
+          return failingQuery;
+        },
+        async get() {
+          fullScanCalled = true;
+          return { docs: [] };
+        },
+      };
+    },
+  };
+
+  const result = await runAlwaysOnLeadReactivation({
+    dbOverride: db,
+    commit: false,
+    limit: 5,
+    now: new Date('2026-05-26T18:00:00.000Z'),
+  });
+
+  assert.equal(fullScanCalled, false);
+  assert.equal(result.query.mode, 'query_failed_no_full_scan');
+  assert.match(result.query.queryError, /missing index/);
+  assert.equal(result.query.loadedCount, 0);
 });
