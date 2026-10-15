@@ -135,6 +135,7 @@ import {
   restoreAllSessions as restoreWhatsAppSessions,
   setInboundHandler as setWhatsAppInboundHandler,
 } from './whatsappSessionManager.js';
+import { createMasmenuConfirmationHandler } from './services/masmenuConfirmation.mjs';
 import { handleInbound as handleWhatsAppInbound } from './whatsappCrm.js';
 import {
   createAdvancedAppsRouter,
@@ -3807,6 +3808,13 @@ app.post('/api/cliente/whatsapp/lead-stage', updateClienteWhatsAppLeadStage);
 // por key, ligada a la sesión Baileys de ese negocio. Gestionada desde SuperAdmin.
 app.post('/api/wa/v1/messages', sendWhatsAppApiMessage);
 app.get('/api/wa/v1/status', getWhatsAppApiStatus);
+
+// +Menu confirmation: authenticated server-to-server, primary WhatsApp session.
+app.post('/api/integrations/masmenu/confirm-menu', createMasmenuConfirmationHandler({
+  db,
+  isConnected: () => Boolean(getWhatsAppSock()),
+  sendText: (phone, text) => sendMessageToLead(phone, text),
+}));
 
 // ============== 🆕 APPS AVANZADAS + HOTEL PREMIUM ==============
 app.use('/api', createAdvancedAppsRouter());
