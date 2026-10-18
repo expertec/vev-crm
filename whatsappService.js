@@ -1311,7 +1311,9 @@ export async function connectToWhatsApp() {
       }
 
       const incomingMessages = Array.isArray(messages) ? messages : [];
-      let messagesToProcess = incomingMessages;
+      // Authentication codes never enter lead histories or business automations.
+      let messagesToProcess = incomingMessages.filter(message => !(message?.key?.fromMe
+        && /^MASMENUAUTH_[A-F0-9]{32}$/.test(message?.key?.id || '')));
       if (messagesToProcess.length === 0) return;
 
       if (type === 'append' || type === 'prepend') {

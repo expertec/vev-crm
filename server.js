@@ -135,6 +135,8 @@ import {
   restoreAllSessions as restoreWhatsAppSessions,
   setInboundHandler as setWhatsAppInboundHandler,
 } from './whatsappSessionManager.js';
+import { createMasmenuAuthOtpHandler } from './services/masmenuAuthOtp.mjs';
+import { createMasmenuPaidAccessHandler } from './services/masmenuPaidAccess.mjs';
 import { createMasmenuConfirmationHandler } from './services/masmenuConfirmation.mjs';
 import { handleInbound as handleWhatsAppInbound } from './whatsappCrm.js';
 import {
@@ -3736,6 +3738,12 @@ app.get('/api/subscription/redirect-cancel', subscriptionRedirectCancel);
 /**
  * 3) Body parsers para el resto de rutas
  */
+// Supabase Auth hook: signature verification requires raw bytes before JSON middleware.
+app.post('/api/integrations/masmenu/auth-otp',
+  bodyParser.raw({ type: 'application/json', limit: '20kb' }),
+  createMasmenuAuthOtpHandler({ db, getSocket: getWhatsAppSock }),
+);
+
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(
   bodyParser.urlencoded({ extended: true, limit: '50mb' })
@@ -3808,6 +3816,11 @@ app.post('/api/cliente/whatsapp/lead-stage', updateClienteWhatsAppLeadStage);
 // por key, ligada a la sesión Baileys de ese negocio. Gestionada desde SuperAdmin.
 app.post('/api/wa/v1/messages', sendWhatsAppApiMessage);
 app.get('/api/wa/v1/status', getWhatsAppApiStatus);
+
+// +Menu: credentials only after verified payment, private server-to-server API.
+app.post('/api/integrations/masmenu/paid-access',
+  createMasmenuPaidAccessHandler({ db, getSocket: getWhatsAppSock }),
+);
 
 // +Menu confirmation: authenticated server-to-server, primary WhatsApp session.
 app.post('/api/integrations/masmenu/confirm-menu', createMasmenuConfirmationHandler({
