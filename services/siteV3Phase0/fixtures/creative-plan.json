@@ -1,0 +1,82 @@
+{
+  "planVersion": "1.0.0",
+  "expectedInputRevision": 1,
+  "businessCategory": "hardware_store",
+  "functionalFamily": "ecommerce",
+  "primaryOfferRef": "offer-cemento",
+  "primaryGoal": "quote",
+  "styleId": "trade-clean",
+  "heroVariant": "product-focus",
+  "density": "compact",
+  "sections": [
+    {
+      "id": "inicio",
+      "type": "hero",
+      "variant": "product-focus",
+      "contentRefs": [
+        "business",
+        "offer-cemento"
+      ],
+      "actionIds": [
+        "wa-quote"
+      ]
+    },
+    {
+      "id": "categorias",
+      "type": "categories",
+      "variant": "image-tiles",
+      "contentRefs": [
+        "cat-materiales"
+      ],
+      "actionIds": []
+    },
+    {
+      "id": "productos",
+      "type": "offerings",
+      "variant": "catalog-grid",
+      "contentRefs": [
+        "offer-cemento"
+      ],
+      "actionIds": [
+        "wa-product"
+      ]
+    },
+    {
+      "id": "contacto",
+      "type": "contact",
+      "variant": "compact",
+      "contentRefs": [
+        "business"
+      ],
+      "actionIds": [
+        "wa-quote"
+      ]
+    }
+  ],
+  "omittedSections": [
+    {
+      "type": "testimonials",
+      "reason": "missing_evidence"
+    },
+    {
+      "type": "trust",
+      "reason": "missing_evidence"
+    }
+  ],
+  "imageRequests": [
+    {
+      "requestId": "img-hero-1",
+      "purpose": "hero",
+      "subjectRef": "cat-materiales",
+      "priority": "optional",
+      "assetIdToReplace": null
+    }
+  ],
+  "primaryActionId": "wa-quote",
+  "secondaryActionId": null,
+  "missingFactKeys": [
+    "contact.whatsapp",
+    "address",
+    "hours"
+  ]
+}

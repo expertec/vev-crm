@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:negociosweb:CommercialEventV1",
+  "type": "object",
+  "properties": {
+    "eventVersion": {
+      "const": "1.0.0"
+    },
+    "eventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "negocioId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "sampleId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "revisionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "designVersion": {
+      "const": "v3"
+    },
+    "variantId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "eventName": {
+      "enum": [
+        "sample_page_viewed",
+        "whatsapp_cta_clicked",
+        "whatsapp_navigation_attempted",
+        "catalog_explored",
+        "sample_approved",
+        "payment_confirmed",
+        "message_sent_confirmed",
+        "conversation_confirmed"
+      ]
+    },
+    "ctaLocation": {
+      "anyOf": [
+        {
+          "enum": [
+            "hero",
+            "float",
+            "mobile_bar",
+            "product",
+            "service",
+            "cart",
+            "contact"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "actionId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "productId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "serviceId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "audience": {
+      "enum": [
+        "sample_owner",
+        "business_visitor"
+      ]
+    },
+    "pageViewId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "consentState": {
+      "enum": [
+        "analytics_allowed",
+        "essential_only",
+        "denied"
+      ]
+    }
+  },
+  "required": [
+    "eventVersion",
+    "eventId",
+    "negocioId",
+    "sampleId",
+    "revisionId",
+    "designVersion",
+    "variantId",
+    "eventName",
+    "ctaLocation",
+    "actionId",
+    "productId",
+    "serviceId",
+    "timestamp",
+    "audience",
+    "pageViewId",
+    "consentState"
+  ],
+  "additionalProperties": false
+}

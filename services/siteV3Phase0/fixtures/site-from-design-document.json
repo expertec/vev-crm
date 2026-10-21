@@ -1,0 +1,184 @@
+{
+  "contractVersion": "3.0.0",
+  "designVersion": "v3",
+  "rendererVersion": "3.0.0",
+  "negocioId": "biz_demo_hardware",
+  "revisionId": "rev_demo_001",
+  "revision": 1,
+  "templateId": "ecommerce",
+  "business": {
+    "id": "business",
+    "name": "Ferretería Piloto — demostración",
+    "category": "hardware_store",
+    "locale": "es-MX",
+    "description": "Catálogo ilustrativo para evaluar la experiencia."
+  },
+  "theme": {
+    "styleId": "trade-clean",
+    "density": "compact",
+    "primaryColor": "#B94B19",
+    "surfaceMode": "light",
+    "headingFont": "Sora",
+    "bodyFont": "Manrope"
+  },
+  "contact": {
+    "whatsapp": {
+      "state": "missing",
+      "e164": null,
+      "waDigits": null
+    },
+    "email": null,
+    "address": null,
+    "hours": [],
+    "socialLinks": []
+  },
+  "capabilities": {
+    "catalog": true,
+    "whatsappLink": false,
+    "cartToWhatsApp": false,
+    "appointmentRequest": false,
+    "hotelCheckout": false,
+    "leadForm": false
+  },
+  "content": {
+    "offerings": [
+      {
+        "id": "offer-cemento",
+        "kind": "product",
+        "title": "Cemento — ejemplo de categoría de producto",
+        "description": "Referencia ilustrativa; marca, presentación y disponibilidad se confirman con el negocio.",
+        "categoryIds": [
+          "cat-materiales"
+        ],
+        "price": null,
+        "mediaIds": [],
+        "actionIds": [
+          "wa-product"
+        ]
+      }
+    ],
+    "categories": [
+      {
+        "id": "cat-materiales",
+        "label": "Materiales — ejemplo",
+        "mediaId": null
+      }
+    ],
+    "trustItems": [],
+    "testimonials": [],
+    "faqs": [],
+    "projects": []
+  },
+  "media": [],
+  "actions": [
+    {
+      "id": "wa-quote",
+      "type": "whatsapp",
+      "label": "Cotizar por WhatsApp",
+      "intent": "quote",
+      "contactRef": "contact.whatsapp",
+      "messageTemplate": "Hola, vi su página y me gustaría cotizar materiales.",
+      "enabled": false,
+      "disabledReason": "missing_contact"
+    },
+    {
+      "id": "wa-product",
+      "type": "whatsapp",
+      "label": "Cotizar producto",
+      "intent": "quote",
+      "contactRef": "contact.whatsapp",
+      "messageTemplate": "Hola, vi su página y me gustaría cotizar: {{product.title}}.",
+      "enabled": false,
+      "disabledReason": "missing_contact"
+    }
+  ],
+  "sections": [
+    {
+      "id": "inicio",
+      "type": "hero",
+      "variant": "text-first",
+      "enabled": true,
+      "contentRefs": [
+        "business"
+      ],
+      "mediaIds": [],
+      "actionIds": [
+        "wa-quote"
+      ],
+      "copy": {
+        "title": "Explora materiales para tu proyecto",
+        "subtitle": "Muestra de catálogo de ferretería; contenido pendiente de validar con el propietario."
+      }
+    },
+    {
+      "id": "categorias",
+      "type": "categories",
+      "variant": "compact-list",
+      "enabled": true,
+      "contentRefs": [
+        "cat-materiales"
+      ],
+      "mediaIds": [],
+      "actionIds": [],
+      "copy": {
+        "title": "Explora por categoría"
+      }
+    },
+    {
+      "id": "productos",
+      "type": "offerings",
+      "variant": "catalog-grid",
+      "enabled": true,
+      "contentRefs": [
+        "offer-cemento"
+      ],
+      "mediaIds": [],
+      "actionIds": [
+        "wa-product"
+      ],
+      "copy": {
+        "title": "Productos de ejemplo"
+      }
+    },
+    {
+      "id": "contacto",
+      "type": "contact",
+      "variant": "compact",
+      "enabled": true,
+      "contentRefs": [
+        "business"
+      ],
+      "mediaIds": [],
+      "actionIds": [
+        "wa-quote"
+      ],
+      "copy": {
+        "title": "Contacto",
+        "body": "Los datos comerciales se incorporan al configurar esta muestra."
+      }
+    }
+  ],
+  "navigation": {
+    "logoAssetId": null,
+    "items": [
+      {
+        "label": "Categorías",
+        "sectionId": "categorias"
+      },
+      {
+        "label": "Productos",
+        "sectionId": "productos"
+      },
+      {
+        "label": "Contacto",
+        "sectionId": "contacto"
+      }
+    ]
+  },
+  "seo": {
+    "title": "Ferretería Piloto — muestra",
+    "description": "Demostración privada de una composición comercial para ferretería.",
+    "indexing": "sample_noindex",
+    "ogAssetId": null
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "briefVersion": "1.0.0",
+  "expectedInputRevision": 0,
+  "business": {
+    "name": "Ferretería Piloto — demostración",
+    "description": "Catálogo ilustrativo para evaluar la experiencia.",
+    "declaredCategory": "hardware_store",
+    "locale": "es-MX"
+  },
+  "goal": "quote",
+  "offerings": [
+    {
+      "id": "offer-cemento",
+      "kind": "product",
+      "title": "Cemento — ejemplo de categoría de producto",
+      "description": "Referencia ilustrativa; marca, presentación y disponibilidad se confirman con el negocio.",
+      "categoryIds": [
+        "cat-materiales"
+      ],
+      "price": null,
+      "mediaIds": []
+    }
+  ],
+  "contactDraft": {
+    "country": null,
+    "phone": null,
+    "email": null,
+    "address": null
+  },
+  "assetIds": [],
+  "facts": [
+    {
+      "id": "fact-cat-materiales",
+      "subjectRef": "cat-materiales",
+      "key": "category",
+      "value": {
+        "label": "Materiales — ejemplo"
+      },
+      "origin": "owner_declared"
+    }
+  ]
+}

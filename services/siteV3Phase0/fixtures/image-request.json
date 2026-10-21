@@ -1,0 +1,39 @@
+{
+  "imageRequestVersion": "1.0.0",
+  "requestId": "img-hero-1",
+  "negocioId": "biz_demo_hardware",
+  "sampleId": "sample_demo_001",
+  "expectedInputRevision": 1,
+  "targetRevisionId": "draft_demo_001",
+  "purpose": "hero",
+  "subjectRef": "cat-materiales",
+  "depiction": "illustrative",
+  "brief": {
+    "businessCategory": "hardware_store",
+    "subject": "Materiales genéricos de construcción sin marca",
+    "visualObjective": "Presentar la categoría y facilitar la exploración del catálogo",
+    "photographicStyle": "editorial natural",
+    "composition": "materiales en primer plano, fondo ambiental abstracto",
+    "lighting": "luz lateral suave",
+    "palette": [
+      "gris material",
+      "arena",
+      "acento terracota"
+    ],
+    "aspectRatio": "4:3",
+    "focalPoint": {
+      "x": 0.65,
+      "y": 0.5
+    },
+    "textSafeArea": null,
+    "restrictions": [
+      "sin texto",
+      "sin logos",
+      "sin marcas",
+      "sin personas",
+      "no representar instalaciones reales del negocio"
+    ]
+  },
+  "budgetReservationId": "budget_demo_001",
+  "idempotencyKey": "sample_demo_001:1:hero:img-hero-1"
+}

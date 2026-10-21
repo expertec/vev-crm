@@ -1,0 +1,18 @@
+{
+  "eventVersion": "1.0.0",
+  "eventId": "evt_demo_click_001",
+  "negocioId": "biz_demo_hardware",
+  "sampleId": "sample_demo_001",
+  "revisionId": "rev_demo_002",
+  "designVersion": "v3",
+  "variantId": "hardware-trade-A",
+  "eventName": "whatsapp_cta_clicked",
+  "ctaLocation": "product",
+  "actionId": "wa-product",
+  "productId": "offer-cemento",
+  "serviceId": null,
+  "timestamp": "2026-10-21T18:00:00.000Z",
+  "audience": "sample_owner",
+  "pageViewId": "view_demo_001",
+  "consentState": "analytics_allowed"
+}

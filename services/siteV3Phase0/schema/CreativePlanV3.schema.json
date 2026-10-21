@@ -1,0 +1,305 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:negociosweb:CreativePlanV3",
+  "type": "object",
+  "properties": {
+    "planVersion": {
+      "const": "1.0.0"
+    },
+    "expectedInputRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "businessCategory": {
+      "enum": [
+        "hardware_store",
+        "restaurant",
+        "beauty_salon",
+        "law_firm",
+        "dental_clinic",
+        "hotel",
+        "repair_shop",
+        "retail_store",
+        "construction",
+        "general"
+      ]
+    },
+    "functionalFamily": {
+      "enum": [
+        "info",
+        "ecommerce",
+        "booking"
+      ]
+    },
+    "primaryOfferRef": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "primaryGoal": {
+      "enum": [
+        "quote",
+        "inquiry",
+        "order_request",
+        "appointment_request",
+        "availability_inquiry"
+      ]
+    },
+    "styleId": {
+      "enum": [
+        "trade-clean",
+        "warm-local",
+        "professional-calm",
+        "editorial-stay"
+      ]
+    },
+    "heroVariant": {
+      "enum": [
+        "product-focus",
+        "split-portrait",
+        "editorial-landscape",
+        "text-first"
+      ]
+    },
+    "density": {
+      "enum": [
+        "compact",
+        "balanced",
+        "rich"
+      ]
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "type": {
+            "enum": [
+              "hero",
+              "categories",
+              "offerings",
+              "projects",
+              "process",
+              "gallery",
+              "trust",
+              "testimonials",
+              "faq",
+              "contact",
+              "finalCta",
+              "hotelBooking"
+            ]
+          },
+          "variant": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "contentRefs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            "maxItems": 100,
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "actionIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            "maxItems": 3,
+            "minItems": 0,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "variant",
+          "contentRefs",
+          "actionIds"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 9,
+      "minItems": 2
+    },
+    "omittedSections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "enum": [
+              "hero",
+              "categories",
+              "offerings",
+              "projects",
+              "process",
+              "gallery",
+              "trust",
+              "testimonials",
+              "faq",
+              "contact",
+              "finalCta",
+              "hotelBooking"
+            ]
+          },
+          "reason": {
+            "enum": [
+              "missing_evidence",
+              "not_relevant",
+              "capability_unavailable",
+              "content_budget",
+              "user_hidden"
+            ]
+          }
+        },
+        "required": [
+          "type",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 16,
+      "minItems": 0
+    },
+    "imageRequests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+          },
+          "purpose": {
+            "enum": [
+              "hero",
+              "product",
+              "category",
+              "context",
+              "service",
+              "environment",
+              "decorative"
+            ]
+          },
+          "subjectRef": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "priority": {
+            "enum": [
+              "required",
+              "optional"
+            ]
+          },
+          "assetIdToReplace": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "requestId",
+          "purpose",
+          "subjectRef",
+          "priority",
+          "assetIdToReplace"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 4,
+      "minItems": 0
+    },
+    "primaryActionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "secondaryActionId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "missingFactKeys": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "maxItems": 40,
+      "minItems": 0,
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "planVersion",
+    "expectedInputRevision",
+    "businessCategory",
+    "functionalFamily",
+    "primaryOfferRef",
+    "primaryGoal",
+    "styleId",
+    "heroVariant",
+    "density",
+    "sections",
+    "omittedSections",
+    "imageRequests",
+    "primaryActionId",
+    "secondaryActionId",
+    "missingFactKeys"
+  ],
+  "additionalProperties": false
+}

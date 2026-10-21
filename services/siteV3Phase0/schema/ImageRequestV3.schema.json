@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:negociosweb:ImageRequestV3",
+  "type": "object",
+  "properties": {
+    "imageRequestVersion": {
+      "const": "1.0.0"
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "negocioId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "sampleId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "expectedInputRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "targetRevisionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "purpose": {
+      "enum": [
+        "hero",
+        "product",
+        "category",
+        "context",
+        "service",
+        "environment",
+        "decorative"
+      ]
+    },
+    "subjectRef": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "depiction": {
+      "enum": [
+        "illustrative",
+        "decorative"
+      ]
+    },
+    "brief": {
+      "type": "object",
+      "properties": {
+        "businessCategory": {
+          "enum": [
+            "hardware_store",
+            "restaurant",
+            "beauty_salon",
+            "law_firm",
+            "dental_clinic",
+            "hotel",
+            "repair_shop",
+            "retail_store",
+            "construction",
+            "general"
+          ]
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "visualObjective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "photographicStyle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "composition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "lighting": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "palette": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "maxItems": 8,
+          "minItems": 0
+        },
+        "aspectRatio": {
+          "enum": [
+            "1:1",
+            "4:3",
+            "3:2",
+            "16:9",
+            "3:4"
+          ]
+        },
+        "focalPoint": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "y": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ],
+          "additionalProperties": false
+        },
+        "textSafeArea": {
+          "anyOf": [
+            {
+              "enum": [
+                "left",
+                "right",
+                "top",
+                "bottom"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "restrictions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "maxItems": 20,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "businessCategory",
+        "subject",
+        "visualObjective",
+        "photographicStyle",
+        "composition",
+        "lighting",
+        "palette",
+        "aspectRatio",
+        "focalPoint",
+        "textSafeArea",
+        "restrictions"
+      ],
+      "additionalProperties": false
+    },
+    "budgetReservationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    }
+  },
+  "required": [
+    "imageRequestVersion",
+    "requestId",
+    "negocioId",
+    "sampleId",
+    "expectedInputRevision",
+    "targetRevisionId",
+    "purpose",
+    "subjectRef",
+    "depiction",
+    "brief",
+    "budgetReservationId",
+    "idempotencyKey"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:negociosweb:BusinessBriefV3",
+  "type": "object",
+  "properties": {
+    "briefVersion": {
+      "const": "1.0.0"
+    },
+    "expectedInputRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "business": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "description": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 3000
+        },
+        "declaredCategory": {
+          "enum": [
+            "hardware_store",
+            "restaurant",
+            "beauty_salon",
+            "law_firm",
+            "dental_clinic",
+            "hotel",
+            "repair_shop",
+            "retail_store",
+            "construction",
+            "general"
+          ]
+        },
+        "locale": {
+          "const": "es-MX"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "locale"
+      ],
+      "additionalProperties": false
+    },
+    "goal": {
+      "enum": [
+        "quote",
+        "inquiry",
+        "order_request",
+        "appointment_request",
+        "availability_inquiry"
+      ]
+    },
+    "offerings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+          },
+          "kind": {
+            "enum": [
+              "product",
+              "service"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "description": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 1200
+          },
+          "categoryIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            "maxItems": 100,
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "amountMinor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "currency": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 3,
+                    "pattern": "^[A-Z]{3}$"
+                  }
+                },
+                "required": [
+                  "amountMinor",
+                  "currency"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mediaIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            "maxItems": 100,
+            "minItems": 0,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "description",
+          "categoryIds",
+          "price",
+          "mediaIds"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 100,
+      "minItems": 0
+    },
+    "contactDraft": {
+      "type": "object",
+      "properties": {
+        "country": {
+          "anyOf": [
+            {
+              "enum": [
+                "MX",
+                "US",
+                "CA",
+                "ES",
+                "CO",
+                "AR",
+                "CL",
+                "PE"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phone": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 40
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "email": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 254
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "address": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "country",
+        "phone",
+        "email",
+        "address"
+      ],
+      "additionalProperties": false
+    },
+    "assetIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 120,
+        "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+      },
+      "maxItems": 12,
+      "minItems": 0,
+      "uniqueItems": true
+    },
+    "facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+          },
+          "subjectRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+          },
+          "key": {
+            "enum": [
+              "name",
+              "description",
+              "offering",
+              "category",
+              "price",
+              "whatsapp",
+              "email",
+              "address",
+              "hours",
+              "testimonial",
+              "certification",
+              "guarantee",
+              "delivery",
+              "stock",
+              "payment",
+              "project",
+              "process",
+              "faq"
+            ]
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 3000
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "number",
+                "minimum": -1000000000000,
+                "maximum": 1000000000000
+              },
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "amountMinor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "currency": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 3,
+                    "pattern": "^[A-Z]{3}$"
+                  }
+                },
+                "required": [
+                  "amountMinor",
+                  "currency"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "product",
+                      "service"
+                    ]
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 1200
+                  },
+                  "categoryIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120,
+                      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+                    },
+                    "maxItems": 100,
+                    "minItems": 0,
+                    "uniqueItems": true
+                  }
+                },
+                "required": [
+                  "kind",
+                  "title",
+                  "description",
+                  "categoryIds"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  }
+                },
+                "required": [
+                  "label"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "country": {
+                    "enum": [
+                      "MX",
+                      "US",
+                      "CA",
+                      "ES",
+                      "CO",
+                      "AR",
+                      "CL",
+                      "PE"
+                    ]
+                  },
+                  "phone": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40
+                  }
+                },
+                "required": [
+                  "country",
+                  "phone"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "days": {
+                      "type": "array",
+                      "items": {
+                        "enum": [
+                          "mon",
+                          "tue",
+                          "wed",
+                          "thu",
+                          "fri",
+                          "sat",
+                          "sun"
+                        ]
+                      },
+                      "maxItems": 7,
+                      "minItems": 1,
+                      "uniqueItems": true
+                    },
+                    "opens": {
+                      "type": "string",
+                      "minLength": 5,
+                      "maxLength": 5,
+                      "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                    },
+                    "closes": {
+                      "type": "string",
+                      "minLength": 5,
+                      "maxLength": 5,
+                      "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                    }
+                  },
+                  "required": [
+                    "days",
+                    "opens",
+                    "closes"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 14,
+                "minItems": 0
+              }
+            ]
+          },
+          "origin": {
+            "enum": [
+              "owner_declared",
+              "legacy_unverified"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "subjectRef",
+          "key",
+          "value",
+          "origin"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 300,
+      "minItems": 0
+    },
+    "requestedBrand": {
+      "type": "object",
+      "properties": {
+        "logoAssetId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "primaryColor": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "headingFont": {
+          "enum": [
+            "Sora",
+            "Manrope",
+            "Inter"
+          ]
+        },
+        "bodyFont": {
+          "enum": [
+            "Sora",
+            "Manrope",
+            "Inter"
+          ]
+        }
+      },
+      "required": [
+        "logoAssetId",
+        "primaryColor",
+        "headingFont",
+        "bodyFont"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "briefVersion",
+    "expectedInputRevision",
+    "business",
+    "goal",
+    "offerings",
+    "contactDraft",
+    "assetIds",
+    "facts"
+  ],
+  "additionalProperties": false
+}

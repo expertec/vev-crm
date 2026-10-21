@@ -1,0 +1,1192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:negociosweb:SiteSchemaV3",
+  "type": "object",
+  "properties": {
+    "contractVersion": {
+      "const": "3.0.0"
+    },
+    "designVersion": {
+      "const": "v3"
+    },
+    "rendererVersion": {
+      "const": "3.0.0"
+    },
+    "negocioId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "revisionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "templateId": {
+      "enum": [
+        "info",
+        "ecommerce",
+        "booking"
+      ]
+    },
+    "business": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "const": "business"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "category": {
+          "enum": [
+            "hardware_store",
+            "restaurant",
+            "beauty_salon",
+            "law_firm",
+            "dental_clinic",
+            "hotel",
+            "repair_shop",
+            "retail_store",
+            "construction",
+            "general"
+          ]
+        },
+        "locale": {
+          "const": "es-MX"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 3000
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "category",
+        "locale",
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "theme": {
+      "type": "object",
+      "properties": {
+        "styleId": {
+          "enum": [
+            "trade-clean",
+            "warm-local",
+            "professional-calm",
+            "editorial-stay"
+          ]
+        },
+        "density": {
+          "enum": [
+            "compact",
+            "balanced",
+            "rich"
+          ]
+        },
+        "primaryColor": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "surfaceMode": {
+          "enum": [
+            "light",
+            "dark"
+          ]
+        },
+        "headingFont": {
+          "enum": [
+            "Sora",
+            "Manrope",
+            "Inter"
+          ]
+        },
+        "bodyFont": {
+          "enum": [
+            "Sora",
+            "Manrope",
+            "Inter"
+          ]
+        }
+      },
+      "required": [
+        "styleId",
+        "density",
+        "primaryColor",
+        "surfaceMode",
+        "headingFont",
+        "bodyFont"
+      ],
+      "additionalProperties": false
+    },
+    "contact": {
+      "type": "object",
+      "properties": {
+        "whatsapp": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "enum": [
+                "configured",
+                "missing",
+                "invalid"
+              ]
+            },
+            "e164": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 9,
+                  "maxLength": 16,
+                  "pattern": "^\\+[1-9][0-9]{7,14}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "waDigits": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 8,
+                  "maxLength": 15,
+                  "pattern": "^[1-9][0-9]{7,14}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "e164",
+            "waDigits"
+          ],
+          "additionalProperties": false
+        },
+        "email": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 254
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "address": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "sourceFactId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+                }
+              },
+              "required": [
+                "text",
+                "sourceFactId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hours": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "days": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "mon",
+                    "tue",
+                    "wed",
+                    "thu",
+                    "fri",
+                    "sat",
+                    "sun"
+                  ]
+                },
+                "maxItems": 7,
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "opens": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 5,
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+              },
+              "closes": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 5,
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+              },
+              "sourceFactId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              }
+            },
+            "required": [
+              "days",
+              "opens",
+              "closes",
+              "sourceFactId"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 14,
+          "minItems": 0
+        },
+        "socialLinks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "platform": {
+                "enum": [
+                  "facebook",
+                  "instagram",
+                  "tiktok",
+                  "youtube",
+                  "linkedin"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "pattern": "^https://"
+              },
+              "sourceFactId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              }
+            },
+            "required": [
+              "platform",
+              "url",
+              "sourceFactId"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 8,
+          "minItems": 0
+        }
+      },
+      "required": [
+        "whatsapp",
+        "email",
+        "address",
+        "hours",
+        "socialLinks"
+      ],
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "catalog": {
+          "type": "boolean"
+        },
+        "whatsappLink": {
+          "type": "boolean"
+        },
+        "cartToWhatsApp": {
+          "type": "boolean"
+        },
+        "appointmentRequest": {
+          "type": "boolean"
+        },
+        "hotelCheckout": {
+          "type": "boolean"
+        },
+        "leadForm": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "catalog",
+        "whatsappLink",
+        "cartToWhatsApp",
+        "appointmentRequest",
+        "hotelCheckout",
+        "leadForm"
+      ],
+      "additionalProperties": false
+    },
+    "content": {
+      "type": "object",
+      "properties": {
+        "offerings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              },
+              "kind": {
+                "enum": [
+                  "product",
+                  "service"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "description": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 1200
+              },
+              "categoryIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+                },
+                "maxItems": 100,
+                "minItems": 0,
+                "uniqueItems": true
+              },
+              "price": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "amountMinor": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "currency": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 3,
+                        "pattern": "^[A-Z]{3}$"
+                      },
+                      "sourceFactId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 120,
+                        "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+                      }
+                    },
+                    "required": [
+                      "amountMinor",
+                      "currency",
+                      "sourceFactId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "mediaIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+                },
+                "maxItems": 100,
+                "minItems": 0,
+                "uniqueItems": true
+              },
+              "actionIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+                },
+                "maxItems": 3,
+                "minItems": 0,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "title",
+              "description",
+              "categoryIds",
+              "price",
+              "mediaIds",
+              "actionIds"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100,
+          "minItems": 0
+        },
+        "categories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "mediaId": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120,
+                    "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "mediaId"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 30,
+          "minItems": 0
+        },
+        "trustItems": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "factId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              },
+              "iconId": {
+                "enum": [
+                  "check",
+                  "location",
+                  "shield",
+                  "clock"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "factId",
+              "iconId"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 20,
+          "minItems": 0
+        },
+        "testimonials": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1200
+              },
+              "authorLabel": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "evidenceId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              }
+            },
+            "required": [
+              "id",
+              "text",
+              "authorLabel",
+              "evidenceId"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 20,
+          "minItems": 0
+        },
+        "faqs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              },
+              "question": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "answer": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1200
+              },
+              "factIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+                },
+                "maxItems": 100,
+                "minItems": 0,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "id",
+              "question",
+              "answer",
+              "factIds"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 40,
+          "minItems": 0
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "description": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 1200
+              },
+              "mediaIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+                },
+                "maxItems": 100,
+                "minItems": 0,
+                "uniqueItems": true
+              },
+              "factIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+                },
+                "maxItems": 100,
+                "minItems": 0,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "description",
+              "mediaIds",
+              "factIds"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 30,
+          "minItems": 0
+        }
+      },
+      "required": [
+        "offerings",
+        "categories",
+        "trustItems",
+        "testimonials",
+        "faqs",
+        "projects"
+      ],
+      "additionalProperties": false
+    },
+    "media": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+          },
+          "origin": {
+            "enum": [
+              "uploaded",
+              "stock",
+              "ai_generated"
+            ]
+          },
+          "depiction": {
+            "enum": [
+              "actual",
+              "illustrative",
+              "decorative"
+            ]
+          },
+          "alt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20000
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20000
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048,
+                  "pattern": "^https://"
+                },
+                "width": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 20000
+                },
+                "height": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 20000
+                },
+                "mime": {
+                  "enum": [
+                    "image/jpeg",
+                    "image/webp",
+                    "image/avif",
+                    "image/png"
+                  ]
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 20000000
+                }
+              },
+              "required": [
+                "url",
+                "width",
+                "height",
+                "mime",
+                "bytes"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 8,
+            "minItems": 1
+          },
+          "focalPoint": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ],
+            "additionalProperties": false
+          },
+          "crops": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "purpose": {
+                  "enum": [
+                    "hero",
+                    "product",
+                    "category",
+                    "context",
+                    "service",
+                    "environment",
+                    "decorative"
+                  ]
+                },
+                "x": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "y": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "width": {
+                  "type": "number",
+                  "minimum": 0.000001,
+                  "maximum": 1
+                },
+                "height": {
+                  "type": "number",
+                  "minimum": 0.000001,
+                  "maximum": 1
+                }
+              },
+              "required": [
+                "purpose",
+                "x",
+                "y",
+                "width",
+                "height"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 12,
+            "minItems": 0
+          }
+        },
+        "required": [
+          "id",
+          "origin",
+          "depiction",
+          "alt",
+          "width",
+          "height",
+          "variants",
+          "focalPoint",
+          "crops"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 12,
+      "minItems": 0
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+          },
+          "type": {
+            "enum": [
+              "whatsapp",
+              "anchor",
+              "phone",
+              "email",
+              "hotel_checkout",
+              "lead_form"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "intent": {
+            "enum": [
+              "quote",
+              "inquiry",
+              "order_request",
+              "appointment_request",
+              "availability_inquiry"
+            ]
+          },
+          "contactRef": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "messageTemplate": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "disabledReason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "missing_contact",
+                  "invalid_contact",
+                  "capability_unavailable"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "label",
+          "intent",
+          "contactRef",
+          "messageTemplate",
+          "enabled",
+          "disabledReason"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 30,
+      "minItems": 0
+    },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "type": {
+            "enum": [
+              "hero",
+              "categories",
+              "offerings",
+              "projects",
+              "process",
+              "gallery",
+              "trust",
+              "testimonials",
+              "faq",
+              "contact",
+              "finalCta",
+              "hotelBooking"
+            ]
+          },
+          "variant": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60
+          },
+          "contentRefs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            "maxItems": 100,
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "actionIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            "maxItems": 3,
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "mediaIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            "maxItems": 12,
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "copy": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 160
+              },
+              "subtitle": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 500
+              },
+              "body": {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 1200
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "variant",
+          "contentRefs",
+          "actionIds",
+          "enabled",
+          "mediaIds",
+          "copy"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 9,
+      "minItems": 2
+    },
+    "navigation": {
+      "type": "object",
+      "properties": {
+        "logoAssetId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 60
+              },
+              "sectionId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9-]*$"
+              }
+            },
+            "required": [
+              "label",
+              "sectionId"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 9,
+          "minItems": 0
+        }
+      },
+      "required": [
+        "logoAssetId",
+        "items"
+      ],
+      "additionalProperties": false
+    },
+    "seo": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "description": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "indexing": {
+          "enum": [
+            "sample_noindex",
+            "published"
+          ]
+        },
+        "ogAssetId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "title",
+        "description",
+        "indexing",
+        "ogAssetId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "contractVersion",
+    "designVersion",
+    "rendererVersion",
+    "negocioId",
+    "revisionId",
+    "revision",
+    "templateId",
+    "business",
+    "theme",
+    "contact",
+    "capabilities",
+    "content",
+    "media",
+    "actions",
+    "sections",
+    "navigation",
+    "seo"
+  ],
+  "additionalProperties": false
+}
