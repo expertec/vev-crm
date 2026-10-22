@@ -14,7 +14,7 @@ import dayjs from 'dayjs';
 import slugify from 'slugify';
 import axios from 'axios';
 import sharp from 'sharp';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Timestamp } from 'firebase-admin/firestore';
 import CapiParamBuilder from 'capi-param-builder-nodejs';
 
@@ -71,6 +71,7 @@ import {
   refreshLeadProfilePicture,
   refreshLeadProfilePicturesBatch,
   setWhatsappLeadConversionTracker,
+  setSampleConversationHandler,
 } from './whatsappService.js';
 
 // ================ SUSCRIPCIONES STRIPE ================
@@ -95,6 +96,7 @@ import { AI_SAMPLE_VERSION, samplePageDocument } from './services/aiSampleGenera
 import { queueAiSampleJob, runAiSampleJob, resumeAiSampleJobs } from './services/aiSampleJobs.js';
 import { canGenerateAiSample, readAiSampleUser, isAiSampleAvailable } from './services/aiSampleAccess.js';
 import { buildAiSamplePublicUrl } from './services/sampleUrls.js';
+import { createSampleConversationAgent, agentCanReply } from './services/sampleConversationAgent.js';
 
 // ================ 🆕 SISTEMA DE PIN ================
 import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
@@ -5393,6 +5395,10 @@ async function deliverAiSample(negocio) {
   if (!sampleUrl || !isAiSampleAvailable(negocio)) throw new Error('La muestra todavía no está lista.');
   const leadCtx = await resolveLeadByIdentity({ leadId: negocio.leadId, phone: negocio.leadPhone });
   if (!leadCtx?.leadRef) throw new Error('No se pudo resolver el contacto de la muestra.');
+  if (negocio.source === 'whatsapp_sample_agent') {
+    const lead = (await leadCtx.leadRef.get()).data() || {};
+    if (lead.sampleAgent?.deliveryPaused || lead.stopSequences || lead.humanControl || lead.salesBrainHumanControl || lead.archived || lead.archivedAt) throw new Error('La entrega automática fue pausada para este contacto.');
+  }
   await recordWebSalesEvent({ leadRef: leadCtx.leadRef, leadId: leadCtx.leadId, type: WEB_SALES_EVENTS.SAMPLE_GENERATED, source: 'crm', metadata: { negocioId: negocio.id, slug: negocio.slug, idempotencyKey: `sample_generated_${negocio.id}` } }).catch((error) => console.warn('[ai-sample] evento de generación:', error?.message));
   if (negocio.aiSampleLastSentHash === negocio.schema.aiPage.inputHash) return;
   await sendWhatsappFallbackMessage({
@@ -5402,10 +5408,76 @@ async function deliverAiSample(negocio) {
   const sentAt = new Date();
   await db.collection('Negocios').doc(negocio.id).set({ status: 'Web enviada', aiSampleLastSentHash: negocio.schema.aiPage.inputHash, siteSentAt: sentAt, sampleLinkSentAt: sentAt, sampleLinkSentUrl: sampleUrl, updatedAt: sentAt }, { merge: true });
   await leadCtx.leadRef.set({ sampleLinkSentAt: sentAt, sampleLinkSentUrl: sampleUrl, webLinkSentAt: sentAt, etiquetas: admin.firestore.FieldValue.arrayUnion('MuestraLista', 'WebLinkSent', 'SampleLinkSent') }, { merge: true }).catch((error) => console.warn('[ai-sample] estado del contacto:', error?.message));
+  if (negocio.source === 'whatsapp_sample_agent') {
+    await leadCtx.leadRef.update({ 'sampleAgent.enabled': false, 'sampleAgent.status': 'completed', 'sampleAgent.updatedAt': sentAt });
+  }
   await recordWebSalesEvent({ leadRef: leadCtx.leadRef, leadId: leadCtx.leadId, type: WEB_SALES_EVENTS.SAMPLE_SENT, source: 'crm', metadata: { negocioId: negocio.id, slug: negocio.slug, sampleUrl, isFunnelSample: true, idempotencyKey: `sample_sent_${negocio.id}` } }).catch((error) => console.warn('[ai-sample] evento de entrega:', error?.message));
 }
 
 const aiSampleJobOptions = () => ({ db, bucket: admin.storage().bucket(), sendReady: deliverAiSample });
+
+async function queueConversationSample({ leadRef, leadId, lead, input }) {
+  const phone = normalizePhoneDigits(lead.telefono || input.contactWhatsapp);
+  if (!phone) throw new Error('El contacto no tiene teléfono válido.');
+  const context = await resolveNegocioByIdentity({ leadId, phoneDigits: phone });
+  const current = context.negocioData || {};
+  if (current.leadId && current.leadId !== leadId) throw new Error('El negocio pertenece a otro contacto.');
+  const ref = context.negocioRef || (lead.sampleAgent?.negocioId ? db.collection('Negocios').doc(lead.sampleAgent.negocioId) : db.collection('Negocios').doc());
+  const slug = current.slug || await ensureUniqueSlug(input.companyInfo);
+  const now = new Date();
+  const patch = {
+    ...input, slug, leadId, leadPhone: phone, contactWhatsapp: phone,
+    sampleGenerator: AI_SAMPLE_VERSION, designVersion: AI_SAMPLE_VERSION,
+    businessObjective: input.businessObjective, sampleFlowType: 'funnel', suppressDefaultFollowups: true,
+    source: 'whatsapp_sample_agent', sampleSubmittedAt: now, updatedAt: now, createdAt: current.createdAt || now,
+    reusableAiAssets: (current.schema?.aiPage?.assets || []).filter((asset) => asset.visualKey).map(({ url, visualKey }) => ({ url, visualKey })).slice(0, 3),
+  };
+  await leadRef.update({ 'sampleAgent.negocioId': ref.id });
+  await ensureSampleOpenTracking({ id: ref.id, ...current, ...patch }, { slug, leadId, leadPhone: phone });
+  const queued = await queueAiSampleJob(db, ref, patch);
+  await leadRef.set({
+    briefWeb: { ...input, companyName: input.companyInfo, objective: input.businessObjective, slug },
+    sampleSubmittedAt: now, sampleLastNegocioId: ref.id,
+    sampleFlow: { enabled: true, phone, submittedAt: now, lastNegocioId: ref.id, expiresAt: new Date(now.getTime() + Math.max(1, Number(process.env.SAMPLE_WINDOW_DAYS || 14)) * 86400_000), source: 'whatsapp_sample_agent' },
+  }, { merge: true });
+  // The job is durable; the existing minute worker starts it after the acknowledgement.
+  return { negocioId: ref.id, slug, queued: queued.queued, ready: queued.ready === true, sampleUrl: buildAiSamplePublicUrl(slug) };
+}
+
+const sampleConversationAgent = createSampleConversationAgent({ db, send: sendMessageToLead, generate: queueConversationSample });
+setSampleConversationHandler(sampleConversationAgent.receive);
+
+app.post('/api/crm/lead-business/sample-agent', async (req, res) => {
+  const user = await readAiSampleUser(req, { admin, db });
+  if (!user) return res.status(401).json({ error: 'Inicia sesión para activar el asistente.' });
+  const leadId = String(req.body?.leadId || '').trim();
+  const enabled = req.body?.enabled;
+  if (!leadId || leadId.includes('/') || typeof enabled !== 'boolean') return res.status(400).json({ error: 'Faltan contacto y estado del asistente.' });
+  if (enabled && !process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'Falta configurar OPENAI_API_KEY en el servidor.' });
+  try {
+    const ref = db.collection('leads').doc(leadId);
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) throw Object.assign(new Error('Contacto no encontrado.'), { status: 404 });
+      const lead = snap.data();
+      if (!canGenerateAiSample(user, lead)) throw Object.assign(new Error('No tienes acceso a este contacto.'), { status: 403 });
+      if (enabled && !agentCanReply({ ...lead, sampleAgent: { enabled: true } })) throw Object.assign(new Error('Libera la atención humana o el bloqueo del contacto antes de activar el asistente.'), { status: 409 });
+      if (enabled && lead.sampleAgent?.status === 'generating') throw Object.assign(new Error('La muestra ya se está generando.'), { status: 409 });
+      const reset = !lead.sampleAgent || lead.sampleAgent.status === 'completed';
+      tx.update(ref, {
+        ...(reset ? { sampleAgent: { enabled, version: randomUUID(), status: enabled ? 'collecting' : 'paused', history: [], images: [], brief: {}, confirmationHash: '', updatedAt: new Date() } } : {
+          'sampleAgent.version': randomUUID(),
+          'sampleAgent.enabled': enabled, 'sampleAgent.status': enabled ? 'collecting' : 'paused', 'sampleAgent.updatedAt': new Date(), 'sampleAgent.error': '', 'sampleAgent.confirmationHash': '', 'sampleAgent.deliveryPaused': !enabled,
+        }),
+      });
+    });
+    if (enabled && typeof cancelAllSequences === 'function') await cancelAllSequences(leadId);
+    const sampleAgent = (await ref.get()).data()?.sampleAgent || {};
+    res.json({ success: true, sampleAgent });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'No se pudo actualizar el asistente.' });
+  }
+});
 
 app.post('/api/crm/lead-business/create-sample', async (req, res) => {
   const {
@@ -5560,6 +5632,9 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       businessObjective: safeSummary.objective,
       keyItems: safeSummary.keyItems,
       primaryColor: safeSummary.primaryColor,
+      brandPalette: Array.isArray(summary.brandPalette) ? summary.brandPalette : (currentNegocio.brandPalette || []),
+      referenceImageURLs: Array.isArray(summary.referenceImageURLs) ? summary.referenceImageURLs : (currentNegocio.referenceImageURLs || []),
+      imageContext: Array.isArray(summary.imageContext) ? summary.imageContext : (currentNegocio.imageContext || []),
       colorPreference: safeSummary.colorPreference,
       enhancePhotos: safeSummary.enhancePhotos,
       themeMode: safeSummary.themeMode,
@@ -10176,6 +10251,7 @@ cron.schedule('*/30 * * * * *', () => {
 });
 
 cron.schedule('* * * * *', () => {
+  sampleConversationAgent.resume().catch((err) => console.warn('[sample-agent] recuperación:', err?.message || err));
   resumeAiSampleJobs(aiSampleJobOptions()).catch((err) => console.warn('[ai-sample] recuperación:', err?.message || err));
   console.log(
     '⏱️ generateSiteSchemas:',

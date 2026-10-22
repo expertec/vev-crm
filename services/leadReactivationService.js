@@ -389,6 +389,7 @@ function hasActiveSequences(lead = {}) {
 }
 
 function hasHardStop(lead = {}) {
+  if (lead?.sampleAgent?.enabled === true) return true;
   if (lead?.stopSequences === true || lead?.seqPaused === true) return true;
   const status = safeStatus(lead?.estado || '');
   if (['compro', 'cliente', 'ganado', 'closed_won', 'cerrado_ganado'].includes(status)) return true;

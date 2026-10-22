@@ -30,6 +30,19 @@ function imageStore() {
   return { images, get: async (key) => images.get(key), put: async (key) => { const url = `https://storage.googleapis.com/test/${key}.webp`; images.set(key, url); return url; } };
 }
 
+test('usa la paleta confirmada del logo sin imponer azul en la portada y conserva referencias solo como contexto', async () => {
+  const api = apiStub({ ...design(), html: `${design().html}<img src="{{LOGO}}" alt="Logo">` });
+  const palette = ['#008800', '#FFFFFF', '#111111'];
+  const reference = 'https://storage.googleapis.com/test/reference.jpg';
+  const schema = await generateAiSample({ ...business, logoURL: 'https://storage.googleapis.com/test/logo.png', brandPalette: palette, referenceImageURLs: [reference] }, { request: api.request, imageStore: imageStore() });
+  assert.deepEqual(schema.colors.palette, palette);
+  assert.equal(schema.colors.primary, '#008800');
+  assert.match(schema.aiPage.css, /--nw-hero-rgb:0,22,0/);
+  assert.doesNotMatch(schema.aiPage.css, /rgba\(3,15,28|#071b2e/);
+  assert.equal(schema.aiPage.assets.some((asset) => asset.url === reference), false);
+  assert.ok(api.calls[0].body.input[0].content.some((item) => item.image_url === reference));
+});
+
 test('genera código e imágenes con los modelos acordados y reutiliza imágenes guardadas', async () => {
   const api = apiStub();
   const store = imageStore();

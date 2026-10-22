@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import sanitizeHtml from 'sanitize-html';
 import postcss from 'postcss';
-import { AI_SAMPLE_GENERATOR_REVISION, buildSampleVisualPlan, sampleImagePrompt, SAMPLE_PAGE_INSTRUCTIONS, SAMPLE_HERO_CSS } from './aiSampleVisuals.js';
+import { AI_SAMPLE_GENERATOR_REVISION, buildSampleVisualPlan, sampleImagePrompt, SAMPLE_PAGE_INSTRUCTIONS, sampleHeroCss } from './aiSampleVisuals.js';
 export { AI_SAMPLE_GENERATOR_REVISION } from './aiSampleVisuals.js';
 
 export const AI_SAMPLE_VERSION = 'ai-page-v1';
@@ -42,6 +42,9 @@ export function normalizeAiSampleInput(data = {}) {
     contactEmail: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.contactEmail || '') ? clean(data.contactEmail, 160) : '',
     logoURL: publicImageUrl(data.logoURL),
     photoURLs: photos,
+    referenceImageURLs: (Array.isArray(data.referenceImageURLs) ? data.referenceImageURLs : []).map(publicImageUrl).filter(Boolean).slice(0, 3),
+    imageContext: (Array.isArray(data.imageContext) ? data.imageContext : []).filter((item) => publicImageUrl(item.url)).slice(0, 12).map((item) => ({ url: publicImageUrl(item.url), role: clean(item.role, 30), description: clean(item.description, 300) })),
+    brandPalette: (Array.isArray(data.brandPalette) ? data.brandPalette : []).filter((color) => /^#[0-9a-f]{6}$/i.test(color)).slice(0, 5),
     aiImageCount,
     reusableAiAssets: (Array.isArray(data.reusableAiAssets) ? data.reusableAiAssets : []).filter((asset) => asset && /^[a-f0-9]{64}$/.test(asset.visualKey || '') && publicImageUrl(asset.url)).slice(0, 3).map((asset) => ({ url: publicImageUrl(asset.url), visualKey: asset.visualKey })),
     templateId: ['info', 'ecommerce', 'booking'].includes(data.templateId) ? data.templateId : 'info',
@@ -157,8 +160,9 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
   if (!input.logoURL && !input.primaryColor && !input.colorPreference) throw new Error('¿Qué colores te gustaría usar? Elige colores o indica que deseas una propuesta.');
   const visualPlan = buildSampleVisualPlan(input, imageModel);
   const content = [{ type: 'input_text', text: JSON.stringify({ ...input, reusableAiAssets: undefined, imageSlots: visualPlan.assets.map((asset, slot) => ({ slot, purpose: asset.purpose, origin: asset.origin })), imageTasks: visualPlan.pending.map(({ slot, purpose, sourceUrls }) => ({ slot, purpose, sourceUrls })) }) }];
-  if (input.logoURL) content.push({ type: 'input_image', image_url: input.logoURL, detail: 'low' });
+  if (input.logoURL) content.push({ type: 'input_image', image_url: input.logoURL, detail: 'high' });
   for (const url of input.photoURLs) content.push({ type: 'input_image', image_url: url, detail: 'low' });
+  for (const url of input.referenceImageURLs) content.push({ type: 'input_image', image_url: url, detail: 'low' });
   const result = savedDesign ? null : await request('responses', {
     model, store: false, max_output_tokens: 16000,
     instructions: SAMPLE_PAGE_INSTRUCTIONS,
@@ -169,9 +173,9 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
   const output = result?.output_text || (result?.output || []).flatMap((item) => item.content || []).filter((item) => item.type === 'output_text').map((item) => item.text).join('');
   const design = savedDesign || JSON.parse(output);
   if (!Array.isArray(design.imagePrompts) || design.imagePrompts.length !== visualPlan.pending.length) throw new Error('El diseño no respetó el límite de imágenes.');
-  const palette = Array.isArray(design.palette) ? design.palette.filter((color) => /^#[0-9a-f]{6}$/i.test(color)).slice(0, 5) : [];
+  const palette = input.brandPalette.length >= 3 ? input.brandPalette : (Array.isArray(design.palette) ? design.palette.filter((color) => /^#[0-9a-f]{6}$/i.test(color)).slice(0, 5) : []);
   if (palette.length < 3) throw new Error('El diseño no definió una paleta de colores válida.');
-  const preparedDesign = { ...design, css: `${design.css}\n${SAMPLE_HERO_CSS}` };
+  const preparedDesign = { ...design, css: `${design.css}\n${sampleHeroCss(palette)}` };
   // Check structure and image placement before paid image generation, without Chrome.
   const structure = sanitizeSamplePage(preparedDesign, { input, assets: visualPlan.assets });
   const text = sanitizeHtml(structure.html, { allowedTags: [], allowedAttributes: {} }).trim();
@@ -199,7 +203,7 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
   const page = sanitizeSamplePage(preparedDesign, { input, assets });
   return {
     templateId: input.templateId, slug: input.slug, designVersion: AI_SAMPLE_VERSION,
-    brand: { name: input.companyInfo, logo: input.logoURL }, colors: { primary: input.primaryColor || palette[0], palette },
+    brand: { name: input.companyInfo, logo: input.logoURL }, colors: { primary: input.logoURL && !input.colorPreference ? palette[0] : input.primaryColor || palette[0], palette },
     hero: { title: page.title, subtitle: page.description, backgroundImageUrl: assets[0].url },
     gallery: { images: assets.filter((asset) => asset.purpose !== 'hero').map((asset) => asset.url) },
     contact: { whatsapp: input.contactWhatsapp, email: input.contactEmail },

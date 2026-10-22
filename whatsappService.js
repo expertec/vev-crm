@@ -57,6 +57,11 @@ let socketGeneration = 0;
 let manualLogoutRequested = false;
 let manualLogoutSuppressReconnectUntil = 0;
 let whatsappLeadConversionTracker = null;
+let sampleConversationHandler = null;
+
+export function setSampleConversationHandler(handler) {
+  sampleConversationHandler = typeof handler === 'function' ? handler : null;
+}
 
 const localAuthFolder = '/var/data';
 const { FieldValue } = admin.firestore;
@@ -1779,6 +1784,7 @@ export async function connectToWhatsApp() {
             mediaUrl = url;
           } else if (inner.imageMessage) {
             mediaType = 'image';
+            content = String(inner.imageMessage.caption || '').trim();
             const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
             const fileRef = bucket.file(`images/${normNum}-${Date.now()}.jpg`);
             await fileRef.save(buffer, { contentType: 'image/jpeg' });
@@ -2022,6 +2028,13 @@ export async function connectToWhatsApp() {
           }
 
           // Mensajes de leads
+          if (sampleConversationHandler && existingLeadData?.sampleAgent?.enabled === true) {
+            const msgData = { ...parsedMsgData, sender, timestamp: now() };
+            const messageId = await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
+            await leadRef.update(buildLeadLastMessagePatch(msgData, { incrementUnread: true }));
+            await sampleConversationHandler({ leadRef, message: msgData, messageId });
+            continue;
+          }
           const cfgSnap = await db.collection('config').doc('appConfig').get();
           const cfg = cfgSnap.exists ? cfgSnap.data() : {};
           const defaultTrigger = cfg.defaultTrigger || 'NuevoLeadWeb';

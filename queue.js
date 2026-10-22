@@ -1099,7 +1099,7 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
           lead.stopSequences === true;
 
         if (hasHardStop) stopState = 'stopped';
-        else if (lead.seqPaused) stopState = 'paused';
+        else if (lead.seqPaused || lead.sampleAgent?.enabled === true) stopState = 'paused';
         else stopState = null;
 
         stopCache.set(job.leadId, stopState);
@@ -1228,6 +1228,7 @@ function shouldHardStopAutomation(lead = {}) {
   const status = String(lead?.estado || '').trim().toLowerCase();
   const tags = Array.isArray(lead?.etiquetas) ? lead.etiquetas.map((tag) => String(tag || '').trim().toLowerCase()) : [];
   return queueStatus === 'claimed'
+    || lead?.sampleAgent?.enabled === true
     || status === 'compro'
     || status === 'cliente'
     || status === 'no interesado'
