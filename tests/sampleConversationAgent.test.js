@@ -444,14 +444,14 @@ test('al día siguiente retoma el brief y la pregunta pendiente incluso con una 
   assert.equal((await s.leadRef.get()).data().sampleAgent.brief.companyName, 'Una Mascota');
 });
 
-test('un audio genérico no reemplaza una pregunta específica ni se envía además del texto', async () => {
+test('la bienvenida fija acompaña una pregunta específica cuando ya conocemos el nombre', async () => {
   let sent = 0;
   const s = setup(async ({ audioOptions }) => {
     assert.equal(audioOptions[0].moment, 'welcome');
     return { brief: normalizeConversationBrief({ companyName: 'Una Mascota' }), action: 'ask', reply: '¿Qué productos fabricas?', audioMoment: '' };
   }, undefined, { loadAudioOptions: async () => [{ moment: 'welcome', script: 'Hola, vamos paso a paso.' }], sendFlowAudio: async () => { sent++; return true; } });
   await s.receive('Hola, mi negocio es Una Mascota', '1');
-  assert.equal(sent, 0); assert.deepEqual(s.replies, ['¿Qué productos fabricas?']);
+  assert.equal(sent, 1); assert.deepEqual(s.replies, ['¿Qué productos fabricas?']);
 });
 
 test('conserva el orden de mensajes recibidos en el mismo milisegundo', async () => {
@@ -463,4 +463,37 @@ test('conserva el orden de mensajes recibidos en el mismo milisegundo', async ()
   await s.receive('Sí', 'z'); await s.receive('Pero cambia el nombre', 'a'); await s.receive('Ahora es Mascota Verde', 'b');
   time += 4000; await s.agent.resume();
   assert.equal(s.jobs.length, 0); assert.match(s.replies[0], /Mascota Verde/);
+});
+
+
+test('la bienvenida con pregunta tiene prioridad sobre negocio y no duplica la pregunta por texto', async () => {
+  const sent = [];
+  const welcome = 'Hola, soy Sergio. ¿Cómo se llama tu negocio y a qué se dedica?';
+  const s = setup(async () => ({ brief: normalizeConversationBrief({}), action: 'ask', reply: '¿Cómo se llama tu negocio?', audioMoment: 'business' }), undefined, {
+    loadAudioOptions: async () => [{ moment: 'welcome', script: welcome }, { moment: 'business', script: 'Cuéntame de tu negocio.' }],
+    sendFlowAudio: async ({ moment }) => { sent.push(moment); return true; },
+  });
+  await s.receive('Quiero información sobre la página web', '1');
+  assert.deepEqual(sent, ['welcome']); assert.equal(s.replies.length, 0);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.history.at(-1).text, welcome);
+});
+
+test('si falla la bienvenida fija conserva la pregunta por texto y permite continuar', async () => {
+  const s = setup(async () => ({ brief: normalizeConversationBrief({}), action: 'ask', reply: '¿Cómo se llama tu negocio?' }), undefined, {
+    loadAudioOptions: async () => [{ moment: 'welcome', script: 'Hola. ¿Cómo se llama tu negocio?' }],
+    sendFlowAudio: async () => { throw Error('WhatsApp no disponible'); },
+  });
+  await s.receive('Hola', '1');
+  assert.deepEqual(s.replies, ['¿Cómo se llama tu negocio?']);
+});
+
+test('la bienvenida fija acompaña el resumen cuando el primer mensaje ya trae toda la información', async () => {
+  const sent = [];
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }), undefined, {
+    loadAudioOptions: async () => [{ moment: 'welcome', script: 'Hola, te ayudo con tu muestra.' }, { moment: 'confirmation', script: 'Revisa el resumen.' }],
+    sendFlowAudio: async ({ moment }) => { sent.push(moment); return true; },
+  });
+  await s.receive('Datos completos de mi negocio', '1');
+  assert.deepEqual(sent, ['welcome']);
+  assert.match(s.replies[0], /Así prepararé tu muestra/);
 });

@@ -5463,8 +5463,8 @@ const sampleConversationAgent = createSampleConversationAgent({
   sendFlowAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }),
   loadAudioOptions: () => loadSampleFlowAudioOptions(db),
 });
-setSampleConversationHandler(sampleConversationAgent.receive);
 const sampleReactivation = registerSampleReactivationRoutes(app, { db, generate: queueConversationSample, readUser: (req) => readAiSampleUser(req, { admin, db }), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }), send: sendMessageToLead, cancelSequences: (leadId) => cancelAllSequences(leadId) });
+setSampleConversationHandler(sampleConversationAgent.receive, { activate: (leadId) => sampleReactivation.activate(leadId, { uid: 'website-inquiry-automation', role: 'admin' }) });
 registerSampleAgentAudioRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }) });
 
 app.post('/api/crm/lead-business/sample-agent', async (req, res) => {

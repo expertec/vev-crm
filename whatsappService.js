@@ -15,6 +15,8 @@ import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
 import admin from 'firebase-admin';
+import { randomUUID } from 'node:crypto';
+import { canAutoStartSampleAgent, isWebsiteInquiry } from './services/sampleCampaignAgent.js';
 import { db } from './firebaseAdmin.js';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
@@ -58,8 +60,10 @@ let manualLogoutRequested = false;
 let manualLogoutSuppressReconnectUntil = 0;
 let whatsappLeadConversionTracker = null;
 let sampleConversationHandler = null;
+let sampleCampaignActivator = null;
 
-export function setSampleConversationHandler(handler) {
+export function setSampleConversationHandler(handler, { activate } = {}) {
+  sampleCampaignActivator = typeof activate === 'function' ? activate : null;
   sampleConversationHandler = typeof handler === 'function' ? handler : null;
 }
 
@@ -2103,6 +2107,43 @@ export async function connectToWhatsApp() {
                 }
               : {}),
           };
+
+          // Website inquiries go straight to the sample agent before any welcome sequence.
+          let startSampleAgent = false;
+          if (sampleConversationHandler && cfg.sampleAgentCampaignEnabled !== false && hasReachableTarget && canAutoStartSampleAgent(existingLeadData || {})) {
+            try {
+              startSampleAgent = await isWebsiteInquiry({ text: content, campaign: shouldTreatAsMetaAdInbound ? {
+                trigger, campaignName: metaAdAttribution.campaignName || '', headline: metaAdAttribution.headline || '', body: metaAdAttribution.body || '', route: metaAdRoute,
+              } : null });
+            } catch (error) { console.warn('[sample-campaign] clasificación no disponible; continúa el flujo existente:', error.message); }
+          }
+          if (startSampleAgent) {
+            const takeover = await db.runTransaction(async (tx) => {
+              const currentSnap = await tx.get(leadRef);
+              const current = currentSnap.data() || {};
+              if (!canAutoStartSampleAgent(current)) return false;
+              tx.set(leadRef, {
+                ...(!currentSnap.exists ? { ...buildNewInboundLeadSalesBrainDefaults(), fecha_creacion: inboundAt, estado: 'nuevo', unreadCount: 0 } : {}),
+                ...baseLead,
+                nombre: current.nombre || baseLead.nombre,
+                source: shouldTreatAsMetaAdInbound ? baseLead.source : current.source || baseLead.source,
+                etiquetas: FieldValue.arrayUnion(...etiquetaUnion, 'MuestraChatIA'),
+                sampleAgent: { enabled: true, version: randomUUID(), status: 'collecting', history: [], images: [], brief: {}, confirmationHash: '', source: 'website_inquiry', updatedAt: inboundAt },
+              }, { merge: true });
+              return true;
+            });
+            if (takeover) {
+              const msgData = { ...parsedMsgData, sender, timestamp: inboundAt, ...(shouldTreatAsMetaAdInbound ? { metaAttribution: buildMetaAttributionPatch(metaAdAttribution, { trigger, route: metaAdRoute, inboundAt }).metaAttribution } : {}) };
+              const messageId = await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
+              await leadRef.update(buildLeadLastMessagePatch(msgData, { incrementUnread: true }));
+              if (shouldTreatAsMetaAdInbound) void trackWhatsappLeadConversionOnce({ leadId, leadPhone: normNum });
+              await cancelAllSequences(leadId);
+              if (leadSnap.exists && sampleCampaignActivator) await sampleCampaignActivator(leadId);
+              else await sampleConversationHandler({ leadRef, message: msgData, messageId });
+              console.log('[sample-campaign] consulta web atendida por agente:', leadId);
+              continue;
+            }
+          }
 
           // Lead nuevo
           if (!leadSnap.exists) {

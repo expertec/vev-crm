@@ -248,13 +248,12 @@ export function createSampleConversationAgent({ db, send, generate, extract = ex
           } else if (action !== 'respond') { action = 'confirm'; reply = briefSummary(decision.brief); }
           if (!['ask', 'generate'].includes(action)) audioMoment = '';
           const welcome = audioOptions.find((audio) => audio.moment === 'welcome');
-          if (action === 'ask' && !failedAudio && !audioMoment && !agent.history?.length
-            && !decision.brief.companyName && !decision.brief.activity && welcome
-            && !/[?¿]|c[oó]mo se llama|a qu[eé] se dedica|cu[eé]ntame|dime/i.test(welcome.script)) {
+          if (['ask', 'confirm'].includes(action) && !failedAudio && !agent.history?.length && welcome) {
             audioMoment = 'welcome';
-            audioIntro = true;
+            const asksAboutBusiness = /[?¿]|c[oó]mo se llama|a qu[eé] se dedica|cu[eé]ntame|dime/i.test(welcome.script);
+            audioIntro = action === 'confirm' || Boolean(decision.brief.companyName || decision.brief.activity) || !asksAboutBusiness;
           }
-          if (action === 'confirm' && audioOptions.some((audio) => audio.moment === 'confirmation')) {
+          if (action === 'confirm' && !audioMoment && audioOptions.some((audio) => audio.moment === 'confirmation')) {
             audioMoment = 'confirmation';
             audioIntro = true;
           }
