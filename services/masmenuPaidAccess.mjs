@@ -14,7 +14,7 @@ export function createMasmenuPaidAccessHandler({db,getSocket,env=process.env,now
    login=new URL(p?.loginUrl);const app=new URL(env.MASMENU_PUBLIC_APP_URL);
    if(!p||!uuid.test(p.purchaseId)||!uuid.test(p.menuId)||(p.resendRequestId!==undefined&&!uuid.test(p.resendRequestId))||!/^\+52\d{10}$/.test(p.phone)||typeof p.restaurantName!=='string'||!p.restaurantName.trim()||p.restaurantName.length>150||!/^([a-z0-9]+-)*[a-z0-9]+$/.test(p.slug)||p.slug.length>96||!['test','live'].includes(p.environment)||
     (p.pin!==null&&(typeof p.pin!=='string'||!/^\d{4}$/.test(p.pin)))||app.protocol!=='https:'||login.origin!==app.origin||login.protocol!=='https:'||login.username||login.password||login.pathname!=='/acceso'||login.searchParams.get('next')!==`/administrar/${p.slug}`||[...login.searchParams.keys()].some(k=>k!=='next')||
-    (p.pin!==null?!/^#activar=[A-Za-z0-9_-]{43}$/.test(login.hash):Boolean(login.hash)))throw new Error('INVALID');
+    (Boolean(login.hash)&&!/^#activar=[A-Za-z0-9_-]{43}$/.test(login.hash)))throw new Error('INVALID');
   }catch{return res.status(400).json({ok:false,code:'INVALID_ACCESS_MESSAGE'});}
   const mac=v=>createHmac('sha256',key).update(v).digest('hex');
   const fingerprint=mac(JSON.stringify([p.menuId,p.phone,p.pin,p.loginUrl,p.environment,p.restaurantName]));
@@ -37,11 +37,11 @@ export function createMasmenuPaidAccessHandler({db,getSocket,env=process.env,now
    reserved=true;const sock=getSocket();if(!sock)throw new Error('DISCONNECTED');
    const jid=await resolveMasmenuRecipient(sock,p.phone);
    const name=p.restaurantName.replace(/[\r\n*`_]/g,' ').replace(/\s+/g,' ').trim();
-   const text=[`🎉 ¡Hola ${name}!`,'',p.environment==='test'?'🧪 Tu activación de *+Menú Pro de prueba* fue confirmada. No se cobró dinero real ni se habilitó administración de producción.':'✅ Tu acceso *+Menú Pro* ha sido activado exitosamente.','',
+   const text=[`🎉 ¡Hola ${name}!`,'',p.environment==='test'?'🧪 Tu acceso *+Menú Pro* está activo en modo de prueba. No se cobró dinero real; ya puedes usar tu administrador.':'✅ Tu acceso *+Menú Pro* ha sido activado exitosamente.','',
     '🔐 *Tus credenciales de acceso:*',`📱 Teléfono: ${p.phone.slice(1)}`,p.pin?`🔑 PIN: *${p.pin}*`:'🔑 PIN: *Usa tu PIN actual*','',
     '🌐 Accede a tu panel aquí:',p.loginUrl,'',
-    '📝 *¿Qué puedes hacer en tu panel Pro?*','• Agregar y editar productos','• Actualizar precios y fotografías','• Organizar tus categorías','• Marcar productos disponibles o agotados','• Ver los cambios en tu menú público','',
-    '💡 *Importante:*','- Guarda tu PIN y no compartas este mensaje',...(p.pin?['- Abre el enlace personal para activar tu primer acceso; vence en 7 días']:['- Esta compra conserva el acceso y PIN de tu cuenta']),'- Soporte: ayuda@negociosweb.mx','','¡Bienvenido a +Menú! 🚀'].join('\n');
+    '📝 *¿Qué puedes hacer en tu panel Pro?*','• Agregar y editar productos','• Actualizar precios y fotografías','• Organizar tus categorías','• Crear y editar combos','• Cambiar tu logo y los datos de tu restaurante','• Marcar productos disponibles o agotados','• Ver los cambios en tu menú público','',
+    '💡 *Importante:*','- Guarda tu PIN y no compartas este mensaje','- Entra con tu teléfono y PIN, también desde otro dispositivo',...(!p.pin?['- Esta compra conserva el acceso y PIN de tu cuenta']:[]),'- Soporte: ayuda@negociosweb.mx','','¡Bienvenido a +Menú! 🚀'].join('\n');
    sendStarted=true;
    const sent=await sendMasmenuCredentials(sock,jid,text,{receiptTimeoutMs});
    await ref.set({status:'sent',sentAt:now(),messageId:sent.messageId,deliveryConfirmed:sent.deliveryConfirmed,recipientFormat:jid.startsWith('521')?'mx521':'mx52',transportVersion:2},{merge:true});

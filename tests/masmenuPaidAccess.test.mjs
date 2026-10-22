@@ -58,3 +58,8 @@ test('explicit resend has its own idempotency key, retains credentials and respe
  assert.equal((await f.call(retry)).body.status,'already_sent');assert.equal(f.sends.length,2);
  assert.equal(f.sends[0].body.text,f.sends[1].body.text);
 });
+
+test('production product flow accepts a normal PIN link and promises the complete editor without activation gates',async()=>{
+ const f=fixture(),p={...payload,loginUrl:payload.loginUrl.split('#')[0]};assert.equal((await f.call(p)).status,200);
+ const text=f.sends[0].body.text;assert.ok(text.includes('Crear y editar combos'));assert.ok(text.includes('Cambiar tu logo'));assert.ok(text.includes('Entra con tu teléfono y PIN'));assert.ok(!text.includes('7 días'));assert.ok(!text.includes('no se habilitó administración'));
+});

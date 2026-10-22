@@ -136,7 +136,9 @@ export async function ensureSampleOpenTracking(negocio = {}, { slug = '', leadId
   const publicCode = isValidSamplePublicCode(current.publicCode)
     ? String(current.publicCode).trim()
     : await generateUniqueSamplePublicCode(negocioId);
-  const sampleUrl = `https://negociosweb.mx/m/${encodeURIComponent(publicCode)}`;
+  const isAiSample = negocio.sampleGenerator === 'ai-page-v1';
+  const aiAppBase = String(process.env.AI_SAMPLE_APP_BASE_URL || process.env.NEXT_PUBLIC_SITE_URL || process.env.REACT_APP_SITE_URL || process.env.CLIENT_APP_BASE_URL || 'https://app.negociosweb.mx').replace(/\/+$/, '');
+  const sampleUrl = `${isAiSample ? aiAppBase : 'https://negociosweb.mx'}/m/${encodeURIComponent(publicCode)}`;
   const patch = {
     sampleOpenTracking: {
       ...current,

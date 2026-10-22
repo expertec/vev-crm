@@ -91,6 +91,9 @@ import {
   ensureSampleOpenTracking,
 } from './scheduler.js';
 import { generateCompleteSchema } from './schemaGenerator.js';
+import { AI_SAMPLE_VERSION, samplePageDocument } from './services/aiSampleGenerator.js';
+import { queueAiSampleJob, runAiSampleJob, resumeAiSampleJobs } from './services/aiSampleJobs.js';
+import { canGenerateAiSample, readAiSampleUser, isAiSampleAvailable } from './services/aiSampleAccess.js';
 
 // ================ 🆕 SISTEMA DE PIN ================
 import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
@@ -1215,6 +1218,7 @@ function buildLeadFormUrl(baseUrl, { negocioId = '', leadId = '', phone = '' } =
 }
 
 function buildSiteUrl(negocioData = {}) {
+  if (isAiSampleAvailable(negocioData)) return String(negocioData.sampleOpenUrl || negocioData.sampleOpenTracking?.sampleUrl || '');
   const slug = resolveSiteSlug(negocioData);
 
   if (!slug) return '';
@@ -1262,6 +1266,12 @@ function serializeNegocio(negocioId, negocioData = {}, context = {}) {
     trialActive: negocioData.trialActive === true,
     templateId: String(negocioData.templateId || ''),
     schema: (negocioData?.schema && typeof negocioData.schema === 'object') ? negocioData.schema : null,
+    sampleGenerator: String(negocioData.sampleGenerator || ''),
+    aiImageCount: negocioData.aiImageCount ?? 3,
+    aiSampleJob: negocioData.aiSampleJob ? {
+      state: String(negocioData.aiSampleJob.state || ''),
+      error: String(negocioData.aiSampleJob.error || ''),
+    } : null,
     businessStory: String(negocioData.businessStory || ''),
     brief: serializeBrief(negocioData),
     createdAt: toIsoOrNull(negocioData.createdAt),
@@ -5355,6 +5365,40 @@ app.post('/api/crm/lead-business/generate-sample-logo', async (req, res) => {
   }
 });
 
+app.get('/api/web/ai-sample/:publicCode', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  try {
+    const context = await resolveNegocioBySamplePublicCode(req.params.publicCode);
+    const data = context.negocioData || {};
+    if (!isAiSampleAvailable(data)) return res.status(404).json({ error: 'Esta muestra no está disponible.' });
+    return res.json({ title: data.schema.aiPage.title, document: samplePageDocument(data.schema.aiPage, data.schema.brand?.logo) });
+  } catch (error) {
+    console.warn('[ai-sample-page]', error?.message || error);
+    return res.status(500).json({ error: 'No se pudo cargar la muestra.' });
+  }
+});
+
+async function deliverAiSample(negocio) {
+  const sampleUrl = String(negocio.sampleOpenUrl || negocio.sampleOpenTracking?.sampleUrl || '');
+  if (!sampleUrl || !isAiSampleAvailable(negocio)) throw new Error('La muestra todavía no está lista.');
+  const leadCtx = await resolveLeadByIdentity({ leadId: negocio.leadId, phone: negocio.leadPhone });
+  if (!leadCtx?.leadRef) throw new Error('No se pudo resolver el contacto de la muestra.');
+  await recordWebSalesEvent({ leadRef: leadCtx.leadRef, leadId: leadCtx.leadId, type: WEB_SALES_EVENTS.SAMPLE_GENERATED, source: 'crm', metadata: { negocioId: negocio.id, slug: negocio.slug, idempotencyKey: `sample_generated_${negocio.id}` } }).catch((error) => console.warn('[ai-sample] evento de generación:', error?.message));
+  if (negocio.aiSampleLastSentHash === negocio.schema.aiPage.inputHash) return;
+  await sendWhatsappFallbackMessage({
+    leadId: leadCtx.leadId, phoneDigits: negocio.leadPhone,
+    message: `¡Tu muestra ya está lista! 🎉\n\nPuedes verla aquí 👇\n${sampleUrl}\n\nRevísala con calma y cuéntame qué te gustaría ajustar.`,
+  });
+  const sentAt = new Date();
+  await db.collection('Negocios').doc(negocio.id).set({ status: 'Web enviada', aiSampleLastSentHash: negocio.schema.aiPage.inputHash, siteSentAt: sentAt, sampleLinkSentAt: sentAt, sampleLinkSentUrl: sampleUrl, updatedAt: sentAt }, { merge: true });
+  await leadCtx.leadRef.set({ sampleLinkSentAt: sentAt, sampleLinkSentUrl: sampleUrl, webLinkSentAt: sentAt, etiquetas: admin.firestore.FieldValue.arrayUnion('MuestraLista', 'WebLinkSent', 'SampleLinkSent') }, { merge: true }).catch((error) => console.warn('[ai-sample] estado del contacto:', error?.message));
+  await recordWebSalesEvent({ leadRef: leadCtx.leadRef, leadId: leadCtx.leadId, type: WEB_SALES_EVENTS.SAMPLE_SENT, source: 'crm', metadata: { negocioId: negocio.id, slug: negocio.slug, sampleUrl, isFunnelSample: true, idempotencyKey: `sample_sent_${negocio.id}` } }).catch((error) => console.warn('[ai-sample] evento de entrega:', error?.message));
+}
+
+const aiSampleJobOptions = () => ({ db, bucket: admin.storage().bucket(), sendReady: deliverAiSample });
+
 app.post('/api/crm/lead-business/create-sample', async (req, res) => {
   const {
     leadId = '',
@@ -5362,6 +5406,9 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
     negocioId = '',
     summary = {},
   } = req.body || {};
+  const useAiSample = summary?.sampleGenerator === AI_SAMPLE_VERSION;
+  const aiUser = useAiSample ? await readAiSampleUser(req, { admin, db }) : null;
+  if (useAiSample && !aiUser) return res.status(401).json({ error: 'Inicia sesión para generar la muestra con IA.' });
 
   if (!String(leadId || '').trim() && !String(phone || '').trim() && !String(negocioId || '').trim()) {
     return res.status(400).json({ error: 'Falta leadId, phone o negocioId.' });
@@ -5381,6 +5428,7 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
 
     const leadSnap = leadCtx.leadSnap || await leadCtx.leadRef.get();
     const leadData = leadSnap.exists ? leadSnap.data() || {} : {};
+    if (useAiSample && !canGenerateAiSample(aiUser, leadData)) return res.status(403).json({ error: 'No tienes acceso para generar muestras de este contacto.' });
     const expectedPhone = normalizePhoneDigits(
       phone || summary.contactWhatsapp || leadCtx.phoneDigits || leadData.telefono || ''
     );
@@ -5394,6 +5442,10 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       phoneDigits: expectedPhone,
     });
     const currentNegocio = negocioCtx.negocioData || {};
+    if (useAiSample && currentNegocio.leadId && currentNegocio.leadId !== leadCtx.leadId) return res.status(403).json({ error: 'El negocio no corresponde a este contacto.' });
+    if (['queued', 'running'].includes(currentNegocio.aiSampleJob?.state)) {
+      return res.status(202).json({ success: true, queued: true, negocioId: negocioCtx.negocioId, slug: currentNegocio.slug, negocio: serializeNegocio(negocioCtx.negocioId, currentNegocio) });
+    }
     const now = new Date();
     const currentSlug = String(currentNegocio.slug || '').trim();
     const requestedSlug = String(summary.slug || '').trim();
@@ -5450,7 +5502,8 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       ? summary.photoURLs.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 3)
       : [];
     if (uploadedPhotos.length === 0) uploadedPhotos = fallbackPhotos;
-    if (uploadedPhotos.length === 0) {
+    if (useAiSample && !Array.isArray(summary.photoURLs) && uploadedPhotos.length === 0 && Array.isArray(currentNegocio.photoURLs)) uploadedPhotos = currentNegocio.photoURLs.slice(0, 3);
+    if (uploadedPhotos.length === 0 && !useAiSample) {
       try {
         uploadedPhotos = await getStockPhotoUrls(summary);
       } catch {
@@ -5481,7 +5534,9 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       templateId: String(summary.templateId || currentNegocio.templateId || 'info').toLowerCase(),
       logoURL: String(uploadedLogoURL || summary.logoURL || currentNegocio.logoURL || '').trim(),
       photoURLs: uploadedPhotos,
-      designVersion: 'v2',
+      designVersion: useAiSample ? AI_SAMPLE_VERSION : 'v2',
+      sampleGenerator: useAiSample ? AI_SAMPLE_VERSION : 'legacy',
+      aiImageCount: Math.max(0, Math.min(3, Math.floor(Number(summary.aiImageCount ?? 3)) || 0)),
       source: 'crm_chat_sample_builder',
     };
 
@@ -5498,11 +5553,14 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       themeMode: safeSummary.themeMode,
       themeTone: safeSummary.themeTone,
       designVersion: safeSummary.designVersion,
+      sampleGenerator: safeSummary.sampleGenerator,
+      aiImageCount: safeSummary.aiImageCount,
       templateId: safeSummary.templateId,
       logoURL: safeSummary.logoURL,
       photoURLs: uploadedPhotos,
+      reusableAiImages: useAiSample ? (currentNegocio.schema?.aiPage?.assets || []).filter((asset) => asset.origin === 'ai_generated').map((asset) => asset.url).slice(0, 3) : [],
       slug: finalSlug,
-      status: 'Sin procesar',
+      status: useAiSample ? 'Muestra IA pendiente' : 'Sin procesar',
       sampleFlowType: 'funnel',
       suppressDefaultFollowups: true,
       sampleSubmittedAt: now,
@@ -5511,7 +5569,7 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
     };
 
     const finalNegocioRef = negocioCtx.negocioRef || db.collection('Negocios').doc();
-    await finalNegocioRef.set(negocioPatch, { merge: true });
+    if (!useAiSample) await finalNegocioRef.set(negocioPatch, { merge: true });
     const finalNegocioId = finalNegocioRef.id;
 
     const windowDays = Math.max(1, Number(process.env.SAMPLE_WINDOW_DAYS || 14));
@@ -5590,6 +5648,13 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       ]).catch((cancelError) => {
         console.warn('[crm/create-sample] intake sequence cancellations:', cancelError?.message || cancelError);
       });
+    }
+
+    if (useAiSample) {
+      const queued = await queueAiSampleJob(db, finalNegocioRef, negocioPatch);
+      if (queued.queued) void runAiSampleJob({ ...aiSampleJobOptions(), negocioRef: finalNegocioRef });
+      const latest = (await finalNegocioRef.get()).data() || {};
+      return res.status(queued.queued ? 202 : 200).json({ success: true, ...queued, negocioId: finalNegocioId, slug: finalSlug, sampleUrl: trackedSampleUrl, negocio: serializeNegocio(finalNegocioId, latest) });
     }
 
     let sampleReadySent = false;
@@ -10099,6 +10164,7 @@ cron.schedule('*/30 * * * * *', () => {
 });
 
 cron.schedule('* * * * *', () => {
+  resumeAiSampleJobs(aiSampleJobOptions()).catch((err) => console.warn('[ai-sample] recuperación:', err?.message || err));
   console.log(
     '⏱️ generateSiteSchemas:',
     new Date().toISOString()
