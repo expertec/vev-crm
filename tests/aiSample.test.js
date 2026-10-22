@@ -152,7 +152,6 @@ test('el trabajo se guarda antes de enviar y una solicitud repetida no genera ni
   const options = {
     db, negocioRef: ref, bucket: {},
     generate: async (input) => { generated += 1; return { aiPage: { inputHash: aiSampleInputHash(input) } }; },
-    validateLayout: async () => { assert.equal(delivered, 0); return null; },
     sendReady: async () => { assert.ok(read().schema.aiPage); delivered += 1; },
   };
   await runAiSampleJob(options);
@@ -169,7 +168,6 @@ test('si falla la entrega, se conserva la página y el reintento no consume el g
   const options = {
     db, negocioRef: ref, bucket: {}, logger: { warn() {} },
     generate: async (input) => { generated += 1; return { aiPage: { inputHash: aiSampleInputHash(input) } }; },
-    validateLayout: async () => null,
     sendReady: async () => { throw new Error('WhatsApp desconectado'); },
   };
   await queueAiSampleJob(db, ref, business);
@@ -182,12 +180,21 @@ test('si falla la entrega, se conserva la página y el reintento no consume el g
   assert.equal(read().aiSampleJob.state, 'sent');
 });
 
-test('una página que falla la revisión no se entrega', async () => {
+test('una muestra se entrega sin Chrome ni revisión visual', async () => {
   const { db, ref, read } = memoryDb();
   let delivered = false;
   await queueAiSampleJob(db, ref, business);
-  await runAiSampleJob({ db, negocioRef: ref, bucket: {}, logger: { warn() {} }, generate: async () => ({}), validateLayout: async () => { throw new Error('Desbordamiento en móvil'); }, sendReady: async () => { delivered = true; } });
-  assert.equal(delivered, false);
+  await runAiSampleJob({ db, negocioRef: ref, bucket: {}, logger: { warn() {} }, prepareBrowser: async () => assert.fail('No debe requerir Chrome'), generate: async (input) => ({ aiPage: { inputHash: aiSampleInputHash(input) } }), validateLayout: async () => assert.fail('No debe ejecutar revisión visual'), sendReady: async () => { delivered = true; } });
+  assert.equal(delivered, true);
+  assert.equal(read().aiSampleJob.state, 'sent');
+  assert.ok(read().schema.aiPage);
+});
+
+test('si falla la generación o sus validaciones, la muestra no se envía', async () => {
+  const { db, ref, read } = memoryDb();
+  await queueAiSampleJob(db, ref, business);
+  await runAiSampleJob({ db, negocioRef: ref, bucket: {}, logger: { warn() {} }, generate: async () => { throw new Error('La muestra no contiene un contacto de WhatsApp válido.'); }, sendReady: async () => assert.fail('No debe entregar') });
   assert.equal(read().aiSampleJob.state, 'failed');
+  assert.match(read().aiSampleJob.error, /contacto de WhatsApp/);
   assert.equal(read().schema, undefined);
 });

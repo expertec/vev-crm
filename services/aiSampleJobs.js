@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { AI_SAMPLE_VERSION, aiSampleInputHash, generateAiSample, normalizeAiSampleInput } from './aiSampleGenerator.js';
-import { validateAiSampleLayout } from './aiSampleLayout.js';
 
 const LEASE_MS = 15 * 60_000;
 const runningJobs = new Set();
@@ -41,7 +40,7 @@ export async function queueAiSampleJob(db, negocioRef, data) {
   });
 }
 
-export async function runAiSampleJob({ db, negocioRef, bucket, sendReady, generate = generateAiSample, validateLayout = validateAiSampleLayout, logger = console }) {
+export async function runAiSampleJob({ db, negocioRef, bucket, sendReady, generate = generateAiSample, logger = console }) {
   if (runningJobs.has(negocioRef.id)) return;
   runningJobs.add(negocioRef.id);
   let claimed;
@@ -63,18 +62,11 @@ export async function runAiSampleJob({ db, negocioRef, bucket, sendReady, genera
         savedDesign: claimed.aiSampleDraft?.inputHash === inputHash ? claimed.aiSampleDraft.design : null,
         saveDesign: (design) => negocioRef.update({ aiSampleDraft: { inputHash, design } }),
       });
-    let checked = null;
-    if (!reused) {
-      try { checked = await validateLayout(schema); }
-      catch (error) { await negocioRef.update({ aiSampleDraft: null }); throw error; }
-    }
-    const previewImageUrl = checked ? await imageStore.put(`preview-${inputHash}`, checked.screenshot) : claimed.previewImageUrl || '';
     await db.runTransaction(async (tx) => {
       const latest = (await tx.get(negocioRef)).data() || {};
       if (latest.aiSampleJob?.id !== jobId || latest.aiSampleJob?.state !== 'running') throw new Error('La solicitud de muestra cambió durante la generación.');
       tx.update(negocioRef, {
-        schema, designVersion: AI_SAMPLE_VERSION, previewImageUrl,
-        ...(checked ? { 'aiSampleJob.layoutChecks': checked.checks } : {}),
+        schema, designVersion: AI_SAMPLE_VERSION,
         status: 'Muestra IA lista', processedAt: new Date(), lastGeneratedAt: new Date(), updatedAt: new Date(),
         'aiSampleJob.generatedAt': new Date(),
         aiSampleDraft: null,
