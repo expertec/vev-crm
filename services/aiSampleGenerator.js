@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import sanitizeHtml from 'sanitize-html';
+import postcss from 'postcss';
 
 export const AI_SAMPLE_VERSION = 'ai-page-v1';
 export const DEFAULT_SAMPLE_MODEL = 'gpt-6.1-sol';
@@ -72,13 +73,29 @@ const PAGE_CONTRACT = {
   required: ['title', 'description', 'html', 'css', 'imagePrompts'],
 };
 
+export function sanitizeSampleCss(source) {
+  let root;
+  try { root = postcss.parse(source, { from: undefined }); }
+  catch { throw new Error('El diseño contiene CSS inválido.'); }
+  const unsafe = (value) => /[<\\\u0000-\u0008]|url\s*\(|expression\s*\(|(?:^|[^\w-])(?:image-set|-webkit-image-set)\s*\(/i.test(String(value).replace(/\/\*[\s\S]*?\*\//g, ''));
+  root.walkComments((comment) => comment.remove());
+  root.walkAtRules((rule) => {
+    if (!['media', 'supports', 'container', 'layer', 'scope', 'starting-style', 'keyframes', '-webkit-keyframes'].includes(rule.name.toLowerCase()) || unsafe(rule.params)) rule.remove();
+  });
+  root.walkRules((rule) => { if (unsafe(rule.selector)) rule.remove(); });
+  root.walkDecls((declaration) => {
+    if (unsafe(declaration.prop) || unsafe(declaration.value) || /^(?:behavior|-moz-binding)$/i.test(declaration.prop)) declaration.remove();
+  });
+  const css = root.toString().trim();
+  if (/[<\u0000-\u0008]/.test(css)) throw new Error('El diseño contiene CSS no permitido.');
+  return css;
+}
+
 export function sanitizeSamplePage(page, { input, assets = [] }) {
   if (!page || typeof page.html !== 'string' || typeof page.css !== 'string'
     || Buffer.byteLength(page.html + page.css) > MAX_PAGE_BYTES) throw new Error('La página generada no es válida o excede el tamaño permitido.');
-  const css = page.css.trim();
-  // Images belong in <img>. No remote CSS, imports, escapes, or active content.
-  if (/[<\\\u0000-\u0008]/.test(css) || /url\s*\(|expression\s*\(|behavior\s*:|-moz-binding/i.test(css)
-    || /@(?!(?:media|supports|keyframes)\b)/i.test(css)) throw new Error('El diseño contiene CSS no permitido.');
+  // Keep the usable design while dropping external resources and active CSS.
+  const css = sanitizeSampleCss(page.css);
   const digits = input.contactWhatsapp;
   const contactUrl = digits ? `https://wa.me/${digits}` : '#contacto';
   const replacements = { CONTACT_URL: contactUrl, LOGO: input.logoURL };

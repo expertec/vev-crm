@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateAiSample, normalizeAiSampleInput, sanitizeSamplePage, samplePageDocument, aiSampleInputHash, publicImageUrl, requestSampleOpenAI } from '../services/aiSampleGenerator.js';
+import { generateAiSample, normalizeAiSampleInput, sanitizeSamplePage, sanitizeSampleCss, samplePageDocument, aiSampleInputHash, publicImageUrl, requestSampleOpenAI } from '../services/aiSampleGenerator.js';
 import { queueAiSampleJob, runAiSampleJob } from '../services/aiSampleJobs.js';
 import { canGenerateAiSample, isAiSampleAvailable } from '../services/aiSampleAccess.js';
 
@@ -83,12 +83,33 @@ test('elimina scripts, eventos, formularios, imágenes ajenas y enlaces peligros
   const doc = samplePageDocument({ ...safe, title: '</title><script>bad</script>', assets: [] });
   assert.match(doc, /Content-Security-Policy/);
   assert.doesNotMatch(doc, /<script>/);
-  for (const css of ['@import "https://evil.example";', 'div{background:url(https://evil.example)}', 'div{color:r\\65 d}', '</style><script>']) {
-    assert.throws(() => sanitizeSamplePage({ ...design(0), css }, { input }), /CSS/);
+  for (const css of ['@import "https://evil.example";', 'div{background:url(https://evil.example)}', 'div{color:r\\65 d}']) {
+    const filtered = sanitizeSamplePage({ ...design(0), css }, { input }).css;
+    assert.doesNotMatch(filtered, /evil|url\(|\\|@import/);
   }
+  assert.throws(() => sanitizeSamplePage({ ...design(0), css: '</style><script>' }, { input }), /CSS/);
   assert.equal(publicImageUrl('http://127.0.0.1/logo'), '');
   assert.equal(publicImageUrl('https://localhost/logo'), '');
   assert.equal(publicImageUrl('https://169.254.169.254/secret'), '');
+});
+
+test('conserva el diseño responsive aunque incluya fuentes externas, fondos remotos o reglas CSS modernas', () => {
+  const css = sanitizeSampleCss(`
+    /* <main> branding */
+    @import url("https://fonts.googleapis.com/css2?family=Inter");
+    @font-face {font-family:Remote;src:url("https://evil.example/font.woff2")}
+    @layer base {body{font-family:Inter,Arial,sans-serif;color:#123456}}
+    .hero{background-image:url("https://evil.example/hero.jpg");background-color:#fff;display:grid}
+    @container (min-width:600px){.hero{grid-template-columns:1fr 1fr}}
+    @media (max-width:600px){.hero{display:block}}
+    .bad{behavior:url(x);-moz-binding:url(y);background:u/**/rl(z);content:"\\2192"}
+  `);
+  assert.match(css, /@layer base/);
+  assert.match(css, /@container/);
+  assert.match(css, /@media/);
+  assert.match(css, /background-color:#fff/);
+  assert.match(css, /font-family:Inter,Arial,sans-serif/);
+  assert.doesNotMatch(css, /@import|@font-face|url\(|evil\.example|behavior|-moz-binding|\\|<main>/);
 });
 
 test('un error de API queda visible y no se convierte en una muestra ficticia', async () => {
