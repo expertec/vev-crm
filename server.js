@@ -93,10 +93,11 @@ import {
 } from './scheduler.js';
 import { generateCompleteSchema } from './schemaGenerator.js';
 import { AI_SAMPLE_VERSION, samplePageDocument } from './services/aiSampleGenerator.js';
-import { queueAiSampleJob, runAiSampleJob, resumeAiSampleJobs } from './services/aiSampleJobs.js';
+import { queueAiSampleJob, runAiSampleJob, resumeAiSampleJobs, scheduleAiSampleFollowup } from './services/aiSampleJobs.js';
 import { canGenerateAiSample, readAiSampleUser, isAiSampleAvailable } from './services/aiSampleAccess.js';
 import { buildAiSamplePublicUrl } from './services/sampleUrls.js';
 import { createSampleConversationAgent, agentCanReply } from './services/sampleConversationAgent.js';
+import { registerSampleReactivationRoutes } from './services/sampleAgentReactivation.js';
 import { createSampleAudioTranscriber } from './services/sampleAudioTranscription.js';
 import { registerSampleAgentAudioRoutes, createSampleFlowAudioSender, loadSampleFlowAudioOptions } from './services/sampleAgentAudioLibrary.js';
 
@@ -1274,7 +1275,7 @@ function serializeNegocio(negocioId, negocioData = {}, context = {}) {
     sampleGenerator: String(negocioData.sampleGenerator || ''),
     aiImageCount: negocioData.aiImageCount ?? 3,
     colorPreference: String(negocioData.colorPreference || ''),
-    enhancePhotos: negocioData.enhancePhotos !== false,
+    enhancePhotos: negocioData.enhancePhotos === true,
     primaryColor: String(negocioData.primaryColor || ''),
     businessObjective: String(negocioData.businessObjective || ''),
     keyItems: Array.isArray(negocioData.keyItems) ? negocioData.keyItems : [],
@@ -5402,18 +5403,28 @@ async function deliverAiSample(negocio) {
     if (lead.sampleAgent?.deliveryPaused || lead.stopSequences || lead.humanControl || lead.salesBrainHumanControl || lead.archived || lead.archivedAt) throw new Error('La entrega automática fue pausada para este contacto.');
   }
   await recordWebSalesEvent({ leadRef: leadCtx.leadRef, leadId: leadCtx.leadId, type: WEB_SALES_EVENTS.SAMPLE_GENERATED, source: 'crm', metadata: { negocioId: negocio.id, slug: negocio.slug, idempotencyKey: `sample_generated_${negocio.id}` } }).catch((error) => console.warn('[ai-sample] evento de generación:', error?.message));
-  if (negocio.aiSampleLastSentHash === negocio.schema.aiPage.inputHash) return;
-  await sendWhatsappFallbackMessage({
-    leadId: leadCtx.leadId, phoneDigits: negocio.leadPhone,
-    message: `¡Tu muestra ya está lista! 🎉\n\nPuedes verla aquí 👇\n${sampleUrl}\n\nRevísala con calma y cuéntame qué te gustaría ajustar.`,
-  });
-  const sentAt = new Date();
-  await db.collection('Negocios').doc(negocio.id).set({ status: 'Web enviada', aiSampleLastSentHash: negocio.schema.aiPage.inputHash, siteSentAt: sentAt, sampleLinkSentAt: sentAt, sampleLinkSentUrl: sampleUrl, updatedAt: sentAt }, { merge: true });
-  await leadCtx.leadRef.set({ sampleLinkSentAt: sentAt, sampleLinkSentUrl: sampleUrl, webLinkSentAt: sentAt, etiquetas: admin.firestore.FieldValue.arrayUnion('MuestraLista', 'WebLinkSent', 'SampleLinkSent') }, { merge: true }).catch((error) => console.warn('[ai-sample] estado del contacto:', error?.message));
+  const alreadyDelivered = negocio.aiSampleLastSentHash === negocio.schema.aiPage.inputHash;
+  if (!alreadyDelivered) {
+    if (negocio.aiSampleIntroSentHash !== negocio.schema.aiPage.inputHash) {
+      await sendWhatsappFallbackMessage({
+        leadId: leadCtx.leadId, phoneDigits: negocio.leadPhone,
+        message: '¡Tu muestra ya está lista! 🎉\n\nTe comparto el enlace en el siguiente mensaje. Revísala con calma y cuéntame qué te gustaría ajustar. 👇',
+      });
+      await db.collection('Negocios').doc(negocio.id).update({ aiSampleIntroSentHash: negocio.schema.aiPage.inputHash });
+    }
+    await sendWhatsappFallbackMessage({
+      leadId: leadCtx.leadId, phoneDigits: negocio.leadPhone,
+      message: sampleUrl,
+    });
+    const sentAt = new Date();
+    await db.collection('Negocios').doc(negocio.id).set({ status: 'Web enviada', aiSampleLastSentHash: negocio.schema.aiPage.inputHash, siteSentAt: sentAt, sampleLinkSentAt: sentAt, sampleLinkSentUrl: sampleUrl, updatedAt: sentAt }, { merge: true });
+    await leadCtx.leadRef.set({ sampleLinkSentAt: sentAt, sampleLinkSentUrl: sampleUrl, webLinkSentAt: sentAt, etiquetas: admin.firestore.FieldValue.arrayUnion('MuestraLista', 'WebLinkSent', 'SampleLinkSent') }, { merge: true }).catch((error) => console.warn('[ai-sample] estado del contacto:', error?.message));
+  }
   if (negocio.source === 'whatsapp_sample_agent') {
-    await leadCtx.leadRef.update({ 'sampleAgent.enabled': false, 'sampleAgent.status': 'completed', 'sampleAgent.updatedAt': sentAt });
+    await leadCtx.leadRef.update({ 'sampleAgent.enabled': false, 'sampleAgent.status': 'completed', 'sampleAgent.updatedAt': new Date() });
   }
   await recordWebSalesEvent({ leadRef: leadCtx.leadRef, leadId: leadCtx.leadId, type: WEB_SALES_EVENTS.SAMPLE_SENT, source: 'crm', metadata: { negocioId: negocio.id, slug: negocio.slug, sampleUrl, isFunnelSample: true, idempotencyKey: `sample_sent_${negocio.id}` } }).catch((error) => console.warn('[ai-sample] evento de entrega:', error?.message));
+  await scheduleAiSampleFollowup({ leadRef: leadCtx.leadRef, schedule: scheduleSequenceForLead });
 }
 
 const aiSampleJobOptions = () => ({ db, bucket: admin.storage().bucket(), sendReady: deliverAiSample });
@@ -5453,6 +5464,7 @@ const sampleConversationAgent = createSampleConversationAgent({
   loadAudioOptions: () => loadSampleFlowAudioOptions(db),
 });
 setSampleConversationHandler(sampleConversationAgent.receive);
+registerSampleReactivationRoutes(app, { db, readUser: (req) => readAiSampleUser(req, { admin, db }), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }), send: sendMessageToLead, cancelSequences: (leadId) => cancelAllSequences(leadId) });
 registerSampleAgentAudioRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }) });
 
 app.post('/api/crm/lead-business/sample-agent', async (req, res) => {
@@ -5615,7 +5627,7 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       keyItems: Array.isArray(summary.keyItems) ? summary.keyItems : [],
       primaryColor: String(summary.primaryColor || currentNegocio.primaryColor || (useAiSample ? '' : '#2563eb')).trim(),
       colorPreference: String(summary.colorPreference || currentNegocio.colorPreference || '').trim().slice(0, 200),
-      enhancePhotos: summary.enhancePhotos !== false,
+      enhancePhotos: summary.enhancePhotos === true,
       themeMode: requestedThemeMode,
       themeTone: requestedThemeTone,
       contactWhatsapp: normalizePhoneDigits(summary.contactWhatsapp || currentNegocio.contactWhatsapp || expectedPhone),
@@ -5802,13 +5814,16 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       const sampleUrlToSend = trackedSampleUrl;
       const readyMessage = (
         `¡Tu muestra ya está lista! 🎉\n\n`
-        + `Puedes verla aquí 👇\n${sampleUrlToSend}\n\n`
+        + 'Te comparto el enlace en el siguiente mensaje. 👇\n\n'
         + 'Es una primera propuesta, así que revísala con calma. Si quieres cambiar algo después, lo vemos contigo.'
       );
-      const sent = await sendWhatsappFallbackMessage({
+      await sendWhatsappFallbackMessage({
         leadId: String(leadCtx.leadId || ''),
         phoneDigits: expectedPhone,
         message: readyMessage,
+      });
+      const sent = await sendWhatsappFallbackMessage({
+        leadId: String(leadCtx.leadId || ''), phoneDigits: expectedPhone, message: sampleUrlToSend,
       });
       sentVia = sent?.method || '';
       sampleReadySent = true;

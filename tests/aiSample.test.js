@@ -143,10 +143,10 @@ test('conserva fotografías y logo, y siempre crea una portada basada en el mate
   assert.equal(normalizeAiSampleInput({ ...business, aiImageCount: 0 }).aiImageCount, 1);
 });
 
-test('prioriza hero y retoques fieles dentro del presupuesto de tres operaciones', async () => {
+test('permite activar retoques fieles dentro del presupuesto de tres operaciones', async () => {
   const photos = [0, 1, 2].map((index) => `https://storage.googleapis.com/test/photo-${index}.jpg`);
   const api = apiStub({ ...design(4), imagePrompts: design(3).imagePrompts });
-  const schema = await generateAiSample({ ...business, photoURLs: photos, aiImageCount: 3 }, { request: api.request, imageStore: imageStore() });
+  const schema = await generateAiSample({ ...business, photoURLs: photos, aiImageCount: 3, enhancePhotos: true }, { request: api.request, imageStore: imageStore() });
   const imageCalls = api.calls.filter((call) => call.resource === 'images/edits');
   assert.equal(imageCalls.length, 3);
   assert.deepEqual(imageCalls[0].body.images.map((item) => item.image_url), photos);
@@ -158,14 +158,25 @@ test('prioriza hero y retoques fieles dentro del presupuesto de tres operaciones
   assert.equal(schema.hero.backgroundImageUrl, schema.aiPage.assets[0].url);
 });
 
-test('permite conservar las fotos originales sin retocarlas y generar imágenes complementarias', async () => {
+test('por defecto conserva originales y genera hero más dos servicios distintos, reutilizando hero al cierre', async () => {
   const photo = 'https://storage.googleapis.com/test/photo.jpg';
   const api = apiStub({ ...design(4), imagePrompts: design(3).imagePrompts });
-  const schema = await generateAiSample({ ...business, photoURLs: [photo], aiImageCount: 3, enhancePhotos: false }, { request: api.request, imageStore: imageStore() });
+  const schema = await generateAiSample({ ...business, photoURLs: [photo], aiImageCount: 3, keyItems: ['Cambio de aceite', 'Transmisiones'] }, { request: api.request, imageStore: imageStore() });
   assert.equal(api.calls.filter((call) => call.resource === 'images/edits').length, 1);
   assert.equal(api.calls.filter((call) => call.resource === 'images/generations').length, 2);
   assert.equal(schema.aiPage.assets[1].url, photo);
   assert.equal(schema.aiPage.assets[1].origin, 'uploaded');
+  const scenes = api.calls.filter((call) => call.resource === 'images/generations');
+  assert.match(scenes[0].body.prompt, /Cambio de aceite/);
+  assert.match(scenes[1].body.prompt, /Transmisiones/);
+  assert.match(scenes[0].body.prompt, /detalle cercano/);
+  assert.match(scenes[1].body.prompt, /encuadre más abierto/);
+  assert.equal(api.calls.filter((call) => call.resource.startsWith('images/')).length, 3);
+  const contact = schema.aiPage.html.split('id="contacto"')[1];
+  assert.ok(contact.includes(schema.hero.backgroundImageUrl), 'reutiliza la misma imagen al cierre');
+  assert.match(contact, /class="nw-contact-photo"/);
+  assert.match(contact, /Imagen ilustrativa/);
+  assert.equal(normalizeAiSampleInput({}).enhancePhotos, false);
 });
 
 test('comprueba que el diseño use todas las imágenes solicitadas antes de generarlas', async () => {

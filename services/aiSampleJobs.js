@@ -4,6 +4,19 @@ import { AI_SAMPLE_VERSION, aiSampleInputHash, generateAiSample, normalizeAiSamp
 const LEASE_MS = 15 * 60_000;
 const runningJobs = new Set();
 
+export async function scheduleAiSampleFollowup({ leadRef, schedule, logger = console }) {
+  const lead = (await leadRef.get()).data() || {};
+  if (lead.linkOpenedAt || lead.sampleAgent?.enabled || lead.stopSequences || lead.humanControl
+    || lead.salesBrainHumanControl || lead.archived || lead.archivedAt
+    || ['compro', 'cliente', 'no interesado'].includes(String(lead.estado || '').trim().toLowerCase())) return;
+  try {
+    await schedule(leadRef.id, 'Web_SampleNotOpened', new Date(), { source: 'ai-sample-ready', debug: true });
+  } catch (error) {
+    // A follow-up failure must not resend the sample or pay for another generation.
+    logger.warn('[ai-sample] seguimiento pendiente:', error?.message || error);
+  }
+}
+
 export function createSampleImageStore(bucket, negocioId) {
   const fileFor = (key) => bucket.file(`web-assets/ai-samples/${negocioId}/${key}.webp`);
   const urlFor = async (file) => (await file.getSignedUrl({ action: 'read', expires: '2100-01-01' }))[0];

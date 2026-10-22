@@ -60,6 +60,28 @@ test('recopila por chat, confirma y genera una sola vez sin otra llamada de IA',
   assert.match(s.replies.at(-1), /sigue en preparación/);
 });
 
+test('entrega la muestra lista con enlace solo y reintenta el enlace sin repetir el aviso', async () => {
+  const messages = [];
+  const url = 'https://negociosweb.mx/taller-norte';
+  let generations = 0; let failed = false;
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }), undefined, {
+    generate: async () => { generations++; return { ready: true, sampleUrl: url, negocioId: 'business' }; },
+    send: async (_id, text) => {
+      messages.push(text);
+      if (text === url && !failed) { failed = true; throw Error('Temporary WhatsApp error'); }
+    },
+  });
+  await s.receive('Datos del negocio', '1');
+  await s.receive('sí, generar', '2');
+  assert.match(messages[1], /siguiente mensaje/);
+  assert.equal(messages[2], url);
+  assert.notEqual((await s.leadRef.get()).data().sampleAgent.status, 'completed');
+  await s.agent.resume();
+  assert.deepEqual(messages.slice(2), [url, url]);
+  assert.equal(generations, 1);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.status, 'completed');
+});
+
 test('las correcciones invalidan el resumen anterior antes de generar', async () => {
   const s = setup(async ({ message }) => ({ brief: { ...complete(), serviceArea: message.text.includes('Saltillo') ? 'Saltillo' : 'Monterrey' }, action: 'generate', reply: '' }));
   await s.receive('Datos de mi negocio', '1');
@@ -304,6 +326,47 @@ test('un audio que cubre la pregunta reemplaza el texto y se usa una sola vez po
   assert.deepEqual(sent, ['business']);
   assert.equal(s.replies.length, 2);
   assert.deepEqual((await s.leadRef.get()).data().sampleAgent.audioMomentsSent, ['business']);
+});
+
+test('la bienvenida genérica se usa una vez y acompaña la pregunta sin repetir su texto', async () => {
+  const sent = [];
+  const script = '¡Hola! Te voy a ayudar a preparar una muestra de tu página. Vamos paso a paso por aquí.';
+  const s = setup(async () => ({ brief: normalizeConversationBrief({}), action: 'ask', reply: '¿Cómo se llama tu negocio y a qué se dedica?', audioMoment: '' }), undefined, {
+    loadAudioOptions: async () => [{ moment: 'welcome', script }],
+    sendFlowAudio: async ({ moment }) => { sent.push(moment); return true; },
+  });
+  await s.receive('Quiero una muestra', '1');
+  assert.deepEqual(sent, ['welcome']);
+  assert.deepEqual(s.replies, ['¿Cómo se llama tu negocio y a qué se dedica?']);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.history.at(-1).text, `${script}\n${s.replies[0]}`);
+  await s.receive('Hola', '2');
+  assert.deepEqual(sent, ['welcome']);
+});
+
+test('el audio de confirmación acompaña el resumen escrito una vez y permite aprobar', async () => {
+  const sent = [];
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '', audioMoment: '' }), undefined, {
+    loadAudioOptions: async () => [{ moment: 'confirmation', script: 'Te comparto por escrito los datos que reunimos. Revísalos y dime si están bien o quieres cambiar algo.' }],
+    sendFlowAudio: async ({ moment }) => { sent.push(moment); return true; },
+  });
+  await s.receive('Datos completos', '1');
+  assert.deepEqual(sent, ['confirmation']);
+  assert.match(s.replies[0], /Así prepararé tu muestra/);
+  assert.doesNotMatch(s.replies[0], /Te comparto por escrito/);
+  await s.receive('sí, generar', '2');
+  assert.equal(s.jobs.length, 1);
+  assert.deepEqual(sent, ['confirmation']);
+});
+
+test('si falla la introducción de confirmación conserva el resumen escrito', async () => {
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }), undefined, {
+    loadAudioOptions: async () => [{ moment: 'confirmation', script: 'Revisa los datos.' }],
+    sendFlowAudio: async () => { throw new Error('Audio failed'); },
+  });
+  await s.receive('Datos completos', '1');
+  assert.equal(s.replies.length, 1);
+  assert.match(s.replies[0], /¿Confirmas/);
+  assert.deepEqual((await s.leadRef.get()).data().sampleAgent.audioMomentsSent, []);
 });
 
 test('un fallo en el audio de respuesta conserva el texto y permite continuar el flujo', async () => {

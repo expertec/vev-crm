@@ -108,6 +108,7 @@ function hasSocialSalesBrainContext(leadData = {}) {
 
 export function shouldBlockSequenceByLeadContext(leadData = {}, nextTrigger = '') {
   if (leadData.sampleAgent?.enabled === true) return { blocked: true, reason: 'sample_conversation_agent' };
+  if (nextTrigger === 'Web_SampleNotOpened' && leadData.linkOpenedAt) return { blocked: true, reason: 'sample_already_opened' };
   const nextFamily = triggerFamily(nextTrigger);
   if (!nextFamily) return { blocked: false, reason: '' };
 

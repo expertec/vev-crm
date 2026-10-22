@@ -131,6 +131,6 @@ export function createSampleFlowAudioSender({ db, bucket, sendAudio }) {
 
 export async function loadSampleFlowAudioOptions(db) {
   const snap = await db.collection(collectionName).get();
-  return snap.docs.filter((doc) => SAMPLE_AUDIO_MOMENTS.includes(doc.id) && doc.id !== 'confirmation' && doc.data().enabled)
+  return snap.docs.filter((doc) => SAMPLE_AUDIO_MOMENTS.includes(doc.id) && doc.data().enabled)
     .map((doc) => ({ moment: doc.id, script: clean(doc.data().script, 1600) })).filter((audio) => audio.script);
 }

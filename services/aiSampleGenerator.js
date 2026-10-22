@@ -37,7 +37,7 @@ export function normalizeAiSampleInput(data = {}) {
     keyItems: (Array.isArray(data.keyItems) ? data.keyItems : []).map((item) => clean(item, 100)).filter(Boolean).slice(0, 8),
     primaryColor: /^#[\da-f]{6}$/i.test(data.primaryColor || '') ? data.primaryColor : '',
     colorPreference: clean(data.colorPreference, 200),
-    enhancePhotos: data.enhancePhotos !== false,
+    enhancePhotos: data.enhancePhotos === true,
     themeMode: data.themeMode === 'dark' ? 'dark' : 'light',
     themeTone: clean(data.themeTone, 40),
     contactWhatsapp: clean(data.contactWhatsapp || data.leadPhone, 30).replace(/\D/g, ''),
@@ -164,7 +164,7 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
   if (!input.companyInfo || !input.businessStory) throw new Error('Faltan nombre y descripción del negocio.');
   if (!input.logoURL && !input.primaryColor && !input.colorPreference) throw new Error('¿Qué colores te gustaría usar? Elige colores o indica que deseas una propuesta.');
   const visualPlan = buildSampleVisualPlan(input, imageModel);
-  const content = [{ type: 'input_text', text: JSON.stringify({ ...input, videoURLs: undefined, reusableAiAssets: undefined, imageSlots: visualPlan.assets.map((asset, slot) => ({ slot, purpose: asset.purpose, origin: asset.origin })), imageTasks: visualPlan.pending.map(({ slot, purpose, sourceUrls }) => ({ slot, purpose, sourceUrls })) }) }];
+  const content = [{ type: 'input_text', text: JSON.stringify({ ...input, videoURLs: undefined, reusableAiAssets: undefined, imageSlots: visualPlan.assets.map((asset, slot) => ({ slot, purpose: asset.purpose, origin: asset.origin })), imageTasks: visualPlan.pending.map(({ slot, purpose, sourceUrls, service, scene }) => ({ slot, purpose, sourceUrls, service, scene })) }) }];
   if (input.logoURL) content.push({ type: 'input_image', image_url: input.logoURL, detail: 'high' });
   for (const url of input.photoURLs) content.push({ type: 'input_image', image_url: url, detail: 'low' });
   for (const url of input.referenceImageURLs) content.push({ type: 'input_image', image_url: url, detail: 'low' });
@@ -180,7 +180,14 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
   if (!Array.isArray(design.imagePrompts) || design.imagePrompts.length !== visualPlan.pending.length) throw new Error('El diseño no respetó el límite de imágenes.');
   const palette = input.brandPalette.length >= 3 ? input.brandPalette : (Array.isArray(design.palette) ? design.palette.filter((color) => /^#[0-9a-f]{6}$/i.test(color)).slice(0, 5) : []);
   if (palette.length < 3) throw new Error('El diseño no definió una paleta de colores válida.');
-  const preparedDesign = { ...design, css: `${design.css}\n${sampleHeroCss(palette)}` };
+  // Reuse the hero as a full, unobscured photograph at the closing contact section.
+  // Insert before sanitizing so it follows the same image allowlist as the design.
+  const contactPhoto = '<figure class="nw-contact-photo"><img src="{{IMAGE_0}}" alt="Imagen ilustrativa de la actividad del negocio" width="1536" height="1024" loading="lazy"><figcaption>Imagen ilustrativa</figcaption></figure>';
+  const preparedDesign = {
+    ...design,
+    html: design.html.replace(/(<section\b[^>]*\bid="contacto"[^>]*>)/i, `$1${contactPhoto}`),
+    css: `${design.css}\n${sampleHeroCss(palette)}\n.nw-contact-photo{margin:0 0 24px;max-width:800px}.nw-contact-photo img{display:block;width:100%;height:auto;object-fit:contain;border-radius:20px}.nw-contact-photo figcaption{font-size:11px;line-height:1.4;margin-top:8px;opacity:.75}`,
+  };
   // Check structure and image placement before paid image generation, without Chrome.
   const structure = sanitizeSamplePage(preparedDesign, { input, assets: visualPlan.assets });
   const text = sanitizeHtml(structure.html, { allowedTags: [], allowedAttributes: {} }).trim();

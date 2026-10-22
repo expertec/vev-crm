@@ -84,13 +84,13 @@ test('solo envía audios activos desde el almacenamiento propio como notas de vo
   assert.equal(sends.length, 1);
 });
 
-test('las opciones de audio excluyen los desactivados y el resumen, y comprueban que la respuesta siga vigente', async () => {
+test('las opciones incluyen la introducción al resumen, excluyen desactivados y comprueban vigencia', async () => {
   const h = harness(); const sends = [];
   await h.dispatch('post', { form: uploadForm(true) });
   h.records.set('confirmation', { enabled: true, script: 'Revisa el resumen' });
   h.records.set('business', { enabled: false, script: 'Cuéntame de tu negocio' });
   const options = await loadSampleFlowAudioOptions(h.db);
-  assert.deepEqual(options.map((item) => item.moment), ['welcome']);
+  assert.deepEqual(options.map((item) => item.moment), ['welcome', 'confirmation']);
   const send = createSampleFlowAudioSender({ db: h.db, bucket: h.bucket, sendAudio: async (...args) => sends.push(args) });
   assert.equal(await send({ leadId: 'lead', moment: 'welcome', isCurrent: async () => false }), false);
   assert.equal(sends.length, 0);
