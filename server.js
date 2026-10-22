@@ -97,6 +97,7 @@ import { queueAiSampleJob, runAiSampleJob, resumeAiSampleJobs } from './services
 import { canGenerateAiSample, readAiSampleUser, isAiSampleAvailable } from './services/aiSampleAccess.js';
 import { buildAiSamplePublicUrl } from './services/sampleUrls.js';
 import { createSampleConversationAgent, agentCanReply } from './services/sampleConversationAgent.js';
+import { createSampleAudioTranscriber } from './services/sampleAudioTranscription.js';
 
 // ================ 🆕 SISTEMA DE PIN ================
 import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
@@ -5444,7 +5445,10 @@ async function queueConversationSample({ leadRef, leadId, lead, input }) {
   return { negocioId: ref.id, slug, queued: queued.queued, ready: queued.ready === true, sampleUrl: buildAiSamplePublicUrl(slug) };
 }
 
-const sampleConversationAgent = createSampleConversationAgent({ db, send: sendMessageToLead, generate: queueConversationSample });
+const sampleConversationAgent = createSampleConversationAgent({
+  db, send: sendMessageToLead, generate: queueConversationSample,
+  transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }),
+});
 setSampleConversationHandler(sampleConversationAgent.receive);
 
 app.post('/api/crm/lead-business/sample-agent', async (req, res) => {

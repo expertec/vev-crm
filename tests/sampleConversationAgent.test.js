@@ -32,12 +32,12 @@ function database() {
   };
 }
 
-function setup(extract) {
+function setup(extract, transcribe) {
   const db = database();
   const leadRef = db.collection('leads').doc('test');
   db.rows.set(leadRef.path, { telefono: '528112345678', sampleAgent: { enabled: true, version: 'v1', status: 'collecting', history: [], images: [], brief: {} } });
   const replies = []; const jobs = []; const errors = [];
-  const agent = createSampleConversationAgent({ db, extract, send: async (_id, text) => replies.push(text), generate: async (job) => { jobs.push(job); return { negocioId: 'business' }; }, logger: { warn: (...args) => errors.push(args) } });
+  const agent = createSampleConversationAgent({ db, extract, transcribe, send: async (_id, text) => replies.push(text), generate: async (job) => { jobs.push(job); return { negocioId: 'business' }; }, logger: { warn: (...args) => errors.push(args) } });
   const receive = (text, id, extra = {}) => agent.receive({ leadRef, messageId: id, message: { content: text, mediaType: 'text', ...extra } });
   return { db, leadRef, agent, replies, jobs, errors, receive };
 }
@@ -158,4 +158,74 @@ test('usa visión y salida estructurada sin aceptar URLs inventadas en el brief'
     return { output_text: JSON.stringify({ action: 'ask', reply: '¿Qué servicios ofreces?', brief: complete() }) };
   });
   assert.equal(response.brief.companyName, 'Makiatto');
+});
+
+test('transcribe una nota de voz y usa sus datos para continuar el brief', async () => {
+  let transcriptions = 0;
+  const s = setup(async ({ message }) => {
+    assert.equal(message.text, 'Mi negocio se llama Audio Norte');
+    return { brief: normalizeConversationBrief({ companyName: 'Audio Norte' }), action: 'ask', reply: '¿Qué productos ofreces?' };
+  }, async ({ mediaUrl }) => { assert.match(mediaUrl, /voice.ogg/); transcriptions++; return 'Mi negocio se llama Audio Norte'; });
+  await s.receive('', 'audio1', { mediaType: 'audio', mediaUrl: 'https://storage.googleapis.com/test/voice.ogg' });
+  await s.receive('', 'audio1', { mediaType: 'audio', mediaUrl: 'https://storage.googleapis.com/test/voice.ogg' });
+  assert.equal(transcriptions, 1);
+  assert.equal(s.replies.length, 1);
+  const agent = (await s.leadRef.get()).data().sampleAgent;
+  assert.equal(agent.brief.companyName, 'Audio Norte');
+  assert.equal(agent.history[0].text, 'Mi negocio se llama Audio Norte');
+});
+
+test('un reintento del brief reutiliza la transcripción y no vuelve a pagar por el audio', async () => {
+  let calls = 0; let transcriptions = 0;
+  const s = setup(async () => {
+    if (++calls === 1) throw new Error('Temporary brief API error');
+    return { brief: complete(), action: 'confirm', reply: '' };
+  }, async () => { transcriptions++; return 'Datos completos de mi negocio'; });
+  await s.receive('', 'audio1', { mediaType: 'audio', mediaUrl: 'https://storage.googleapis.com/test/voice.ogg' });
+  await s.agent.resume();
+  assert.equal(calls, 2);
+  assert.equal(transcriptions, 1);
+  assert.equal(s.replies.length, 1);
+});
+
+test('un audio fallido no cambia el brief, no confirma la muestra ni bloquea los siguientes textos', async () => {
+  let calls = 0;
+  const s = setup(async () => { calls++; return { brief: complete(), action: 'confirm', reply: '' }; }, async () => { throw new Error('Audio unreadable'); });
+  await s.receive('Datos de mi negocio', '1');
+  const previous = (await s.leadRef.get()).data().sampleAgent.brief;
+  await s.receive('', 'audio1', { mediaType: 'audio', mediaUrl: 'https://storage.googleapis.com/test/voice.ogg' });
+  const after = (await s.leadRef.get()).data().sampleAgent;
+  assert.deepEqual(after.brief, previous);
+  assert.equal(after.enabled, true);
+  assert.equal(after.confirmationHash, '');
+  assert.match(s.replies.at(-1), /reenviarlo más corto o escribir/);
+  assert.equal(calls, 1);
+  await s.receive('Sí, generar', '2');
+  assert.equal(s.jobs.length, 0, 'un audio no entendido puede contener una corrección; hay que confirmar de nuevo');
+  assert.match(s.replies.at(-1), /¿Confirmas/);
+});
+
+test('acepta confirmar por voz y detecta una corrección hablada sin generar antes de tiempo', async () => {
+  let spoken = 'Sí, pero la zona es Saltillo';
+  const s = setup(async ({ message }) => ({ brief: { ...complete(), serviceArea: message.text.includes('Saltillo') ? 'Saltillo' : 'Monterrey' }, action: 'generate', reply: '' }), async () => spoken);
+  await s.receive('Datos completos', '1');
+  await s.receive('', 'audio1', { mediaType: 'audio', mediaUrl: 'https://storage.googleapis.com/test/voice.ogg' });
+  assert.equal(s.jobs.length, 0);
+  assert.match(s.replies.at(-1), /Saltillo/);
+  spoken = 'Sí, generar.';
+  await s.receive('', 'audio2', { mediaType: 'audio', mediaUrl: 'https://storage.googleapis.com/test/voice2.ogg' });
+  assert.equal(s.jobs.length, 1);
+  assert.match(s.jobs[0].input.businessStory, /Saltillo/);
+});
+
+test('pausar mientras se transcribe evita respuestas tardías y otra llamada al modelo', async () => {
+  let release; let started; let calls = 0;
+  const waitStarted = new Promise((resolve) => { started = resolve; });
+  const s = setup(async () => { calls++; return { brief: complete(), action: 'confirm', reply: '' }; }, async () => { started(); await new Promise((resolve) => { release = resolve; }); return 'Mi negocio es de audio'; });
+  const processing = s.receive('', 'audio1', { mediaType: 'audio', mediaUrl: 'https://storage.googleapis.com/test/voice.ogg' });
+  await waitStarted;
+  await s.leadRef.update({ 'sampleAgent.enabled': false, 'sampleAgent.version': 'v2' });
+  release(); await processing;
+  assert.equal(calls, 0);
+  assert.equal(s.replies.length, 0);
 });

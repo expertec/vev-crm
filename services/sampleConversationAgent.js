@@ -97,7 +97,7 @@ export function agentCanReply(lead = {}) {
 }
 
 // Durable inbox + lease: bursts are processed in order and retries reuse the saved turn.
-export function createSampleConversationAgent({ db, send, generate, extract = extractConversationBrief, logger = console }) {
+export function createSampleConversationAgent({ db, send, generate, extract = extractConversationBrief, transcribe, logger = console }) {
   const drain = async (leadRef) => {
     const owner = randomUUID();
     const acquired = await db.runTransaction(async (tx) => {
@@ -116,6 +116,42 @@ export function createSampleConversationAgent({ db, send, generate, extract = ex
         if (!agentCanReply(lead)) break;
         const agent = lead.sampleAgent || {};
         const item = doc.data();
+        if (['audio', 'audio_ptt', 'ptt'].includes(item.mediaType)) {
+          if (!item.transcription && !item.transcriptionError) {
+            try {
+              if (!transcribe) throw new Error('La transcripción de audio no está configurada.');
+              const text = String(await transcribe({ mediaUrl: item.mediaUrl })).trim();
+              if (!text || text.length > 12_000) throw new Error('No se pudo obtener una transcripción válida.');
+              // Persist before processing so retries do not pay to transcribe again.
+              await doc.ref.update({ transcription: text, turn: null, attempts: 0 });
+              item.transcription = text;
+              item.turn = null;
+              item.attempts = 0;
+            } catch (error) {
+              logger.warn('[sample-agent] audio:', error.message);
+              item.transcriptionError = clean(error.message, 300);
+              await doc.ref.update({ transcriptionError: item.transcriptionError });
+            }
+          }
+          if (item.transcriptionError) {
+            const current = (await leadRef.get()).data() || {};
+            if (!agentCanReply(current) || current.sampleAgent.leaseOwner !== owner || (current.sampleAgent.version || '') !== (agent.version || '')) break;
+            if (!item.replySent) {
+              await send(leadRef.id, 'No pude entender ese audio. ¿Puedes reenviarlo más corto o escribir lo que me comentabas? Podemos continuar por aquí.');
+              await doc.ref.update({ replySent: true });
+            }
+            await db.runTransaction(async (tx) => {
+              const latest = (await tx.get(leadRef)).data() || {};
+              if ((latest.sampleAgent?.version || '') !== (agent.version || '') || latest.sampleAgent?.leaseOwner !== owner) return;
+              tx.update(leadRef, { 'sampleAgent.confirmationHash': '', 'sampleAgent.error': '' });
+              tx.update(doc.ref, { state: 'done' });
+            });
+            continue;
+          }
+          item.content = item.transcription;
+          const current = (await leadRef.get()).data() || {};
+          if (!agentCanReply(current) || current.sampleAgent.leaseOwner !== owner || (current.sampleAgent.version || '') !== (agent.version || '')) break;
+        }
         if (/\b(?:no me (?:escribas|env[ií]es)|cancelar|cancela|detener|detente|pausar|pausa|hablar con (?:una persona|un humano|un asesor))\b/i.test(item.content)) {
           await leadRef.update({ 'sampleAgent.enabled': false, 'sampleAgent.status': 'paused', 'sampleAgent.deliveryPaused': true, 'sampleAgent.confirmationHash': '' });
           await send(leadRef.id, 'De acuerdo, pauso el asistente y la entrega automática. Puedes continuar con una persona del equipo.');
