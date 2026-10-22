@@ -94,6 +94,7 @@ import { generateCompleteSchema } from './schemaGenerator.js';
 import { AI_SAMPLE_VERSION, samplePageDocument } from './services/aiSampleGenerator.js';
 import { queueAiSampleJob, runAiSampleJob, resumeAiSampleJobs } from './services/aiSampleJobs.js';
 import { canGenerateAiSample, readAiSampleUser, isAiSampleAvailable } from './services/aiSampleAccess.js';
+import { buildAiSamplePublicUrl } from './services/sampleUrls.js';
 
 // ================ 🆕 SISTEMA DE PIN ================
 import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
@@ -1218,7 +1219,7 @@ function buildLeadFormUrl(baseUrl, { negocioId = '', leadId = '', phone = '' } =
 }
 
 function buildSiteUrl(negocioData = {}) {
-  if (isAiSampleAvailable(negocioData)) return String(negocioData.sampleOpenUrl || negocioData.sampleOpenTracking?.sampleUrl || '');
+  if (isAiSampleAvailable(negocioData)) return buildAiSamplePublicUrl(resolveSiteSlug(negocioData));
   const slug = resolveSiteSlug(negocioData);
 
   if (!slug) return '';
@@ -1262,12 +1263,19 @@ function serializeNegocio(negocioId, negocioData = {}, context = {}) {
     dominio: String(negocioData.dominio || ''),
     siteUrl,
     panelUrl,
-    sampleUrl: String(negocioData.sampleLinkSentUrl || '') || buildSampleFormUrl(leadPhone),
+    sampleUrl: isAiSampleAvailable(negocioData) ? siteUrl : String(negocioData.sampleLinkSentUrl || '') || buildSampleFormUrl(leadPhone),
     trialActive: negocioData.trialActive === true,
     templateId: String(negocioData.templateId || ''),
     schema: (negocioData?.schema && typeof negocioData.schema === 'object') ? negocioData.schema : null,
     sampleGenerator: String(negocioData.sampleGenerator || ''),
     aiImageCount: negocioData.aiImageCount ?? 3,
+    colorPreference: String(negocioData.colorPreference || ''),
+    enhancePhotos: negocioData.enhancePhotos !== false,
+    primaryColor: String(negocioData.primaryColor || ''),
+    businessObjective: String(negocioData.businessObjective || ''),
+    keyItems: Array.isArray(negocioData.keyItems) ? negocioData.keyItems : [],
+    logoURL: String(negocioData.logoURL || negocioData.schema?.brand?.logo || ''),
+    photoURLs: Array.isArray(negocioData.photoURLs) ? negocioData.photoURLs : [],
     aiSampleJob: negocioData.aiSampleJob ? {
       state: String(negocioData.aiSampleJob.state || ''),
       error: String(negocioData.aiSampleJob.error || ''),
@@ -5381,7 +5389,7 @@ app.get('/api/web/ai-sample/:publicCode', async (req, res) => {
 });
 
 async function deliverAiSample(negocio) {
-  const sampleUrl = String(negocio.sampleOpenUrl || negocio.sampleOpenTracking?.sampleUrl || '');
+  const sampleUrl = buildAiSamplePublicUrl(resolveSiteSlug(negocio));
   if (!sampleUrl || !isAiSampleAvailable(negocio)) throw new Error('La muestra todavía no está lista.');
   const leadCtx = await resolveLeadByIdentity({ leadId: negocio.leadId, phone: negocio.leadPhone });
   if (!leadCtx?.leadRef) throw new Error('No se pudo resolver el contacto de la muestra.');
@@ -5525,7 +5533,9 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       businessStory: String(summary.businessStory || summary.description || currentNegocio.businessStory || '').trim(),
       objective: String(summary.objective || currentNegocio.businessObjective || '').trim(),
       keyItems: Array.isArray(summary.keyItems) ? summary.keyItems : [],
-      primaryColor: String(summary.primaryColor || currentNegocio.primaryColor || '#2563eb').trim(),
+      primaryColor: String(summary.primaryColor || currentNegocio.primaryColor || (useAiSample ? '' : '#2563eb')).trim(),
+      colorPreference: String(summary.colorPreference || currentNegocio.colorPreference || '').trim().slice(0, 200),
+      enhancePhotos: summary.enhancePhotos !== false,
       themeMode: requestedThemeMode,
       themeTone: requestedThemeTone,
       contactWhatsapp: normalizePhoneDigits(summary.contactWhatsapp || currentNegocio.contactWhatsapp || expectedPhone),
@@ -5536,7 +5546,7 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       photoURLs: uploadedPhotos,
       designVersion: useAiSample ? AI_SAMPLE_VERSION : 'v2',
       sampleGenerator: useAiSample ? AI_SAMPLE_VERSION : 'legacy',
-      aiImageCount: Math.max(0, Math.min(3, Math.floor(Number(summary.aiImageCount ?? 3)) || 0)),
+      aiImageCount: Math.max(useAiSample ? 1 : 0, Math.min(3, Math.floor(Number(summary.aiImageCount ?? 3)) || 0)),
       source: 'crm_chat_sample_builder',
     };
 
@@ -5550,6 +5560,8 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       businessObjective: safeSummary.objective,
       keyItems: safeSummary.keyItems,
       primaryColor: safeSummary.primaryColor,
+      colorPreference: safeSummary.colorPreference,
+      enhancePhotos: safeSummary.enhancePhotos,
       themeMode: safeSummary.themeMode,
       themeTone: safeSummary.themeTone,
       designVersion: safeSummary.designVersion,
@@ -5558,7 +5570,7 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       templateId: safeSummary.templateId,
       logoURL: safeSummary.logoURL,
       photoURLs: uploadedPhotos,
-      reusableAiImages: useAiSample ? (currentNegocio.schema?.aiPage?.assets || []).filter((asset) => asset.origin === 'ai_generated').map((asset) => asset.url).slice(0, 3) : [],
+      reusableAiAssets: useAiSample ? (currentNegocio.schema?.aiPage?.assets || []).filter((asset) => asset.visualKey).map(({ url, visualKey }) => ({ url, visualKey })).slice(0, 3) : [],
       slug: finalSlug,
       status: useAiSample ? 'Muestra IA pendiente' : 'Sin procesar',
       sampleFlowType: 'funnel',

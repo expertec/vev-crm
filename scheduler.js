@@ -16,6 +16,7 @@ import {
 
 // ⭐ IMPORTAR EL NUEVO GENERADOR
 import { generateCompleteSchema } from './schemaGenerator.js';
+import { buildAiSamplePublicUrl } from './services/sampleUrls.js';
 
 const { FieldValue } = admin.firestore;
 const execFileAsync = promisify(execFile);
@@ -137,8 +138,10 @@ export async function ensureSampleOpenTracking(negocio = {}, { slug = '', leadId
     ? String(current.publicCode).trim()
     : await generateUniqueSamplePublicCode(negocioId);
   const isAiSample = negocio.sampleGenerator === 'ai-page-v1';
-  const aiAppBase = String(process.env.AI_SAMPLE_APP_BASE_URL || process.env.NEXT_PUBLIC_SITE_URL || process.env.REACT_APP_SITE_URL || process.env.CLIENT_APP_BASE_URL || 'https://app.negociosweb.mx').replace(/\/+$/, '');
-  const sampleUrl = `${isAiSample ? aiAppBase : 'https://negociosweb.mx'}/m/${encodeURIComponent(publicCode)}`;
+  const sampleUrl = isAiSample
+    ? buildAiSamplePublicUrl(slug || negocio.slug || negocio.schema?.slug)
+    : `https://negociosweb.mx/m/${encodeURIComponent(publicCode)}`;
+  if (!sampleUrl) throw new Error('Falta un slug válido para el enlace de la muestra.');
   const patch = {
     sampleOpenTracking: {
       ...current,

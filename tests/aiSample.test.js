@@ -4,12 +4,12 @@ import { generateAiSample, normalizeAiSampleInput, sanitizeSamplePage, sanitizeS
 import { queueAiSampleJob, runAiSampleJob } from '../services/aiSampleJobs.js';
 import { canGenerateAiSample, isAiSampleAvailable } from '../services/aiSampleAccess.js';
 
-const business = { companyInfo: 'Taller Norte', businessStory: 'Reparación y mantenimiento de bicicletas en Monterrey.', contactWhatsapp: '528112345678', slug: 'taller-norte', aiImageCount: 1 };
+const business = { companyInfo: 'Taller Norte', businessStory: 'Reparación y mantenimiento de bicicletas en Monterrey.', contactWhatsapp: '528112345678', slug: 'taller-norte', primaryColor: '#0066cc', aiImageCount: 1 };
 const design = (count = 1) => ({
-  title: 'Taller Norte', description: business.businessStory,
-  html: `<main><h1>Tu bicicleta, lista para rodar</h1><p>Reparación y mantenimiento de bicicletas. Cuéntanos qué necesita tu bicicleta y solicita información sobre nuestros servicios.</p>${Array.from({ length: count }, (_, index) => `<img src="{{IMAGE_${index}}}" alt="Bicicleta ilustrativa" width="600" height="400">`).join('')}<a href="{{CONTACT_URL}}">Escríbenos por WhatsApp</a><section id="contacto">Contacto</section></main>`,
-  css: 'body{font-family:Arial;background:#fff;color:#17202a}main{max-width:1000px;margin:auto;padding:24px}img{width:100%}@media(min-width:800px){main{padding:48px}}',
-  imagePrompts: Array.from({ length: count }, (_, index) => `Bicicleta sobre fondo neutro, composición ${index}`),
+  title: 'Taller Norte', description: business.businessStory, palette: ['#0066cc', '#071b2e', '#ffffff'],
+  html: `<header><span class="nw-wordmark">Taller Norte</span></header><main><section id="inicio" class="nw-hero">${count ? '<img class="nw-hero-media" src="{{IMAGE_0}}" alt="Bicicleta ilustrativa" width="1536" height="1024">' : ''}<div class="nw-hero-content"><h1>Tu bicicleta, lista para rodar</h1><p>Reparación y mantenimiento de bicicletas. Cuéntanos qué necesita tu bicicleta y solicita información sobre nuestros servicios.</p><a href="{{CONTACT_URL}}">Escríbenos por WhatsApp</a></div></section><section id="servicios"><h2>Cuida tu bicicleta</h2><p>Consulta las opciones de reparación y mantenimiento para tu bicicleta. Comparte el problema y te orientamos sobre la atención necesaria.</p>${Array.from({ length: Math.max(0, count - 1) }, (_, index) => `<img src="{{IMAGE_${index + 1}}}" alt="Detalle de bicicleta" width="600" height="400">`).join('')}</section><section id="proceso"><h2>Cuéntanos qué necesitas</h2><ol><li>Envía un mensaje explicando el problema.</li><li>Comparte fotografías para orientarte.</li><li>Consulta las opciones y acuerda la atención por WhatsApp.</li></ol></section><section id="preguntas"><h2>Antes de contactarnos</h2><details><summary>¿Qué información debo enviar?</summary><p>Describe tu bicicleta y el problema; puedes compartir fotografías.</p></details><details><summary>¿Cómo consulto el costo?</summary><p>Escríbenos para consultar las opciones según tu bicicleta.</p></details><details><summary>¿Dónde reciben las bicicletas?</summary><p>Consulta por WhatsApp el punto de atención.</p></details></section><section id="contacto"><h2>Hablemos de tu bicicleta</h2><p>Da el siguiente paso y consulta la reparación o mantenimiento que buscas.</p><a href="{{CONTACT_URL}}">Solicitar información</a></section></main>`,
+  css: 'body{font-family:Arial;background:#fff;color:#17202a}main{max-width:1200px;margin:auto}section:not(.nw-hero){padding:32px 24px}img{max-width:100%}@media(min-width:800px){section:not(.nw-hero){padding:48px}}',
+  imagePrompts: Array.from({ length: count }, (_, index) => `Bicicleta y herramientas de mantenimiento, composición ${index}`),
 });
 
 function apiStub(page = design()) {
@@ -45,17 +45,52 @@ test('genera código e imágenes con los modelos acordados y reutiliza imágenes
   assert.equal(api.calls.length, 2, 'un reintento con diseño guardado no vuelve a consumir la API');
 });
 
-test('conserva fotografías y logo; solo genera el material faltante', async () => {
+test('conserva fotografías y logo, y siempre crea una portada basada en el material recibido', async () => {
   const photo = 'https://storage.googleapis.com/test/photo.jpg';
   const logo = 'https://storage.googleapis.com/test/logo.png';
-  const api = apiStub({ ...design(1), html: `${design(1).html}<img src="{{LOGO}}" alt="Logo">`, imagePrompts: [] });
-  const schema = await generateAiSample({ ...business, photoURLs: [photo], logoURL: logo, aiImageCount: 0 }, { request: api.request });
-  assert.equal(api.calls.length, 1);
+  const api = apiStub({ ...design(2), html: `${design(2).html}<img src="{{LOGO}}" alt="Logo">`, imagePrompts: design(1).imagePrompts });
+  const schema = await generateAiSample({ ...business, photoURLs: [photo], logoURL: logo, aiImageCount: 0 }, { request: api.request, imageStore: imageStore() });
+  assert.equal(api.calls.length, 2);
+  assert.equal(api.calls[1].resource, 'images/edits');
+  assert.deepEqual(api.calls[1].body.images, [{ image_url: photo }]);
   assert.equal(schema.brand.logo, logo);
-  assert.equal(schema.aiPage.assets[0].origin, 'uploaded');
+  assert.equal(schema.aiPage.assets[0].purpose, 'hero');
+  assert.equal(schema.aiPage.assets[1].origin, 'uploaded');
   assert.match(schema.aiPage.html, /photo.jpg/);
   assert.equal(api.calls[0].body.input[0].content.filter((item) => item.type === 'input_image').length, 2);
-  assert.equal(normalizeAiSampleInput({ ...business, photoURLs: [photo], aiImageCount: 50 }).aiImageCount, 2);
+  assert.equal(normalizeAiSampleInput({ ...business, photoURLs: [photo], aiImageCount: 50 }).aiImageCount, 3);
+  assert.equal(normalizeAiSampleInput({ ...business, aiImageCount: 0 }).aiImageCount, 1);
+});
+
+test('prioriza hero y retoques fieles dentro del presupuesto de tres operaciones', async () => {
+  const photos = [0, 1, 2].map((index) => `https://storage.googleapis.com/test/photo-${index}.jpg`);
+  const api = apiStub({ ...design(4), imagePrompts: design(3).imagePrompts });
+  const schema = await generateAiSample({ ...business, photoURLs: photos, aiImageCount: 3 }, { request: api.request, imageStore: imageStore() });
+  const imageCalls = api.calls.filter((call) => call.resource === 'images/edits');
+  assert.equal(imageCalls.length, 3);
+  assert.deepEqual(imageCalls[0].body.images.map((item) => item.image_url), photos);
+  assert.deepEqual(imageCalls[1].body.images, [{ image_url: photos[0] }]);
+  assert.match(imageCalls[1].body.prompt, /Conserva exactamente la identidad/);
+  assert.equal(schema.aiPage.assets[0].purpose, 'hero');
+  assert.equal(schema.aiPage.assets.filter((asset) => asset.origin === 'ai_edited').length, 2);
+  assert.deepEqual(schema.aiPage.assets.slice(1).flatMap((asset) => asset.sourceUrls), photos);
+  assert.equal(schema.hero.backgroundImageUrl, schema.aiPage.assets[0].url);
+});
+
+test('permite conservar las fotos originales sin retocarlas y generar imágenes complementarias', async () => {
+  const photo = 'https://storage.googleapis.com/test/photo.jpg';
+  const api = apiStub({ ...design(4), imagePrompts: design(3).imagePrompts });
+  const schema = await generateAiSample({ ...business, photoURLs: [photo], aiImageCount: 3, enhancePhotos: false }, { request: api.request, imageStore: imageStore() });
+  assert.equal(api.calls.filter((call) => call.resource === 'images/edits').length, 1);
+  assert.equal(api.calls.filter((call) => call.resource === 'images/generations').length, 2);
+  assert.equal(schema.aiPage.assets[1].url, photo);
+  assert.equal(schema.aiPage.assets[1].origin, 'uploaded');
+});
+
+test('comprueba que el diseño use todas las imágenes solicitadas antes de generarlas', async () => {
+  const api = apiStub({ ...design(1), imagePrompts: design(3).imagePrompts });
+  await assert.rejects(generateAiSample({ ...business, aiImageCount: 3 }, { request: api.request, imageStore: imageStore() }), /omitió imágenes/);
+  assert.equal(api.calls.length, 1);
 });
 
 test('rechaza respuestas incompletas y cantidades incorrectas antes de gastar en imágenes', async () => {
@@ -65,14 +100,28 @@ test('rechaza respuestas incompletas y cantidades incorrectas antes de gastar en
   await assert.rejects(generateAiSample(business, { request: async () => ({ status: 'incomplete' }) }), /no terminó/);
 });
 
-test('al cambiar textos o colores puede reutilizar las imágenes generadas sin volver a cobrarlas', async () => {
+test('al cambiar el objetivo reutiliza los recursos visuales compatibles sin volver a generarlos', async () => {
+  const initialApi = apiStub();
+  const first = await generateAiSample(business, { request: initialApi.request, imageStore: imageStore() });
   const api = apiStub({ ...design(1), imagePrompts: [] });
-  const reused = 'https://storage.googleapis.com/test/generated.webp';
-  const schema = await generateAiSample({ ...business, primaryColor: '#ff5500', reusableAiImages: [reused] }, { request: api.request });
+  const schema = await generateAiSample({ ...business, businessObjective: 'Recibir consultas', reusableAiAssets: first.aiPage.assets }, { request: api.request });
   assert.equal(api.calls.length, 1);
-  assert.equal(schema.aiPage.assets[0].origin, 'ai_generated');
-  assert.equal(schema.aiPage.assets[0].url, reused);
-  assert.equal(aiSampleInputHash(business), aiSampleInputHash({ ...business, reusableAiImages: [reused] }));
+  assert.equal(schema.aiPage.assets[0].url, first.aiPage.assets[0].url);
+  assert.equal(aiSampleInputHash(business), aiSampleInputHash({ ...business, reusableAiAssets: first.aiPage.assets }));
+});
+
+test('pregunta los colores cuando no hay logo y evita gastar antes de tener esa respuesta', async () => {
+  await assert.rejects(generateAiSample({ ...business, primaryColor: '' }, { request: async () => assert.fail('No debe consumir la API') }), /Qué colores/);
+  const api = apiStub();
+  const schema = await generateAiSample({ ...business, primaryColor: '', colorPreference: 'Propón una combinación' }, { request: api.request, imageStore: imageStore() });
+  assert.deepEqual(schema.colors.palette, ['#0066cc', '#071b2e', '#ffffff']);
+  assert.match(schema.aiPage.html, /nw-wordmark/);
+});
+
+test('rechaza una página vacía antes de consumir la generación de imágenes', async () => {
+  const api = apiStub({ ...design(), html: '<main><h1>Hola</h1><img src="{{IMAGE_0}}"><a href="{{CONTACT_URL}}">Contactar</a></main>' });
+  await assert.rejects(generateAiSample(business, { request: api.request, imageStore: imageStore() }), /página completa|necesita completar/);
+  assert.equal(api.calls.length, 1);
 });
 
 test('elimina scripts, eventos, formularios, imágenes ajenas y enlaces peligrosos', () => {
