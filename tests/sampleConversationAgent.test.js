@@ -37,7 +37,7 @@ function setup(extract, transcribe, options = {}) {
   const leadRef = db.collection('leads').doc('test');
   db.rows.set(leadRef.path, { telefono: '528112345678', sampleAgent: { enabled: true, version: 'v1', status: 'collecting', history: [], images: [], brief: {} } });
   const replies = []; const jobs = []; const errors = [];
-  const agent = createSampleConversationAgent({ db, extract, transcribe, interpretApproval: async () => ({ intent: 'change', reply: '' }), send: async (_id, text) => replies.push(text), generate: async (job) => { jobs.push(job); return { negocioId: 'business' }; }, logger: { warn: (...args) => errors.push(args) }, ...options });
+  const agent = createSampleConversationAgent({ db, extract, transcribe, debounceMs: 0, interpretApproval: async () => ({ intent: 'change', reply: '' }), send: async (_id, text) => replies.push(text), generate: async (job) => { jobs.push(job); return { negocioId: 'business' }; }, logger: { warn: (...args) => errors.push(args) }, ...options });
   const receive = (text, id, extra = {}) => agent.receive({ leadRef, messageId: id, message: { content: text, mediaType: 'text', ...extra } });
   return { db, leadRef, agent, replies, jobs, errors, receive };
 }
@@ -102,8 +102,8 @@ test('duplicados y mensajes concurrentes conservan el contexto y no responden do
   const s = setup(async ({ brief }) => { calls++; return { brief: normalizeConversationBrief({ ...brief, companyName: 'Audio Norte' }), action: 'ask', reply: '¿A qué se dedica?' }; });
   await Promise.all([s.receive('Hola', '1'), s.receive('Hola', '1'), s.receive('Audio Norte', '2')]);
   await s.agent.resume();
-  assert.equal(calls, 2);
-  assert.equal(s.replies.length, 2);
+  assert.equal(calls, 1);
+  assert.equal(s.replies.length, 1);
   assert.equal(s.errors.length, 0);
 });
 
@@ -293,24 +293,111 @@ test('el intérprete recibe el contexto y devuelve solo la intención, sin reesc
   assert.equal(result.intent, 'approve');
 });
 
-test('los audios acompañan el texto una sola vez por momento y los duplicados no los repiten', async () => {
+test('un audio que cubre la pregunta reemplaza el texto y se usa una sola vez por momento', async () => {
   const sent = [];
-  const s = setup(async () => ({ brief: normalizeConversationBrief({ companyName: 'Makiatto' }), action: 'ask', reply: '¿A qué se dedica?' }), undefined, {
+  const s = setup(async () => ({ brief: normalizeConversationBrief({ companyName: 'Makiatto' }), action: 'ask', reply: '¿A qué se dedica?', audioMoment: 'business' }), undefined, {
+    loadAudioOptions: async () => [{ moment: 'business', script: 'Cuéntame a qué se dedica tu negocio.' }],
     sendFlowAudio: async ({ moment }) => { sent.push(moment); return true; },
   });
   await s.receive('Hola', '1'); await s.receive('Hola', '1');
   await s.receive('Makiatto', '2'); await s.receive('Otra respuesta', '3');
-  assert.deepEqual(sent, ['welcome', 'business']);
-  assert.equal(s.replies.length, 3);
-  assert.deepEqual((await s.leadRef.get()).data().sampleAgent.audioMomentsSent, ['welcome', 'business']);
+  assert.deepEqual(sent, ['business']);
+  assert.equal(s.replies.length, 2);
+  assert.deepEqual((await s.leadRef.get()).data().sampleAgent.audioMomentsSent, ['business']);
 });
 
 test('un fallo en el audio de respuesta conserva el texto y permite continuar el flujo', async () => {
-  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }), undefined, { sendFlowAudio: async () => { throw new Error('WhatsApp audio failed'); } });
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }), undefined, { loadAudioOptions: async () => [{ moment: 'generating', script: 'Voy a preparar la muestra.' }], sendFlowAudio: async () => { throw new Error('WhatsApp audio failed'); } });
   await s.receive('Datos de mi negocio', '1');
   assert.equal(s.replies.length, 1);
   assert.equal((await s.leadRef.get()).data().sampleAgent.status, 'awaiting_confirmation');
   await s.receive('sí, generar', '2');
   assert.equal(s.jobs.length, 1);
   assert.equal((await s.leadRef.get()).data().sampleAgent.enabled, true);
+});
+
+test('espera cuatro segundos de silencio y reúne las frases consecutivas en una sola respuesta', async () => {
+  let time = 1_792_690_000_000; const calls = [];
+  const s = setup(async ({ message }) => { calls.push(message); return { brief: complete(), action: 'confirm', reply: '' }; }, undefined, { debounceMs: 4000, now: () => time });
+  await s.receive('Todo', '1'); time += 2000;
+  await s.receive('Más ventas', '2'); time += 2000;
+  await s.receive('Y clientes', '3');
+  await s.agent.resume();
+  assert.equal(calls.length, 0); assert.equal(s.replies.length, 0);
+  time += 4000; await s.agent.resume();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].text, 'Todo\nMás ventas\nY clientes');
+  assert.equal(calls[0].messages.length, 3);
+  assert.equal(s.replies.length, 1);
+  assert.equal([...s.db.rows.entries()].filter(([key, data]) => key.includes('sampleAgentInbox') && data.state === 'pending').length, 0);
+});
+
+test('descarta una pregunta en preparación si llega nueva información antes de enviarla', async () => {
+  let time = 1_792_690_000_000; let release; let started; let calls = 0;
+  const waitStarted = new Promise((resolve) => { started = resolve; });
+  const s = setup(async ({ message }) => {
+    if (++calls === 1) { started(); await new Promise((resolve) => { release = resolve; }); return { brief: complete(), action: 'ask', reply: '¿En qué zona atienden?' }; }
+    assert.equal(message.text, 'Son ecológicos\nEn todo México');
+    return { brief: { ...complete(), differentiators: 'Ecológicos', serviceArea: 'Todo México' }, action: 'confirm', reply: '' };
+  }, undefined, { debounceMs: 4000, now: () => time });
+  await s.receive('Son ecológicos', '1'); time += 4000;
+  const processing = s.agent.resume(); await waitStarted;
+  time += 100; await s.receive('En todo México', '2');
+  release(); await processing;
+  assert.equal(s.replies.length, 0);
+  time += 4000; await s.agent.resume();
+  assert.equal(s.replies.length, 1);
+  assert.match(s.replies[0], /Todo México/);
+  assert.doesNotMatch(s.replies[0], /¿En qué zona atienden/);
+});
+
+test('incluye el logo y su mensaje de aclaración en la misma tanda', async () => {
+  let time = 1_792_690_000_000; let calls = 0;
+  const image = 'https://storage.googleapis.com/test/logo.jpg';
+  const s = setup(async ({ images, message }) => {
+    calls++; assert.equal(images[0].url, image); assert.match(message.text, /Es ese/);
+    return { brief: normalizeConversationBrief({ ...complete(), images: [{ index: 0, role: 'logo', description: 'Logo del negocio' }], logoChoice: 'provided', palette: ['#008800', '#FFFFFF', '#111111'] }, images), action: 'confirm', reply: '' };
+  }, undefined, { debounceMs: 4000, now: () => time });
+  await s.receive('', '1', { mediaType: 'image', mediaUrl: image });
+  time += 2000; await s.receive('Es ese', '2');
+  time += 4000; await s.agent.resume();
+  assert.equal(calls, 1); assert.equal(s.replies.length, 1);
+});
+
+test('al día siguiente retoma el brief y la pregunta pendiente incluso con una nueva instancia del agente', async () => {
+  const day1 = 1_792_690_000_000;
+  const s = setup(async () => ({ brief: normalizeConversationBrief({ companyName: 'Una Mascota', activity: 'Productos para mascotas' }), action: 'ask', reply: '¿Qué quieres lograr con tu web?' }), undefined, { now: () => day1 });
+  await s.receive('Mi negocio se llama Una Mascota', '1');
+  const replies = []; let calls = 0;
+  const resumed = createSampleConversationAgent({ db: s.db, debounceMs: 0, now: () => day1 + 26 * 3600_000, send: async (_id, text) => replies.push(text), generate: async () => { throw new Error('No debe generar todavía'); }, extract: async ({ brief, history, message }) => {
+    calls++; assert.equal(brief.companyName, 'Una Mascota');
+    assert.equal(history.at(-1).text, '¿Qué quieres lograr con tu web?');
+    assert.equal(message.gapHours, 26);
+    return { brief: normalizeConversationBrief({ ...brief, objective: 'Más distribuidores' }), action: 'ask', reply: '¿Qué productos quieres destacar para los distribuidores?' };
+  } });
+  await resumed.resume(); assert.equal(calls, 0, 'sin una respuesta del cliente no manda preguntas nuevas');
+  await resumed.receive({ leadRef: s.leadRef, messageId: 'next-day', message: { content: 'Quiero más distribuidores', mediaType: 'text' } });
+  assert.equal(calls, 1); assert.equal(replies.length, 1);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.brief.companyName, 'Una Mascota');
+});
+
+test('un audio genérico no reemplaza una pregunta específica ni se envía además del texto', async () => {
+  let sent = 0;
+  const s = setup(async ({ audioOptions }) => {
+    assert.equal(audioOptions[0].moment, 'welcome');
+    return { brief: normalizeConversationBrief({ companyName: 'Una Mascota' }), action: 'ask', reply: '¿Qué productos fabricas?', audioMoment: '' };
+  }, undefined, { loadAudioOptions: async () => [{ moment: 'welcome', script: 'Hola, vamos paso a paso.' }], sendFlowAudio: async () => { sent++; return true; } });
+  await s.receive('Hola, mi negocio es Una Mascota', '1');
+  assert.equal(sent, 0); assert.deepEqual(s.replies, ['¿Qué productos fabricas?']);
+});
+
+test('conserva el orden de mensajes recibidos en el mismo milisegundo', async () => {
+  let time = 1_792_690_000_000;
+  const s = setup(async ({ message }) => {
+    assert.equal(message.text, 'Sí\nPero cambia el nombre\nAhora es Mascota Verde');
+    return { brief: { ...complete(), companyName: 'Mascota Verde' }, action: 'confirm', reply: '' };
+  }, undefined, { debounceMs: 4000, now: () => time });
+  await s.receive('Sí', 'z'); await s.receive('Pero cambia el nombre', 'a'); await s.receive('Ahora es Mascota Verde', 'b');
+  time += 4000; await s.agent.resume();
+  assert.equal(s.jobs.length, 0); assert.match(s.replies[0], /Mascota Verde/);
 });

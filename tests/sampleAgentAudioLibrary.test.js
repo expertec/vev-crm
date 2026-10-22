@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
-import { canManageSampleAudios, prepareSampleRecordedAudio, registerSampleAgentAudioRoutes, createSampleFlowAudioSender } from '../services/sampleAgentAudioLibrary.js';
+import { canManageSampleAudios, prepareSampleRecordedAudio, registerSampleAgentAudioRoutes, createSampleFlowAudioSender, loadSampleFlowAudioOptions } from '../services/sampleAgentAudioLibrary.js';
 
 function harness() {
   const records = new Map(); const files = new Map(); const routes = new Map();
@@ -82,6 +82,18 @@ test('solo envía audios activos desde el almacenamiento propio como notas de vo
   h.records.set('welcome', { enabled: true, storagePath: 'https://evil.example/audio.ogg' });
   assert.equal(await send({ leadId: 'lead', moment: 'welcome' }), false);
   assert.equal(sends.length, 1);
+});
+
+test('las opciones de audio excluyen los desactivados y el resumen, y comprueban que la respuesta siga vigente', async () => {
+  const h = harness(); const sends = [];
+  await h.dispatch('post', { form: uploadForm(true) });
+  h.records.set('confirmation', { enabled: true, script: 'Revisa el resumen' });
+  h.records.set('business', { enabled: false, script: 'Cuéntame de tu negocio' });
+  const options = await loadSampleFlowAudioOptions(h.db);
+  assert.deepEqual(options.map((item) => item.moment), ['welcome']);
+  const send = createSampleFlowAudioSender({ db: h.db, bucket: h.bucket, sendAudio: async (...args) => sends.push(args) });
+  assert.equal(await send({ leadId: 'lead', moment: 'welcome', isCurrent: async () => false }), false);
+  assert.equal(sends.length, 0);
 });
 
 test('convierte una grabación real a OGG/Opus válido y rechaza archivos corruptos', async () => {

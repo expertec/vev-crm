@@ -98,7 +98,7 @@ import { canGenerateAiSample, readAiSampleUser, isAiSampleAvailable } from './se
 import { buildAiSamplePublicUrl } from './services/sampleUrls.js';
 import { createSampleConversationAgent, agentCanReply } from './services/sampleConversationAgent.js';
 import { createSampleAudioTranscriber } from './services/sampleAudioTranscription.js';
-import { registerSampleAgentAudioRoutes, createSampleFlowAudioSender } from './services/sampleAgentAudioLibrary.js';
+import { registerSampleAgentAudioRoutes, createSampleFlowAudioSender, loadSampleFlowAudioOptions } from './services/sampleAgentAudioLibrary.js';
 
 // ================ 🆕 SISTEMA DE PIN ================
 import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
@@ -5450,6 +5450,7 @@ const sampleConversationAgent = createSampleConversationAgent({
   db, send: sendMessageToLead, generate: queueConversationSample,
   transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }),
   sendFlowAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }),
+  loadAudioOptions: () => loadSampleFlowAudioOptions(db),
 });
 setSampleConversationHandler(sampleConversationAgent.receive);
 registerSampleAgentAudioRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }) });

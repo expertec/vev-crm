@@ -1777,6 +1777,7 @@ export async function connectToWhatsApp() {
 
           if (inner.videoMessage) {
             mediaType = 'video';
+            content = String(inner.videoMessage.caption || '').trim();
             const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: Pino() });
             const fileRef = bucket.file(`videos/${normNum}-${Date.now()}.mp4`);
             await fileRef.save(buffer, { contentType: 'video/mp4' });

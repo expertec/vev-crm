@@ -118,12 +118,19 @@ export function sampleAudioMoment(turn, agent) {
 }
 
 export function createSampleFlowAudioSender({ db, bucket, sendAudio }) {
-  return async ({ leadId, moment }) => {
+  return async ({ leadId, moment, isCurrent }) => {
     if (!SAMPLE_AUDIO_MOMENTS.includes(moment)) return false;
     const audio = (await db.collection(collectionName).doc(moment).get()).data();
     if (!audio?.enabled || !new RegExp(`^sample-agent-audio/${moment}/[a-f0-9-]+\\.ogg$`).test(audio.storagePath || '')) return false;
     const [url] = await bucket.file(audio.storagePath).getSignedUrl({ action: 'read', expires: '2100-01-01' });
+    if (isCurrent && !await isCurrent()) return false;
     await sendAudio(leadId, url, { ptt: true, forwarded: false, mimetype: 'audio/ogg; codecs=opus' });
     return true;
   };
+}
+
+export async function loadSampleFlowAudioOptions(db) {
+  const snap = await db.collection(collectionName).get();
+  return snap.docs.filter((doc) => SAMPLE_AUDIO_MOMENTS.includes(doc.id) && doc.id !== 'confirmation' && doc.data().enabled)
+    .map((doc) => ({ moment: doc.id, script: clean(doc.data().script, 1600) })).filter((audio) => audio.script);
 }

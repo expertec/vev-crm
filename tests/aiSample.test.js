@@ -31,6 +31,50 @@ function imageStore() {
   return { images, get: async (key) => images.get(key), put: async (key) => { const url = `https://storage.googleapis.com/test/${key}.webp`; images.set(key, url); return url; } };
 }
 
+test('videos del chat: limita a dos, conserva firmas y reproduce sin scripts ni autoplay', async () => {
+  const first = 'https://storage.googleapis.com/test/one.mp4?key=123&signature=abc';
+  const second = 'https://storage.googleapis.com/test/two.mp4';
+  const api = apiStub();
+  const schema = await generateAiSample({ ...business, videoURLs: ['javascript:alert(1)', first, first, second, 'https://other.example/three.mp4'] }, { request: api.request, imageStore: imageStore() });
+  assert.deepEqual(schema.aiPage.videos, [first, second]);
+  assert.equal((schema.aiPage.html.match(/<video\b/g) || []).length, 2);
+  assert.ok(schema.aiPage.html.indexOf('id="videos"') < schema.aiPage.html.indexOf('id="proceso"'));
+  assert.match(schema.aiPage.html, /controls playsinline preload="metadata"/);
+  assert.match(schema.aiPage.html, /key=123&amp;signature=abc/);
+  assert.doesNotMatch(schema.aiPage.html, /autoplay|<script|other\.example|javascript:/);
+  const document = samplePageDocument(schema.aiPage);
+  assert.match(document, /media-src https:\/\/storage.googleapis.com;/);
+  assert.match(document, /script-src &#39;none&#39;/);
+  assert.doesNotMatch(document, /allow-scripts|allow-same-origin/);
+  const sanitized = sanitizeSamplePage({ ...design(0), html: `${design(0).html}<video src="https://evil.example/video.mp4" autoplay onplay="alert(1)"></video>` }, { input: normalizeAiSampleInput(business) });
+  assert.doesNotMatch(sanitized.html, /<video|evil\.example|onplay/);
+  assert.notEqual(aiSampleInputHash(business), aiSampleInputHash({ ...business, videoURLs: [first] }));
+});
+
+test('sin videos no agrega una sección vacía ni habilita recursos multimedia', async () => {
+  const api = apiStub();
+  const schema = await generateAiSample(business, { request: api.request, imageStore: imageStore() });
+  assert.doesNotMatch(schema.aiPage.html, /id="videos"|<video/);
+  assert.match(samplePageDocument(schema.aiPage), /media-src &#39;none&#39;/);
+});
+
+test('al encolar recupera videos entrantes guardados en el chat para la muestra', async () => {
+  const { db, ref, read } = memoryDb();
+  const filters = [];
+  const query = {
+    where(field, op, value) { filters.push([field, op, value]); return this; },
+    limit(count) { assert.equal(count, 2); return this; },
+    async get() { return { docs: [{ data: () => ({ mediaUrl: 'https://storage.googleapis.com/test/chat.mp4' }) }] }; },
+  };
+  db.collection = (name) => {
+    assert.equal(name, 'leads');
+    return { doc: (id) => { assert.equal(id, 'lead-1'); return { collection: (name) => { assert.equal(name, 'messages'); return query; } }; } };
+  };
+  await queueAiSampleJob(db, ref, { ...business, leadId: 'lead-1' });
+  assert.deepEqual(filters, [['mediaType', '==', 'video'], ['sender', '==', 'lead']]);
+  assert.deepEqual(read().aiSampleJob.input.videoURLs, ['https://storage.googleapis.com/test/chat.mp4']);
+});
+
 test('la tarjeta digital tiene iconos confiables y llamadas reales sin permitir SVG o teléfonos ajenos', () => {
   const input = normalizeAiSampleInput(business);
   const page = { ...design(0), html: `${design(0).html}<nav><a href="{{PHONE_URL}}">{{ICON_PHONE}} Llamar</a><a href="{{CONTACT_URL}}">{{ICON_WHATSAPP}} WhatsApp {{ICON_ARROW}}</a><a href="tel:+999">Otro teléfono</a>{{ICON_UNKNOWN}}<svg onload="alert(1)"><script>alert(1)</script><image href="https://evil.example/a.svg"/></svg></nav>` };

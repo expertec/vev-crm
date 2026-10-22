@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import sanitizeHtml from 'sanitize-html';
 import postcss from 'postcss';
+import { appendSampleVideos } from './aiSampleVideos.js';
 import { sampleIconPlaceholder, renderSampleIcons } from './aiSampleIcons.js';
-import { AI_SAMPLE_GENERATOR_REVISION, buildSampleVisualPlan, sampleImagePrompt, SAMPLE_PAGE_INSTRUCTIONS, sampleHeroCss } from './aiSampleVisuals.js';
+import { AI_SAMPLE_GENERATOR_REVISION, buildSampleVisualPlan, sampleImagePrompt, SAMPLE_PAGE_INSTRUCTIONS, sampleHeroCss, SAMPLE_BRAND_HEADER_CSS } from './aiSampleVisuals.js';
 export { AI_SAMPLE_GENERATOR_REVISION } from './aiSampleVisuals.js';
 
 export const AI_SAMPLE_VERSION = 'ai-page-v1';
@@ -43,6 +44,7 @@ export function normalizeAiSampleInput(data = {}) {
     contactEmail: /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.contactEmail || '') ? clean(data.contactEmail, 160) : '',
     logoURL: publicImageUrl(data.logoURL),
     photoURLs: photos,
+    videoURLs: [...new Set((Array.isArray(data.videoURLs) ? data.videoURLs : []).map(publicImageUrl).filter(Boolean))].slice(0, 2),
     referenceImageURLs: (Array.isArray(data.referenceImageURLs) ? data.referenceImageURLs : []).map(publicImageUrl).filter(Boolean).slice(0, 3),
     imageContext: (Array.isArray(data.imageContext) ? data.imageContext : []).filter((item) => publicImageUrl(item.url)).slice(0, 12).map((item) => ({ url: publicImageUrl(item.url), role: clean(item.role, 30), description: clean(item.description, 300) })),
     brandPalette: (Array.isArray(data.brandPalette) ? data.brandPalette : []).filter((color) => /^#[0-9a-f]{6}$/i.test(color)).slice(0, 5),
@@ -147,13 +149,14 @@ export function sanitizeSamplePage(page, { input, assets = [] }) {
 }
 
 export function samplePageDocument(page, logoURL = '') {
-  const csp = samplePageCsp([...(page.assets || []), { url: logoURL }]).split('; frame-ancestors')[0];
-  return `<!doctype html><html lang="es-MX"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(csp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${escapeHtml(page.title)}</title><meta name="description" content="${escapeHtml(page.description)}"><style>*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;overflow-wrap:break-word}img{max-width:100%;height:auto} ${page.css}</style></head><body>${page.html}</body></html>`;
+  const csp = samplePageCsp([...(page.assets || []), { url: logoURL }], page.videos || []).split('; frame-ancestors')[0];
+  return `<!doctype html><html lang="es-MX"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(csp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${escapeHtml(page.title)}</title><meta name="description" content="${escapeHtml(page.description)}"><style>*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;overflow-wrap:break-word}img{max-width:100%;height:auto} ${page.css}\n${SAMPLE_BRAND_HEADER_CSS}</style></head><body>${page.html}</body></html>`;
 }
 
-export function samplePageCsp(assets = []) {
+export function samplePageCsp(assets = [], videos = []) {
   const origins = [...new Set(assets.map((item) => publicImageUrl(item.url)).filter(Boolean).map((url) => new URL(url).origin))];
-  return `default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src ${origins.length ? origins.join(' ') : "'none'"}; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox`;
+  const mediaOrigins = [...new Set(videos.map(publicImageUrl).filter(Boolean).map((url) => new URL(url).origin))];
+  return `default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src ${origins.length ? origins.join(' ') : "'none'"}; media-src ${mediaOrigins.length ? mediaOrigins.join(' ') : "'none'"}; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox`;
 }
 
 export async function generateAiSample(data, { request = requestSampleOpenAI, imageStore, savedDesign = null, saveDesign = async () => {}, model = process.env.OPENAI_SAMPLE_MODEL || DEFAULT_SAMPLE_MODEL, imageModel = process.env.OPENAI_SAMPLE_IMAGE_MODEL || DEFAULT_SAMPLE_IMAGE_MODEL } = {}) {
@@ -161,7 +164,7 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
   if (!input.companyInfo || !input.businessStory) throw new Error('Faltan nombre y descripción del negocio.');
   if (!input.logoURL && !input.primaryColor && !input.colorPreference) throw new Error('¿Qué colores te gustaría usar? Elige colores o indica que deseas una propuesta.');
   const visualPlan = buildSampleVisualPlan(input, imageModel);
-  const content = [{ type: 'input_text', text: JSON.stringify({ ...input, reusableAiAssets: undefined, imageSlots: visualPlan.assets.map((asset, slot) => ({ slot, purpose: asset.purpose, origin: asset.origin })), imageTasks: visualPlan.pending.map(({ slot, purpose, sourceUrls }) => ({ slot, purpose, sourceUrls })) }) }];
+  const content = [{ type: 'input_text', text: JSON.stringify({ ...input, videoURLs: undefined, reusableAiAssets: undefined, imageSlots: visualPlan.assets.map((asset, slot) => ({ slot, purpose: asset.purpose, origin: asset.origin })), imageTasks: visualPlan.pending.map(({ slot, purpose, sourceUrls }) => ({ slot, purpose, sourceUrls })) }) }];
   if (input.logoURL) content.push({ type: 'input_image', image_url: input.logoURL, detail: 'high' });
   for (const url of input.photoURLs) content.push({ type: 'input_image', image_url: url, detail: 'low' });
   for (const url of input.referenceImageURLs) content.push({ type: 'input_image', image_url: url, detail: 'low' });
@@ -202,13 +205,13 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
     if (!publicImageUrl(url)) throw new Error('No se pudo guardar una imagen pública válida.');
     assets[task.slot] = { ...assets[task.slot], url, prompt, cacheKey: key };
   }
-  const page = sanitizeSamplePage(preparedDesign, { input, assets });
+  const page = appendSampleVideos(sanitizeSamplePage(preparedDesign, { input, assets }), input.videoURLs);
   return {
     templateId: input.templateId, slug: input.slug, designVersion: AI_SAMPLE_VERSION,
     brand: { name: input.companyInfo, logo: input.logoURL }, colors: { primary: input.logoURL && !input.colorPreference ? palette[0] : input.primaryColor || palette[0], palette },
     hero: { title: page.title, subtitle: page.description, backgroundImageUrl: assets[0].url },
     gallery: { images: assets.filter((asset) => asset.purpose !== 'hero').map((asset) => asset.url) },
     contact: { whatsapp: input.contactWhatsapp, email: input.contactEmail },
-    aiPage: { ...page, version: AI_SAMPLE_VERSION, generatorRevision: AI_SAMPLE_GENERATOR_REVISION, palette, model, imageModel, assets, inputHash: aiSampleInputHash(data, model, imageModel), generatedAt: new Date().toISOString() },
+    aiPage: { ...page, videos: input.videoURLs, version: AI_SAMPLE_VERSION, generatorRevision: AI_SAMPLE_GENERATOR_REVISION, palette, model, imageModel, assets, inputHash: aiSampleInputHash(data, model, imageModel), generatedAt: new Date().toISOString() },
   };
 }

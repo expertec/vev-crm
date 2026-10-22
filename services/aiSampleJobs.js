@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { AI_SAMPLE_VERSION, aiSampleInputHash, generateAiSample, normalizeAiSampleInput } from './aiSampleGenerator.js';
+import { AI_SAMPLE_VERSION, aiSampleInputHash, generateAiSample, normalizeAiSampleInput, publicImageUrl } from './aiSampleGenerator.js';
 
 const LEASE_MS = 15 * 60_000;
 const runningJobs = new Set();
@@ -21,7 +21,14 @@ export function createSampleImageStore(bucket, negocioId) {
 }
 
 export async function queueAiSampleJob(db, negocioRef, data) {
-  const input = normalizeAiSampleInput(data);
+  // Read saved inbound chat videos for both conversational and manual generation.
+  let videoURLs = [];
+  if (data.leadId) {
+    const messages = await db.collection('leads').doc(data.leadId).collection('messages')
+      .where('mediaType', '==', 'video').where('sender', '==', 'lead').limit(2).get();
+    videoURLs = messages.docs.map((doc) => publicImageUrl(doc.data().mediaUrl)).filter(Boolean);
+  }
+  const input = normalizeAiSampleInput({ ...data, videoURLs: [...videoURLs, ...(data.videoURLs || [])] });
   const inputHash = aiSampleInputHash(input);
   return db.runTransaction(async (tx) => {
     const current = (await tx.get(negocioRef)).data() || {};
