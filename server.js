@@ -5463,7 +5463,7 @@ const sampleConversationAgent = createSampleConversationAgent({
   sendFlowAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }),
   loadAudioOptions: () => loadSampleFlowAudioOptions(db),
 });
-const sampleReactivation = registerSampleReactivationRoutes(app, { db, generate: queueConversationSample, readUser: (req) => readAiSampleUser(req, { admin, db }), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }), send: sendMessageToLead, cancelSequences: (leadId) => cancelAllSequences(leadId) });
+const sampleReactivation = registerSampleReactivationRoutes(app, { db, generate: queueConversationSample, loadAudioOptions: () => loadSampleFlowAudioOptions(db), sendFlowAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }), readUser: (req) => readAiSampleUser(req, { admin, db }), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }), send: sendMessageToLead, cancelSequences: (leadId) => cancelAllSequences(leadId) });
 setSampleConversationHandler(sampleConversationAgent.receive, { activate: (leadId) => sampleReactivation.activate(leadId, { uid: 'website-inquiry-automation', role: 'admin' }) });
 registerSampleAgentAudioRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }) });
 
@@ -5475,7 +5475,7 @@ app.post('/api/crm/lead-business/sample-agent', async (req, res) => {
   if (!leadId || leadId.includes('/') || typeof enabled !== 'boolean') return res.status(400).json({ error: 'Faltan contacto y estado del asistente.' });
   if (enabled && !process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'Falta configurar OPENAI_API_KEY en el servidor.' });
   try {
-    if (enabled) return res.json(await sampleReactivation.activate(leadId, user));
+    if (enabled) return res.json(await (req.body.startWithWelcome === true ? sampleReactivation.startWelcome(leadId, user) : sampleReactivation.activate(leadId, user)));
     const ref = db.collection('leads').doc(leadId);
     await db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);

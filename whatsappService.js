@@ -16,6 +16,7 @@ import path from 'path';
 import axios from 'axios';
 import admin from 'firebase-admin';
 import { randomUUID } from 'node:crypto';
+import { isWebsiteCampaignTrigger } from './utils/websiteCampaignContext.js';
 import { canAutoStartSampleAgent, isWebsiteInquiry } from './services/sampleCampaignAgent.js';
 import { db } from './firebaseAdmin.js';
 import ffmpeg from 'fluent-ffmpeg';
@@ -1662,6 +1663,35 @@ export async function connectToWhatsApp() {
                   : {}),
                 lastMessageAt: inboundAt,
               };
+
+              // A web campaign can arrive before WhatsApp decrypts its first message.
+              // Start with a system context event, never a fabricated customer message.
+              if (sender === 'lead' && sampleConversationHandler && cfg.sampleAgentCampaignEnabled !== false
+                && shouldTreatAsMetaAdInbound && isWebsiteCampaignTrigger(detectedTrigger)
+                && hasReachableTarget && canAutoStartSampleAgent(existingLeadData || {})) {
+                const started = await db.runTransaction(async (tx) => {
+                  const currentSnap = await tx.get(leadRef);
+                  const current = currentSnap.data() || {};
+                  if (!canAutoStartSampleAgent(current)) return false;
+                  tx.set(leadRef, {
+                    ...(!currentSnap.exists ? { ...buildNewInboundLeadSalesBrainDefaults(), fecha_creacion: inboundAt, estado: 'nuevo', unreadCount: 1 } : {}),
+                    ...leadPayload, nombre: current.nombre || leadPayload.nombre,
+                    etiquetas: FieldValue.arrayUnion(...baseEtiquetas, 'MuestraChatIA'),
+                    sampleAgent: { enabled: true, version: randomUUID(), status: 'collecting', history: [], images: [], brief: {}, confirmationHash: '', source: 'campaign_context', updatedAt: inboundAt },
+                  }, { merge: true });
+                  return true;
+                });
+                if (started) {
+                  const contextId = `campaign-context:${msg.key.id}`;
+                  await persistLeadMessage(leadRef, { sender: 'system', content: '[sample-agent] Conversación de campaña web recibida; primer mensaje sin descifrar.', timestamp: inboundAt }, contextId);
+                  await cancelAllSequences(leadId);
+                  void trackWhatsappLeadConversionOnce({ leadId, leadPhone: normNum });
+                  await sampleConversationHandler({ leadRef, message: { content: '', mediaType: 'campaign_context' }, messageId: contextId });
+                  console.log('[sample-campaign] bienvenida iniciada desde contexto de campaña:', leadId);
+                  messageHandledOk = false;
+                  continue;
+                }
+              }
 
               if (!leadSnap.exists) {
                 // Crear lead nuevo sin mensaje

@@ -1,5 +1,6 @@
 import { DEFAULT_SAMPLE_MODEL, requestSampleOpenAI } from './aiSampleGenerator.js';
 import { agentCanReply } from './sampleConversationAgent.js';
+import { isWebsiteCampaignTrigger } from '../utils/websiteCampaignContext.js';
 import { hasDeliveredSample } from './sampleAgentReactivation.js';
 
 export function canAutoStartSampleAgent(lead = {}) {
@@ -12,7 +13,7 @@ export function canAutoStartSampleAgent(lead = {}) {
 export async function isWebsiteInquiry({ text = '', campaign = null }, request = (resource, body) => requestSampleOpenAI(resource, body, { timeoutMs: 12000 })) {
   const normalized = String(text).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   if (normalized === 'hola tengo un negocio y quiero informacion sobre la pagina web de 990 al ano') return true;
-  const campaignIsWeb = campaign && /\b(?:web|pagina|sitio)\b/i.test(JSON.stringify(campaign));
+  const campaignIsWeb = campaign && (isWebsiteCampaignTrigger(campaign.trigger) || /\b(?:web|pagina|sitio)\b/i.test(JSON.stringify(campaign)));
   if (!normalized || (!/\b(?:pagina|paginas|web|sitio|internet|presencia|negocio)\b/.test(normalized) && !campaignIsWeb)) return false;
   const result = await request('responses', {
     model: process.env.OPENAI_SAMPLE_AGENT_MODEL || DEFAULT_SAMPLE_MODEL, store: false, max_output_tokens: 500,

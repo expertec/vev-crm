@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { agentCanReply, briefSummary, extractConversationBrief, missingBriefQuestion, normalizeConversationBrief, sampleBriefHash, sampleInputFromConversation } from './sampleConversationAgent.js';
 import { canGenerateAiSample } from './aiSampleAccess.js';
 import { publicImageUrl } from './aiSampleGenerator.js';
+import { hasUnreadWebsiteCampaign } from '../utils/websiteCampaignContext.js';
 
 const millis = (value) => value?.toMillis?.() || (value ? new Date(value).getTime() : 0) || 0;
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -34,7 +35,10 @@ export async function readReactivationMessages(leadRef) {
 }
 
 export async function buildReactivationPreview({ lead, messages, transcribe, extract = extractConversationBrief }) {
-  if (!messages.some((m) => m.sender === 'lead')) throw error('No hay mensajes anteriores del cliente para retomar.', 400);
+  if (!messages.some((m) => m.sender === 'lead')) {
+    if (!hasUnreadWebsiteCampaign(lead)) throw error('No hay mensajes anteriores del cliente para retomar.', 400);
+    return { brief: normalizeConversationBrief({}), images: [], history: [], reply: '¡Hola! Te ayudo a preparar una muestra de tu página web. ¿Cómo se llama tu negocio y a qué se dedica?', status: 'collecting', failedAudios: 0, videoCount: 0 };
+  }
   const images = [...(lead.sampleAgent?.images || [])];
   const history = [];
   let audioCount = 0;
@@ -65,7 +69,7 @@ export async function buildReactivationPreview({ lead, messages, transcribe, ext
   return { brief, images, history: history.slice(-24), reply, status: missing ? 'collecting' : 'awaiting_confirmation', failedAudios, videoCount: Math.min(2, messages.filter((m) => m.sender === 'lead' && m.mediaType === 'video').length) };
 }
 
-export function registerSampleReactivationRoutes(app, { db, readUser, transcribe, send, cancelSequences = async () => {}, extract, generate }) {
+export function registerSampleReactivationRoutes(app, { db, readUser, transcribe, send, cancelSequences = async () => {}, extract, generate, loadAudioOptions = async () => [], sendFlowAudio }) {
   const route = (path, handler) => app.post(path, async (req, res) => {
     try {
       const user = await readUser(req);
@@ -138,6 +142,7 @@ export function registerSampleReactivationRoutes(app, { db, readUser, transcribe
     if (!preview) return { success: true, duplicate: true, sampleAgent: lead.sampleAgent };
     let generation = null;
     let reply = preview.reply;
+    let welcomeAudio = false;
     try {
       await cancelSequences(ref.id);
       const current = (await ref.get()).data() || {};
@@ -150,16 +155,22 @@ export function registerSampleReactivationRoutes(app, { db, readUser, transcribe
         await draftRef.update({ generation });
         reply = 'Ya revisé lo que me compartiste y tengo la información necesaria. Voy a preparar tu muestra y te enviaré el enlace por aquí cuando esté lista.';
       }
-      if (generation?.ready) {
+      if (preview.sendMode === 'welcome') {
+        welcomeAudio = Boolean(await sendFlowAudio?.({ leadId: ref.id, moment: 'welcome', isCurrent: async () => {
+          const latest = (await ref.get()).data() || {};
+          return latest.sampleAgent?.version === owner && agentCanReply(latest);
+        } }));
+        if (!welcomeAudio) throw error('No se pudo enviar el audio de bienvenida. Revisa que esté activo y que WhatsApp esté conectado.', 503);
+      } else if (generation?.ready) {
         await send(ref.id, '¡Tu muestra ya está lista! Te comparto el enlace en el siguiente mensaje. 👇');
         await send(ref.id, generation.sampleUrl);
       } else await send(ref.id, reply);
       await db.runTransaction(async (tx) => {
         const current = (await tx.get(ref)).data() || {};
         tx.update(draftRef, { state: 'sent', sentAt: new Date() });
-        if (current.sampleAgent?.version === owner) tx.update(ref, { 'sampleAgent.history': [...preview.history, { role: 'assistant', text: reply }].slice(-24), ...(generation ? { 'sampleAgent.status': generation.ready ? 'completed' : 'generating', 'sampleAgent.enabled': !generation.ready, 'sampleAgent.confirmationHash': '', 'sampleAgent.negocioId': generation.negocioId } : {}), 'sampleAgent.updatedAt': new Date(), 'sampleAgent.leaseOwner': '', 'sampleAgent.leaseUntil': new Date(0), 'sampleAgent.reactivationId': draftRef.id });
+        if (current.sampleAgent?.version === owner) tx.update(ref, { 'sampleAgent.history': [...preview.history, { role: 'assistant', text: reply }].slice(-24), ...(generation ? { 'sampleAgent.status': generation.ready ? 'completed' : 'generating', 'sampleAgent.enabled': !generation.ready, 'sampleAgent.confirmationHash': '', 'sampleAgent.negocioId': generation.negocioId } : {}), ...(welcomeAudio ? { 'sampleAgent.audioMomentsSent': [...new Set([...(current.sampleAgent.audioMomentsSent || []), 'welcome'])] } : {}), 'sampleAgent.updatedAt': new Date(), 'sampleAgent.leaseOwner': '', 'sampleAgent.leaseUntil': new Date(0), 'sampleAgent.reactivationId': draftRef.id });
       });
-      return { success: true, generated: Boolean(generation), sampleAgent: (await ref.get()).data()?.sampleAgent };
+      return { success: true, welcomeAudio, generated: Boolean(generation), sampleAgent: (await ref.get()).data()?.sampleAgent };
     } catch (err) {
       await db.runTransaction(async (tx) => {
         const current = (await tx.get(ref)).data() || {};
@@ -173,6 +184,24 @@ export function registerSampleReactivationRoutes(app, { db, readUser, transcribe
   route('/api/crm/sample-agent/reactivation/send', async (req, res, user) => res.json(await deliver(req.body.leadId, req.body.draftId, user)));
   const activating = new Map();
   return {
+    startWelcome(leadId, user) {
+      const key = `${user.uid}:${leadId}`;
+      if (activating.has(key)) return activating.get(key);
+      const work = (async () => {
+        const { ref, lead } = await contact(leadId, user);
+        if (lead.sampleAgent?.audioMomentsSent?.includes('welcome')) return { success: true, duplicate: true, welcomeAudio: true, sampleAgent: lead.sampleAgent };
+        const welcome = (await loadAudioOptions()).find((audio) => audio.moment === 'welcome');
+        if (!welcome || !sendFlowAudio) throw error('Graba y activa el audio en Audios del asistente → Bienvenida.', 400);
+        const messages = await readReactivationMessages(ref);
+        const images = lead.sampleAgent?.images || [];
+        const history = lead.sampleAgent?.history?.length ? lead.sampleAgent.history : messages.map((m) => ({ role: m.sender === 'lead' ? 'customer' : 'assistant', text: String(m.transcription?.text || m.transcription || m.content || '').slice(0, 2000), mediaType: m.mediaType || 'text' })).slice(-24);
+        const draft = ref.collection('sampleAgentReactivations').doc(randomUUID());
+        await draft.set({ brief: normalizeConversationBrief(lead.sampleAgent?.brief || {}, images), images, history, reply: welcome.script, status: 'collecting', sendMode: 'welcome', source: reactivationSource(lead, messages), state: 'prepared', createdBy: user.uid, createdAt: new Date(), expiresAt: new Date(Date.now() + 5 * 60_000) });
+        return deliver(leadId, draft.id, user);
+      })().finally(() => activating.delete(key));
+      activating.set(key, work);
+      return work;
+    },
     activate(leadId, user) {
       const key = `${user.uid}:${leadId}`;
       if (activating.has(key)) return activating.get(key);

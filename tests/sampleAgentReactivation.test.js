@@ -223,3 +223,55 @@ test('activar no genera automáticamente si hay audios pendientes de entender', 
   assert.equal(result.generated, false);
   assert.match(h.sends[0][1], /¿Confirmas/);
 });
+
+
+test('un contacto de campaña sin primer mensaje descifrado puede activarse sin inventar un brief', async () => {
+  const preview = await buildReactivationPreview({ lead: { etiquetas: ['MetaAds', 'MensajeNoDesencriptado'], metaAttribution: { trigger: 'LeadWhatsapp' } }, messages: [], extract: async () => assert.fail('No hay datos que interpretar') });
+  assert.equal(preview.brief.companyName, '');
+  assert.equal(preview.history.length, 0);
+  assert.equal(preview.status, 'collecting');
+  assert.match(preview.reply, /Cómo se llama tu negocio/);
+  await assert.rejects(buildReactivationPreview({ lead: {}, messages: [] }), /No hay mensajes/);
+});
+
+test('iniciar con bienvenida envía el audio aunque esté activo, conserva historial y no manda retomamos', async () => {
+  let audios = 0;
+  const h = harness({
+    loadAudioOptions: async () => [{ moment: 'welcome', script: '¡Hola! Soy Sergio. ¿Cómo se llama tu negocio?' }],
+    sendFlowAudio: async ({ moment, isCurrent }) => { assert.equal(moment, 'welcome'); assert.equal(await isCurrent(), true); audios++; return true; },
+    extract: async () => assert.fail('La bienvenida manual no debe esperar al modelo'),
+  });
+  const lead = h.rows.get('leads/lead');
+  lead.sampleAgent.enabled = true;
+  lead.sampleAgent.history = [{ role: 'customer', text: 'También lo posicionas en Google' }];
+  lead.sampleAgent.brief = { companyName: 'Negocio previo' };
+  const result = await h.service.startWelcome('lead', user);
+  assert.equal(audios, 1); assert.equal(h.sends.length, 0);
+  assert.equal(result.sampleAgent.brief.companyName, 'Negocio previo');
+  assert.equal(result.sampleAgent.history[0].text, 'También lo posicionas en Google');
+  assert.match(result.sampleAgent.history.at(-1).text, /Soy Sergio/);
+  assert.doesNotMatch(result.sampleAgent.history.at(-1).text, /retomamos/);
+  assert.deepEqual(result.sampleAgent.audioMomentsSent, ['welcome']);
+  assert.equal((await h.service.startWelcome('lead', user)).duplicate, true);
+  assert.equal(audios, 1);
+});
+
+test('la bienvenida manual no requiere mensajes previos y dos clics no duplican el audio', async () => {
+  let audios = 0;
+  const h = harness({ loadAudioOptions: async () => [{ moment: 'welcome', script: 'Hola, cuéntame de tu negocio.' }], sendFlowAudio: async () => { audios++; return true; } });
+  h.rows.delete('leads/lead/messages/1');
+  const results = await Promise.all([h.service.startWelcome('lead', user), h.service.startWelcome('lead', user)]);
+  assert.equal(audios, 1);
+  assert.equal(results[0].sampleAgent.enabled, true);
+  assert.equal(results[1].sampleAgent.enabled, true);
+  assert.equal(h.sends.length, 0);
+});
+
+test('la bienvenida manual avisa si falta la grabación y respeta atención humana', async () => {
+  const h = harness();
+  await assert.rejects(h.service.startWelcome('lead', user), /Graba y activa/);
+  assert.equal(h.sends.length, 0);
+  assert.notEqual(h.rows.get('leads/lead').sampleAgent.enabled, true);
+  h.rows.get('leads/lead').humanControl = true;
+  await assert.rejects(h.service.startWelcome('lead', user), /atención humana/);
+});

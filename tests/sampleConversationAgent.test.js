@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSampleConversationAgent, normalizeConversationBrief, missingBriefQuestion, isExplicitSampleConfirmation, sampleInputFromConversation, extractConversationBrief, interpretSampleApproval, agentCanReply } from '../services/sampleConversationAgent.js';
+import { createSampleConversationAgent, normalizeConversationBrief, missingBriefQuestion, isExplicitSampleConfirmation, sampleInputFromConversation, extractConversationBrief, interpretSampleApproval, agentCanReply, briefSummary } from '../services/sampleConversationAgent.js';
 import { shouldBlockSequenceByLeadContext } from '../utils/sequenceTriggerGuards.js';
 
 const complete = () => normalizeConversationBrief({ companyName: 'Makiatto', activity: 'Venta de bocinas y amplificadores', objective: 'Cotizaciones por WhatsApp', offerings: ['Bocinas activas', 'Amplificadores'], customers: 'Músicos y organizadores', differentiators: 'Asesoría para elegir equipo', serviceArea: 'Monterrey', logoChoice: 'none', colorPreference: 'Verde y negro', photosChoice: 'none' });
@@ -496,4 +496,18 @@ test('la bienvenida fija acompaña el resumen cuando el primer mensaje ya trae t
   await s.receive('Datos completos de mi negocio', '1');
   assert.deepEqual(sent, ['welcome']);
   assert.match(s.replies[0], /Así prepararé tu muestra/);
+});
+
+
+test('el resumen de doce fotos se mantiene breve y no enumera descripciones internas', () => {
+  const brief = { ...complete(), images: Array.from({ length: 12 }, (_, index) => ({ index, role: 'work', description: 'Tinaco y calentador solar; uso en la web por confirmar. '.repeat(5) })) };
+  const summary = briefSummary(brief);
+  assert.ok(summary.length < 600);
+  assert.match(summary, /hasta 3 de tus fotos/);
+  assert.doesNotMatch(summary, /Tinaco|por confirmar|Diferenciadores|Objetivo/);
+});
+
+test('los colores exclusivos de un logo pendiente no completan los colores de la web', () => {
+  const brief = { ...complete(), colorPreference: 'Amarillo y azul exclusivamente para el logo. Colores de la web sin definir.' };
+  assert.match(missingBriefQuestion(brief), /colores.*página/);
 });

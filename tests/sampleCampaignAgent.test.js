@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { isWebsiteCampaignTrigger, hasUnreadWebsiteCampaign } from '../utils/websiteCampaignContext.js';
 import { canAutoStartSampleAgent, isWebsiteInquiry } from '../services/sampleCampaignAgent.js';
 
 test('la plantilla de campaña inicia el agente sin pagar una clasificación adicional', async () => {
@@ -47,4 +48,21 @@ test('la activación respeta pausas, clientes, atención humana y muestras ya en
 test('una clasificación incompleta o fallida no activa el agente', async () => {
   await assert.rejects(isWebsiteInquiry({ text: 'Quiero mi página web' }, async () => ({ status: 'incomplete' })), /clasificación/);
   await assert.rejects(isWebsiteInquiry({ text: 'Quiero una web para mi negocio' }, async () => { throw Error('Temporal'); }), /Temporal/);
+});
+
+
+test('el contexto sin descifrar solo inicia bienvenida en rutas de campaña web', () => {
+  assert.equal(isWebsiteCampaignTrigger('LeadWhatsapp'), true);
+  assert.equal(isWebsiteCampaignTrigger('PlanRedes'), false);
+  assert.equal(isWebsiteCampaignTrigger('Desconocida'), false);
+  assert.equal(hasUnreadWebsiteCampaign({ etiquetas: ['MensajeNoDesencriptado'], metaAttribution: { trigger: 'LeadWhatsapp' } }), true);
+  assert.equal(hasUnreadWebsiteCampaign({ etiquetas: ['MensajeNoDesencriptado'], metaAttribution: { trigger: 'PlanRedes' } }), false);
+});
+
+test('una respuesta breve usa el contexto de la ruta web aunque no exista título de anuncio', async () => {
+  let called = false;
+  assert.equal(await isWebsiteInquiry({ text: 'También lo posicionas en Google', campaign: { trigger: 'LeadWhatsapp' } }, async () => {
+    called = true; return { output_text: '{"intent":"website"}' };
+  }), true);
+  assert.equal(called, true);
 });
