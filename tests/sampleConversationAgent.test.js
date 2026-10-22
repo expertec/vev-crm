@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSampleConversationAgent, normalizeConversationBrief, missingBriefQuestion, isExplicitSampleConfirmation, sampleInputFromConversation, extractConversationBrief, agentCanReply } from '../services/sampleConversationAgent.js';
+import { createSampleConversationAgent, normalizeConversationBrief, missingBriefQuestion, isExplicitSampleConfirmation, sampleInputFromConversation, extractConversationBrief, interpretSampleApproval, agentCanReply } from '../services/sampleConversationAgent.js';
 import { shouldBlockSequenceByLeadContext } from '../utils/sequenceTriggerGuards.js';
 
 const complete = () => normalizeConversationBrief({ companyName: 'Makiatto', activity: 'Venta de bocinas y amplificadores', objective: 'Cotizaciones por WhatsApp', offerings: ['Bocinas activas', 'Amplificadores'], customers: 'Músicos y organizadores', differentiators: 'Asesoría para elegir equipo', serviceArea: 'Monterrey', logoChoice: 'none', colorPreference: 'Verde y negro', photosChoice: 'none' });
@@ -32,12 +32,12 @@ function database() {
   };
 }
 
-function setup(extract, transcribe) {
+function setup(extract, transcribe, options = {}) {
   const db = database();
   const leadRef = db.collection('leads').doc('test');
   db.rows.set(leadRef.path, { telefono: '528112345678', sampleAgent: { enabled: true, version: 'v1', status: 'collecting', history: [], images: [], brief: {} } });
   const replies = []; const jobs = []; const errors = [];
-  const agent = createSampleConversationAgent({ db, extract, transcribe, send: async (_id, text) => replies.push(text), generate: async (job) => { jobs.push(job); return { negocioId: 'business' }; }, logger: { warn: (...args) => errors.push(args) } });
+  const agent = createSampleConversationAgent({ db, extract, transcribe, interpretApproval: async () => ({ intent: 'change', reply: '' }), send: async (_id, text) => replies.push(text), generate: async (job) => { jobs.push(job); return { negocioId: 'business' }; }, logger: { warn: (...args) => errors.push(args) }, ...options });
   const receive = (text, id, extra = {}) => agent.receive({ leadRef, messageId: id, message: { content: text, mediaType: 'text', ...extra } });
   return { db, leadRef, agent, replies, jobs, errors, receive };
 }
@@ -143,6 +143,9 @@ test('un fallo de IA no pierde el mensaje y los reintentos están limitados', as
 
 test('no confunde una corrección con permiso para generar', () => {
   assert.equal(isExplicitSampleConfirmation('sí, generar'), true);
+  assert.equal(isExplicitSampleConfirmation('si apruebo'), true);
+  assert.equal(isExplicitSampleConfirmation('ok genera la muestra'), true);
+  assert.equal(isExplicitSampleConfirmation('sí apruebo pero cambia el nombre'), false);
   assert.equal(isExplicitSampleConfirmation('Si, pero cambia mi nombre'), false);
   assert.equal(isExplicitSampleConfirmation('hola'), false);
   assert.equal(shouldBlockSequenceByLeadContext({ sampleAgent: { enabled: true } }, 'NuevoLeadWeb').blocked, true);
@@ -228,4 +231,86 @@ test('pausar mientras se transcribe evita respuestas tardías y otra llamada al 
   release(); await processing;
   assert.equal(calls, 0);
   assert.equal(s.replies.length, 0);
+});
+
+test('acepta aprobaciones naturales conservando exactamente los datos del resumen', async () => {
+  for (const text of ['si apruebo', 'ok genera la muestra', 'me gusta, puedes empezar', 'Sí, adelante con eso']) {
+    const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }), undefined, {
+      interpretApproval: async ({ brief, history, text: message }) => {
+        assert.equal(message, text); assert.equal(brief.companyName, 'Makiatto'); assert.match(history.at(-1).text, /¿Confirmas/);
+        return { intent: 'approve', reply: '' };
+      },
+    });
+    await s.receive('Datos de mi negocio', '1');
+    await s.receive(text, '2');
+    assert.equal(s.jobs.length, 1, text);
+    assert.equal(s.replies.filter((reply) => reply.includes('¿Confirmas')).length, 1, 'no repite el resumen');
+    assert.equal(s.jobs[0].input.companyInfo, 'Makiatto');
+  }
+});
+
+test('la aprobación funciona después de que Firestore reordena las claves de los mapas', async () => {
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }));
+  await s.receive('Datos de mi negocio', '1');
+  const stored = s.db.rows.get(s.leadRef.path);
+  stored.sampleAgent.brief = Object.fromEntries(Object.entries(stored.sampleAgent.brief).sort(([a], [b]) => a.localeCompare(b)));
+  s.db.rows.set(s.leadRef.path, stored);
+  await s.receive('ok genera la muestra', '2');
+  assert.equal(s.jobs.length, 1);
+});
+
+test('recupera una aprobación pendiente de la versión anterior sin pedir otro resumen', async () => {
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }));
+  await s.receive('Datos de mi negocio', '1');
+  await s.leadRef.update({ 'sampleAgent.confirmationHash': 'hash-con-el-orden-anterior' });
+  await s.receive('sí, generar', '2');
+  assert.equal(s.jobs.length, 1);
+});
+
+test('responde dudas antes de aprobar sin repetir el resumen ni generar', async () => {
+  let next = 'question';
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }), undefined, {
+    interpretApproval: async () => ({ intent: next, reply: 'Sí, la muestra tendrá un botón para solicitar cotizaciones por WhatsApp. ¿La preparo?' }),
+  });
+  await s.receive('Datos de mi negocio', '1');
+  await s.receive('¿Va a tener botón de WhatsApp?', '2');
+  assert.equal(s.jobs.length, 0);
+  assert.equal(s.replies.filter((reply) => reply.includes('¿Confirmas')).length, 1);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.status, 'awaiting_confirmation');
+  next = 'approve';
+  await s.receive('Sí, me parece muy bien', '3');
+  assert.equal(s.jobs.length, 1);
+});
+
+test('el intérprete recibe el contexto y devuelve solo la intención, sin reescribir el brief', async () => {
+  const result = await interpretSampleApproval({ brief: complete(), history: [{ role: 'assistant', text: '¿Confirmas?' }], text: 'si apruebo' }, async (resource, body) => {
+    assert.equal(resource, 'responses');
+    const content = JSON.parse(body.input[0].content[0].text);
+    assert.equal(content.text, 'si apruebo'); assert.equal(content.brief.companyName, 'Makiatto');
+    assert.equal(body.text.format.strict, true);
+    return { output_text: JSON.stringify({ intent: 'approve', reply: '' }) };
+  });
+  assert.equal(result.intent, 'approve');
+});
+
+test('los audios acompañan el texto una sola vez por momento y los duplicados no los repiten', async () => {
+  const sent = [];
+  const s = setup(async () => ({ brief: normalizeConversationBrief({ companyName: 'Makiatto' }), action: 'ask', reply: '¿A qué se dedica?' }), undefined, {
+    sendFlowAudio: async ({ moment }) => { sent.push(moment); return true; },
+  });
+  await s.receive('Hola', '1'); await s.receive('Hola', '1');
+  await s.receive('Makiatto', '2'); await s.receive('Otra respuesta', '3');
+  assert.deepEqual(sent, ['welcome', 'business']);
+  assert.equal(s.replies.length, 3);
+  assert.deepEqual((await s.leadRef.get()).data().sampleAgent.audioMomentsSent, ['welcome', 'business']);
+});
+
+test('un fallo en el audio de respuesta conserva el texto y permite continuar el flujo', async () => {
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }), undefined, { sendFlowAudio: async () => { throw new Error('WhatsApp audio failed'); } });
+  await s.receive('Datos de mi negocio', '1');
+  assert.equal(s.replies.length, 1);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.status, 'awaiting_confirmation');
+  await s.receive('sí, generar', '2');
+  assert.equal(s.jobs.length, 1);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.enabled, true);
 });

@@ -98,6 +98,7 @@ import { canGenerateAiSample, readAiSampleUser, isAiSampleAvailable } from './se
 import { buildAiSamplePublicUrl } from './services/sampleUrls.js';
 import { createSampleConversationAgent, agentCanReply } from './services/sampleConversationAgent.js';
 import { createSampleAudioTranscriber } from './services/sampleAudioTranscription.js';
+import { registerSampleAgentAudioRoutes, createSampleFlowAudioSender } from './services/sampleAgentAudioLibrary.js';
 
 // ================ 🆕 SISTEMA DE PIN ================
 import { activarPlan, reenviarPIN } from './activarPlanRoutes.js';
@@ -5448,8 +5449,10 @@ async function queueConversationSample({ leadRef, leadId, lead, input }) {
 const sampleConversationAgent = createSampleConversationAgent({
   db, send: sendMessageToLead, generate: queueConversationSample,
   transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }),
+  sendFlowAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }),
 });
 setSampleConversationHandler(sampleConversationAgent.receive);
+registerSampleAgentAudioRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }) });
 
 app.post('/api/crm/lead-business/sample-agent', async (req, res) => {
   const user = await readAiSampleUser(req, { admin, db });

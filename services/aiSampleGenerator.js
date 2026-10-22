@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import sanitizeHtml from 'sanitize-html';
 import postcss from 'postcss';
+import { sampleIconPlaceholder, renderSampleIcons } from './aiSampleIcons.js';
 import { AI_SAMPLE_GENERATOR_REVISION, buildSampleVisualPlan, sampleImagePrompt, SAMPLE_PAGE_INSTRUCTIONS, sampleHeroCss } from './aiSampleVisuals.js';
 export { AI_SAMPLE_GENERATOR_REVISION } from './aiSampleVisuals.js';
 
@@ -106,23 +107,24 @@ export function sanitizeSamplePage(page, { input, assets = [] }) {
   const css = sanitizeSampleCss(page.css);
   const digits = input.contactWhatsapp;
   const contactUrl = digits ? `https://wa.me/${digits}` : '#contacto';
-  const replacements = { CONTACT_URL: contactUrl, LOGO: input.logoURL };
+  const replacements = { CONTACT_URL: contactUrl, PHONE_URL: digits ? `tel:+${digits}` : '', EMAIL_URL: input.contactEmail ? `mailto:${input.contactEmail}` : '', LOGO: input.logoURL };
   assets.forEach((asset, index) => { replacements[`IMAGE_${index}`] = asset.url; });
-  const source = page.html.replace(/\{\{([A-Z_0-9]+)\}\}/g, (_, key) => escapeHtml(replacements[key] || ''));
+  const source = page.html.replace(/\{\{([A-Z_0-9]+)\}\}/g, (_, key) => key.startsWith('ICON_') ? sampleIconPlaceholder(key) : escapeHtml(replacements[key] || ''));
   const allowedImages = new Set([input.logoURL, ...assets.map((item) => item.url)].filter(Boolean));
   const emailUrl = input.contactEmail ? `mailto:${input.contactEmail}` : '';
+  const phoneUrl = digits ? `tel:+${digits}` : '';
   let imageCount = 0;
   let contactCount = 0;
   let logoCount = 0;
   const usedImages = new Set();
   const html = sanitizeHtml(source, {
     allowedTags: ['header', 'nav', 'main', 'section', 'article', 'aside', 'footer', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'p', 'a', 'img', 'ul', 'ol', 'li', 'strong', 'em', 'small', 'br', 'hr', 'figure', 'figcaption', 'details', 'summary'],
-    allowedAttributes: { '*': ['class', 'id', 'aria-label'], a: ['href', 'target', 'rel'], img: ['src', 'alt', 'width', 'height', 'loading', 'decoding', 'fetchpriority'] },
-    allowedSchemes: ['https', 'mailto'], allowProtocolRelative: false,
+    allowedAttributes: { '*': ['class', 'id', 'aria-label', 'aria-hidden'], a: ['href', 'target', 'rel'], img: ['src', 'alt', 'width', 'height', 'loading', 'decoding', 'fetchpriority'] },
+    allowedSchemes: ['https', 'mailto', 'tel'], allowProtocolRelative: false,
     transformTags: {
       a: (_tag, attributes) => {
         let href = attributes.href || '';
-        if (href !== contactUrl && href !== emailUrl && !/^#[a-zA-Z][\w-]*$/.test(href)) href = '#contacto';
+        if (href !== contactUrl && href !== emailUrl && href !== phoneUrl && !/^#[a-zA-Z][\w-]*$/.test(href)) href = '#contacto';
         if (digits && href === contactUrl) contactCount += 1;
         return { tagName: 'a', attribs: { ...attributes, href, target: href.startsWith('https:') ? '_blank' : '_self', rel: 'noopener noreferrer' } };
       },
@@ -141,7 +143,7 @@ export function sanitizeSamplePage(page, { input, assets = [] }) {
   if (assets.some((asset) => ['ai_generated', 'ai_edited'].includes(asset.origin) && !usedImages.has(asset.url))) throw new Error('El diseño omitió imágenes generadas para la muestra.');
   if (input.logoURL && !logoCount) throw new Error('La muestra no conservó el logo proporcionado.');
   if (digits && !contactCount) throw new Error('La muestra no contiene un contacto de WhatsApp válido.');
-  return { title: clean(page.title || input.companyInfo, 150), description: clean(page.description, 250), html, css };
+  return { title: clean(page.title || input.companyInfo, 150), description: clean(page.description, 250), html: renderSampleIcons(html), css };
 }
 
 export function samplePageDocument(page, logoURL = '') {

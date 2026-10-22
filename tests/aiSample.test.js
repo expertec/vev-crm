@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { generateAiSample, normalizeAiSampleInput, sanitizeSamplePage, sanitizeSampleCss, samplePageDocument, aiSampleInputHash, publicImageUrl, requestSampleOpenAI } from '../services/aiSampleGenerator.js';
 import { queueAiSampleJob, runAiSampleJob } from '../services/aiSampleJobs.js';
 import { canGenerateAiSample, isAiSampleAvailable } from '../services/aiSampleAccess.js';
+import { sampleHeroCss } from '../services/aiSampleVisuals.js';
 
 const business = { companyInfo: 'Taller Norte', businessStory: 'Reparación y mantenimiento de bicicletas en Monterrey.', contactWhatsapp: '528112345678', slug: 'taller-norte', primaryColor: '#0066cc', aiImageCount: 1 };
 const design = (count = 1) => ({
@@ -29,6 +30,29 @@ function imageStore() {
   const images = new Map();
   return { images, get: async (key) => images.get(key), put: async (key) => { const url = `https://storage.googleapis.com/test/${key}.webp`; images.set(key, url); return url; } };
 }
+
+test('la tarjeta digital tiene iconos confiables y llamadas reales sin permitir SVG o teléfonos ajenos', () => {
+  const input = normalizeAiSampleInput(business);
+  const page = { ...design(0), html: `${design(0).html}<nav><a href="{{PHONE_URL}}">{{ICON_PHONE}} Llamar</a><a href="{{CONTACT_URL}}">{{ICON_WHATSAPP}} WhatsApp {{ICON_ARROW}}</a><a href="tel:+999">Otro teléfono</a>{{ICON_UNKNOWN}}<svg onload="alert(1)"><script>alert(1)</script><image href="https://evil.example/a.svg"/></svg></nav>` };
+  const result = sanitizeSamplePage(page, { input });
+  assert.match(result.html, /href="tel:\+528112345678"/);
+  assert.match(result.html, /class="nw-icon nw-icon-phone"[^>]*><svg/);
+  assert.match(result.html, /class="nw-icon nw-icon-whatsapp"[^>]*><svg/);
+  assert.doesNotMatch(result.html, /tel:\+999|onload|<script|evil.example|\{\{ICON_/);
+  const document = samplePageDocument({ ...result, assets: [] });
+  assert.match(document, /script-src &#39;none&#39;/);
+});
+
+test('conserva animaciones y movimiento reducido, con CTA legible para paletas claras y oscuras', () => {
+  const dark = sanitizeSampleCss(sampleHeroCss(['#000000', '#ffffff', '#008800']));
+  const light = sanitizeSampleCss(sampleHeroCss(['#ffffff', '#000000', '#008800']));
+  assert.match(dark, /--nw-on-accent:#ffffff/);
+  assert.match(light, /--nw-on-accent:#111111/);
+  assert.match(dark, /prefers-reduced-motion:reduce/);
+  assert.match(dark, /animation:none!important/);
+  assert.match(dark, /@keyframes nw-rise/);
+  assert.match(dark, /body:has\(\.nw-mobile-cta\)/, 'la barra fija reserva espacio para no tapar el pie');
+});
 
 test('usa la paleta confirmada del logo sin imponer azul en la portada y conserva referencias solo como contexto', async () => {
   const api = apiStub({ ...design(), html: `${design().html}<img src="{{LOGO}}" alt="Logo">` });
