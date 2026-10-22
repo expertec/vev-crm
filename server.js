@@ -5464,7 +5464,7 @@ const sampleConversationAgent = createSampleConversationAgent({
   loadAudioOptions: () => loadSampleFlowAudioOptions(db),
 });
 setSampleConversationHandler(sampleConversationAgent.receive);
-registerSampleReactivationRoutes(app, { db, readUser: (req) => readAiSampleUser(req, { admin, db }), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }), send: sendMessageToLead, cancelSequences: (leadId) => cancelAllSequences(leadId) });
+const sampleReactivation = registerSampleReactivationRoutes(app, { db, generate: queueConversationSample, readUser: (req) => readAiSampleUser(req, { admin, db }), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }), send: sendMessageToLead, cancelSequences: (leadId) => cancelAllSequences(leadId) });
 registerSampleAgentAudioRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }) });
 
 app.post('/api/crm/lead-business/sample-agent', async (req, res) => {
@@ -5475,6 +5475,7 @@ app.post('/api/crm/lead-business/sample-agent', async (req, res) => {
   if (!leadId || leadId.includes('/') || typeof enabled !== 'boolean') return res.status(400).json({ error: 'Faltan contacto y estado del asistente.' });
   if (enabled && !process.env.OPENAI_API_KEY) return res.status(503).json({ error: 'Falta configurar OPENAI_API_KEY en el servidor.' });
   try {
+    if (enabled) return res.json(await sampleReactivation.activate(leadId, user));
     const ref = db.collection('leads').doc(leadId);
     await db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);

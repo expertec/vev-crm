@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { agentCanReply, briefSummary, extractConversationBrief, missingBriefQuestion, normalizeConversationBrief, sampleBriefHash } from './sampleConversationAgent.js';
+import { agentCanReply, briefSummary, extractConversationBrief, missingBriefQuestion, normalizeConversationBrief, sampleBriefHash, sampleInputFromConversation } from './sampleConversationAgent.js';
 import { canGenerateAiSample } from './aiSampleAccess.js';
 import { publicImageUrl } from './aiSampleGenerator.js';
 
@@ -54,7 +54,7 @@ export async function buildReactivationPreview({ lead, messages, transcribe, ext
   return { brief, images, history: history.slice(-24), reply, status: missing ? 'collecting' : 'awaiting_confirmation', failedAudios, videoCount: Math.min(2, messages.filter((m) => m.sender === 'lead' && m.mediaType === 'video').length) };
 }
 
-export function registerSampleReactivationRoutes(app, { db, readUser, transcribe, send, cancelSequences = async () => {}, extract }) {
+export function registerSampleReactivationRoutes(app, { db, readUser, transcribe, send, cancelSequences = async () => {}, extract, generate }) {
   const route = (path, handler) => app.post(path, async (req, res) => {
     try {
       const user = await readUser(req);
@@ -90,8 +90,8 @@ export function registerSampleReactivationRoutes(app, { db, readUser, transcribe
     }
     res.json({ leads });
   });
-  route('/api/crm/sample-agent/reactivation/preview', async (req, res, user) => {
-    const { ref, lead } = await contact(req.body.leadId, user);
+  const prepare = async (leadId, user) => {
+    const { ref, lead } = await contact(leadId, user);
     const messages = await readReactivationMessages(ref);
     if (messages.some((m) => m.sender === 'lead' && ['audio', 'audio_ptt', 'ptt'].includes(m.mediaType) && !m.transcription)) {
       const inbox = await ref.collection('sampleAgentInbox').orderBy('receivedAt', 'desc').limit(80).get();
@@ -101,12 +101,12 @@ export function registerSampleReactivationRoutes(app, { db, readUser, transcribe
     const preview = await buildReactivationPreview({ lead, messages, transcribe, extract });
     const draft = ref.collection('sampleAgentReactivations').doc(randomUUID());
     await draft.set({ ...preview, source: reactivationSource(lead, messages), state: 'prepared', createdBy: user.uid, createdAt: new Date(), expiresAt: new Date(Date.now() + 30 * 60_000) });
-    res.json({ draftId: draft.id, ...preview, history: undefined });
-  });
-  route('/api/crm/sample-agent/reactivation/send', async (req, res, user) => {
-    const { ref, lead } = await contact(req.body.leadId, user);
-    if (!/^[a-f0-9-]{36}$/.test(req.body.draftId || '')) throw error('Prepara primero la vista previa.', 400);
-    const draftRef = ref.collection('sampleAgentReactivations').doc(req.body.draftId);
+    return { draftId: draft.id, ...preview, history: undefined };
+  };
+  const deliver = async (leadId, draftId, user, generateWhenReady = false) => {
+    const { ref, lead } = await contact(leadId, user);
+    if (!/^[a-f0-9-]{36}$/.test(draftId || '')) throw error('Prepara primero la vista previa.', 400);
+    const draftRef = ref.collection('sampleAgentReactivations').doc(draftId);
     const messages = await readReactivationMessages(ref);
     const pending = await ref.collection('sampleAgentInbox').where('state', '==', 'pending').get();
     const source = reactivationSource(lead, messages);
@@ -124,27 +124,53 @@ export function registerSampleReactivationRoutes(app, { db, readUser, transcribe
       tx.update(ref, { sampleAgent: { ...current.sampleAgent, enabled: true, version: owner, status: draft.status, brief: draft.brief, images: draft.images, history: draft.history, confirmationHash: draft.status === 'awaiting_confirmation' ? sampleBriefHash(draft.brief) : '', deliveryPaused: false, error: '', leaseOwner: owner, leaseUntil: new Date(Date.now() + 5 * 60_000) } });
       return draft;
     });
-    if (!preview) return res.json({ success: true, duplicate: true, sampleAgent: lead.sampleAgent });
+    if (!preview) return { success: true, duplicate: true, sampleAgent: lead.sampleAgent };
+    let generation = null;
+    let reply = preview.reply;
     try {
       await cancelSequences(ref.id);
       const current = (await ref.get()).data() || {};
       if (!agentCanReply(current) || current.sampleAgent?.version !== owner
         || (current.sampleAgent?.inboxRevision || 0) !== (lead.sampleAgent?.inboxRevision || 0)
         || millis(current.lastMessageAt) !== millis(lead.lastMessageAt)) throw error('El contacto cambió durante la preparación del envío. Revisa el chat y prepara otra vista previa.');
-      await send(ref.id, preview.reply);
+      if (generateWhenReady && preview.status === 'awaiting_confirmation' && !preview.failedAudios) {
+        if (!generate) throw error('No se configuró la generación de muestras.', 503);
+        generation = await generate({ leadRef: ref, leadId: ref.id, lead: current, input: sampleInputFromConversation(preview.brief, preview.images, current.telefono || ref.id.replace(/\D/g, '')) });
+        await draftRef.update({ generation });
+        reply = 'Ya revisé lo que me compartiste y tengo la información necesaria. Voy a preparar tu muestra y te enviaré el enlace por aquí cuando esté lista.';
+      }
+      if (generation?.ready) {
+        await send(ref.id, '¡Tu muestra ya está lista! Te comparto el enlace en el siguiente mensaje. 👇');
+        await send(ref.id, generation.sampleUrl);
+      } else await send(ref.id, reply);
       await db.runTransaction(async (tx) => {
         const current = (await tx.get(ref)).data() || {};
         tx.update(draftRef, { state: 'sent', sentAt: new Date() });
-        if (current.sampleAgent?.version === owner) tx.update(ref, { 'sampleAgent.history': [...preview.history, { role: 'assistant', text: preview.reply }].slice(-24), 'sampleAgent.updatedAt': new Date(), 'sampleAgent.leaseOwner': '', 'sampleAgent.leaseUntil': new Date(0), 'sampleAgent.reactivationId': draftRef.id });
+        if (current.sampleAgent?.version === owner) tx.update(ref, { 'sampleAgent.history': [...preview.history, { role: 'assistant', text: reply }].slice(-24), ...(generation ? { 'sampleAgent.status': generation.ready ? 'completed' : 'generating', 'sampleAgent.enabled': !generation.ready, 'sampleAgent.confirmationHash': '', 'sampleAgent.negocioId': generation.negocioId } : {}), 'sampleAgent.updatedAt': new Date(), 'sampleAgent.leaseOwner': '', 'sampleAgent.leaseUntil': new Date(0), 'sampleAgent.reactivationId': draftRef.id });
       });
-      res.json({ success: true, sampleAgent: (await ref.get()).data()?.sampleAgent });
+      return { success: true, generated: Boolean(generation), sampleAgent: (await ref.get()).data()?.sampleAgent };
     } catch (err) {
       await db.runTransaction(async (tx) => {
         const current = (await tx.get(ref)).data() || {};
         tx.update(draftRef, { state: 'failed', error: String(err.message).slice(0, 300) });
-        if (current.sampleAgent?.version === owner) tx.update(ref, { 'sampleAgent.enabled': false, 'sampleAgent.status': 'error', 'sampleAgent.error': 'No se pudo confirmar el envío de reactivación. Revisa el chat antes de reintentar.', 'sampleAgent.leaseOwner': '', 'sampleAgent.leaseUntil': new Date(0) });
+        if (current.sampleAgent?.version === owner) tx.update(ref, { 'sampleAgent.enabled': Boolean(generation && !generation.ready), 'sampleAgent.status': generation ? (generation.ready ? 'completed' : 'generating') : 'error', 'sampleAgent.error': generation ? 'La muestra fue solicitada, pero falló el aviso de inicio. Revisa el chat.' : 'No se pudo confirmar el envío de reactivación. Revisa el chat antes de reintentar.', 'sampleAgent.leaseOwner': '', 'sampleAgent.leaseUntil': new Date(0) });
       });
       throw err;
     }
-  });
+  };
+  route('/api/crm/sample-agent/reactivation/preview', async (req, res, user) => res.json(await prepare(req.body.leadId, user)));
+  route('/api/crm/sample-agent/reactivation/send', async (req, res, user) => res.json(await deliver(req.body.leadId, req.body.draftId, user)));
+  const activating = new Map();
+  return {
+    activate(leadId, user) {
+      const key = `${user.uid}:${leadId}`;
+      if (activating.has(key)) return activating.get(key);
+      const work = (async () => {
+        const preview = await prepare(leadId, user);
+        return deliver(leadId, preview.draftId, user, true);
+      })().finally(() => activating.delete(key));
+      activating.set(key, work);
+      return work;
+    },
+  };
 }

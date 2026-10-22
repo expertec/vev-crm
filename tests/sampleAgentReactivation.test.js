@@ -34,13 +34,13 @@ function harness(options = {}) {
   const db = { collection, runTransaction: async (fn) => fn({ get: async (ref) => snap(ref), update: patch }) };
   rows.set('leads/lead', { nombre: 'Sergio', telefono: '521831', lastMessageAt: new Date(), sampleAgent: { version: 'old', brief: {}, images: [] } });
   rows.set('leads/lead/messages/1', { sender: 'lead', content: 'Tengo un taller', timestamp: new Date(), mediaType: 'text' });
-  registerSampleReactivationRoutes({ post: (path, fn) => handlers.set(path.split('/').at(-1), fn) }, { db, readUser: async () => user, extract: async () => ({ brief: complete(), action: 'confirm' }), send: async (...args) => sends.push(args), cancelSequences: async (id) => cancellations.push(id), ...options });
+  const service = registerSampleReactivationRoutes({ post: (path, fn) => handlers.set(path.split('/').at(-1), fn) }, { db, readUser: async () => user, extract: async () => ({ brief: complete(), action: 'confirm' }), send: async (...args) => sends.push(args), cancelSequences: async (id) => cancellations.push(id), ...options });
   const call = async (action, body) => {
     let status = 200; let data;
     await handlers.get(action)({ body }, { status(code) { status = code; return this; }, json(value) { data = value; } });
     return { status, data };
   };
-  return { rows, db, sends, cancellations, call };
+  return { rows, db, sends, cancellations, call, service };
 }
 
 test('recupera fotos, texto y audios; distingue cliente de negocio y solo pregunta lo pendiente', async () => {
@@ -152,4 +152,47 @@ test('rechaza acceso sin sesión y vistas previas vencidas', async () => {
   h.rows.get(`leads/lead/sampleAgentReactivations/${preview.data.draftId}`).expiresAt = new Date(0);
   assert.equal((await h.call('send', { leadId: 'lead', draftId: preview.data.draftId })).status, 409);
   assert.equal(h.sends.length, 0);
+});
+
+
+test('activar continúa inmediatamente y genera cuando el historial está completo, sin otro mensaje', async () => {
+  const jobs = [];
+  const h = harness({ generate: async (job) => { jobs.push(job); return { negocioId: 'business', queued: true }; } });
+  const result = await h.service.activate('lead', user);
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].input.companyInfo, 'Taller Norte');
+  assert.equal(jobs[0].input.enhancePhotos, false);
+  assert.equal(result.generated, true);
+  assert.equal(result.sampleAgent.status, 'generating');
+  assert.equal(h.sends.length, 1);
+  assert.match(h.sends[0][1], /tengo la información necesaria/);
+  assert.doesNotMatch(h.sends[0][1], /¿Confirmas/);
+});
+
+test('activar con información incompleta pregunta solo lo pendiente y conserva las imágenes', async () => {
+  const h = harness({ extract: async () => ({ brief: { ...complete(), objective: '', images: [{ index: 0, role: 'work', description: 'Foto del taller' }] }, action: 'ask' }), generate: async () => assert.fail('Faltan datos') });
+  h.rows.set('leads/lead/messages/photo', { sender: 'lead', mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/photo.jpg', timestamp: new Date() });
+  const result = await h.service.activate('lead', user);
+  assert.equal(result.generated, false);
+  assert.equal(result.sampleAgent.images.length, 1);
+  assert.equal(result.sampleAgent.status, 'collecting');
+  assert.equal(h.sends.length, 1);
+  assert.match(h.sends[0][1], /Qué te gustaría lograr/);
+  assert.doesNotMatch(h.sends[0][1], /Envíame/);
+});
+
+test('dos clics simultáneos en activar comparten la operación y no duplican la muestra', async () => {
+  let generated = 0;
+  const h = harness({ generate: async () => { generated++; return { negocioId: 'business', queued: true }; } });
+  const [first, second] = await Promise.all([h.service.activate('lead', user), h.service.activate('lead', user)]);
+  assert.equal(first.generated, true); assert.equal(second.generated, true);
+  assert.equal(generated, 1); assert.equal(h.sends.length, 1);
+});
+
+test('activar no genera automáticamente si hay audios pendientes de entender', async () => {
+  const h = harness({ transcribe: async () => { throw Error('Inaudible'); }, generate: async () => assert.fail('Hay un audio pendiente') });
+  h.rows.set('leads/lead/messages/audio', { sender: 'lead', mediaType: 'audio', mediaUrl: 'https://storage.googleapis.com/test/audio.ogg', timestamp: new Date() });
+  const result = await h.service.activate('lead', user);
+  assert.equal(result.generated, false);
+  assert.match(h.sends[0][1], /¿Confirmas/);
 });
