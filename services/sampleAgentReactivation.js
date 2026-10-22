@@ -6,10 +6,21 @@ import { publicImageUrl } from './aiSampleGenerator.js';
 const millis = (value) => value?.toMillis?.() || (value ? new Date(value).getTime() : 0) || 0;
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const error = (message, status = 409) => Object.assign(new Error(message), { status });
+export function hasDeliveredSample(lead) {
+  if (lead.sampleAgent?.status === 'completed' || lead.webSales?.sample?.sentAt || lead.siteSentAt) return true;
+  // These legacy dates also mark form invitations and restored samples, not just delivered pages.
+  if (!lead.sampleLinkSentAt && !lead.webLinkSentAt) return false;
+  try {
+    const url = new URL(lead.sampleLinkSentUrl || lead.sampleFlow?.sampleUrl || '');
+    if (!['negociosweb.mx', 'app.negociosweb.mx'].includes(url.hostname)) return false;
+    return /^\/m\/[A-Za-z0-9_-]{10,24}\/?$/.test(url.pathname)
+      || (/^\/[a-z0-9][a-z0-9-]*\/?$/i.test(url.pathname) && !/^\/(muestra|brief|form|formulario|gracias)\/?$/i.test(url.pathname));
+  } catch { return false; }
+}
 export function assertReactivationAllowed(user, lead) {
   if (!canGenerateAiSample(user, lead)) throw error('No tienes acceso a este contacto.', 403);
   if (!agentCanReply({ ...lead, sampleAgent: { ...lead.sampleAgent, enabled: true } })) throw error('El contacto está bloqueado, canceló o está en atención humana.');
-  if (lead.sampleLinkSentAt || lead.webLinkSentAt || lead.siteSentAt || lead.sampleAgent?.status === 'completed') throw error('Este contacto ya recibió su muestra.');
+  if (hasDeliveredSample(lead)) throw error('Este contacto ya recibió su muestra.');
   if (lead.sampleAgent?.status === 'generating' || millis(lead.sampleAgent?.leaseUntil) > Date.now()) throw error('El asistente está procesando este contacto. Espera a que termine.');
 }
 

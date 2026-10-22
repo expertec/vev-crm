@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertReactivationAllowed, buildReactivationPreview, registerSampleReactivationRoutes } from '../services/sampleAgentReactivation.js';
+import { assertReactivationAllowed, buildReactivationPreview, registerSampleReactivationRoutes, hasDeliveredSample } from '../services/sampleAgentReactivation.js';
 import { normalizeConversationBrief, sampleBriefHash } from '../services/sampleConversationAgent.js';
 
 const user = { uid: 'admin', role: 'admin' };
@@ -73,8 +73,35 @@ test('no repite la solicitud de fotos recibidas y admite transcripciones existen
 });
 
 test('excluye permisos ajenos, cancelados, atención humana y muestras enviadas', () => {
-  for (const lead of [{ humanControl: true }, { estado: 'No interesado' }, { archived: true }, { sampleLinkSentAt: new Date() }, { sampleAgent: { status: 'generating' } }]) assert.throws(() => assertReactivationAllowed(user, lead));
+  for (const lead of [{ humanControl: true }, { estado: 'No interesado' }, { archived: true }, { sampleLinkSentAt: new Date(), sampleLinkSentUrl: 'https://negociosweb.mx/taller-norte' }, { sampleAgent: { status: 'generating' } }]) assert.throws(() => assertReactivationAllowed(user, lead));
   assert.throws(() => assertReactivationAllowed({ uid: 'other', role: 'salesAgent' }, { assignedTo: 'owner' }), /acceso/);
+});
+
+test('enviar un formulario o restaurar una invitación no equivale a entregar la página', async () => {
+  const h = harness({ generate: async () => ({ negocioId: 'business', queued: true }) });
+  Object.assign(h.rows.get('leads/lead'), {
+    sampleLinkSentAt: new Date(), webLinkSentAt: new Date(),
+    sampleLinkSentUrl: 'https://app.negociosweb.mx/muestra/5212216544471',
+    sampleFlow: { source: 'crm_restore_sample' },
+  });
+  const result = await h.service.activate('lead', user);
+  assert.equal(result.generated, true);
+  assert.equal(h.sends.length, 1);
+  assert.equal(hasDeliveredSample({ sampleLinkSentAt: new Date() }), false);
+  assert.equal(hasDeliveredSample({ webLinkSentAt: new Date() }), false);
+});
+
+test('mantiene el bloqueo cuando hay evidencia de entrega de una muestra real', () => {
+  for (const lead of [
+    { webSales: { sample: { sentAt: new Date() } } },
+    { sampleAgent: { status: 'completed' } },
+    { siteSentAt: new Date() },
+    { sampleLinkSentAt: new Date(), sampleLinkSentUrl: 'https://negociosweb.mx/sam' },
+    { sampleLinkSentAt: new Date(), sampleLinkSentUrl: 'https://negociosweb.mx/m/c9NG2UICVYaO' },
+  ]) {
+    assert.equal(hasDeliveredSample(lead), true);
+    assert.throws(() => assertReactivationAllowed(user, lead), /ya recibió/);
+  }
 });
 
 test('la vista previa no contacta ni activa, y el envío conserva contexto y aprobación sin duplicados', async () => {
