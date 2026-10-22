@@ -511,3 +511,32 @@ test('los colores exclusivos de un logo pendiente no completan los colores de la
   const brief = { ...complete(), colorPreference: 'Amarillo y azul exclusivamente para el logo. Colores de la web sin definir.' };
   assert.match(missingBriefQuestion(brief), /colores.*página/);
 });
+
+test('una duda comercial se responde antes de seguir preguntando y no se sustituye por un audio', async () => {
+  const reply = 'La página cuesta $990 MXN al año. ¿En qué zona atiende Fc inoxidables?';
+  const s = setup(async ({ salesKnowledge }) => {
+    assert.equal(salesKnowledge.price, '$990 MXN al año');
+    return { brief: normalizeConversationBrief({ companyName: 'Fc inoxidables' }), action: 'respond', reply, audioMoment: 'business' };
+  }, undefined, {
+    loadSalesKnowledge: async () => ({ price: '$990 MXN al año', included: [] }),
+    loadAudioOptions: async () => [{ moment: 'business', script: 'Cuéntame de tu negocio.' }],
+    sendFlowAudio: async () => assert.fail('No debe ocultar la respuesta comercial'),
+  });
+  await s.receive('Qué costo tiene la página y qué incluye. Fc inoxidables', '1');
+  assert.deepEqual(s.replies, [reply]);
+  assert.equal(s.jobs.length, 0);
+});
+
+
+test('envía el paquete antes de continuar y no repite materiales si falla la pregunta', async () => {
+  const events = []; let attempts = 0;
+  const s = setup(async () => ({ brief: complete(), action: 'ask', packageId: 'campaign', reply: '¿Continuamos con tu muestra?' }), undefined, {
+    sendPackage: async () => { events.push('package'); return { text: 'Paquete $990 al año' }; },
+    send: async (_id, text) => { events.push(text); if (++attempts === 1) throw Error('temporary'); },
+  });
+  await s.receive('¿Qué incluye?', 'package-question');
+  assert.equal(s.jobs.length, 0);
+  await s.agent.resume();
+  assert.deepEqual(events, ['package', '¿Continuamos con tu muestra?', '¿Continuamos con tu muestra?']);
+  assert.match((await s.leadRef.get()).data().sampleAgent.history.at(-1).text, /Paquete \$990/);
+});
