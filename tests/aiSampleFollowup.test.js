@@ -31,3 +31,14 @@ test('la protección transaccional impide programar no-abierta después de regis
   assert.equal(shouldBlockSequenceByLeadContext({ linkOpenedAt: new Date() }, 'LinkAbierto').blocked, false);
   assert.equal(shouldBlockSequenceByLeadContext({}, 'Web_SampleNotOpened').blocked, false);
 });
+
+test('el seguimiento de una propuesta nueva no se bloquea por la apertura de la muestra anterior', async () => {
+  const lead = { linkOpenedAt: new Date(), sampleAgent: { enabled: false }, sampleProposalCycle: { id: 'new', sentAt: new Date(), openedAt: null } };
+  let scheduled = 0;
+  await scheduleAiSampleFollowup({ leadRef: ref(lead), schedule: async () => { scheduled++; } });
+  assert.equal(scheduled, 1);
+  assert.equal(shouldBlockSequenceByLeadContext(lead, 'Web_SampleNotOpened').blocked, false);
+  lead.sampleProposalCycle.openedAt = new Date();
+  assert.equal(shouldBlockSequenceByLeadContext(lead, 'Web_SampleNotOpened').blocked, true);
+  await scheduleAiSampleFollowup({ leadRef: ref(lead), schedule: async () => assert.fail('La nueva propuesta ya se abrió') });
+});

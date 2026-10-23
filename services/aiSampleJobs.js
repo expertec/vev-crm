@@ -6,7 +6,8 @@ const runningJobs = new Set();
 
 export async function scheduleAiSampleFollowup({ leadRef, schedule, logger = console }) {
   const lead = (await leadRef.get()).data() || {};
-  if (lead.linkOpenedAt || lead.sampleAgent?.enabled || lead.stopSequences || lead.humanControl
+  const opened = lead.sampleProposalCycle?.id ? lead.sampleProposalCycle.openedAt : lead.linkOpenedAt;
+  if (opened || lead.sampleAgent?.enabled || lead.stopSequences || lead.humanControl
     || lead.salesBrainHumanControl || lead.archived || lead.archivedAt
     || ['compro', 'cliente', 'no interesado'].includes(String(lead.estado || '').trim().toLowerCase())) return;
   try {

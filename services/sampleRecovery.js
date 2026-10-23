@@ -73,6 +73,7 @@ export async function buildSampleRecoveryPreview({ lead, business, messages, tra
 }
 
 export function registerSampleRecoveryRoutes(app, { db, readUser, readBusiness, extract, transcribe, sendAudio, send, generate, cancelSequences = async () => {} }) {
+  const handlers = {};
   const contact = async (id, user) => {
     if (!id || id.includes('/') || id.length > 200) throw fail('Selecciona un contacto válido.', 400);
     const ref = db.collection('leads').doc(id), snap = await ref.get();
@@ -80,14 +81,17 @@ export function registerSampleRecoveryRoutes(app, { db, readUser, readBusiness, 
     const lead = snap.data(); assertSampleRecoveryAllowed(user, lead);
     return { ref, lead };
   };
-  const route = (name, handler) => app.post(`/api/crm/sample-agent/recovery/${name}`, async (req, res) => {
+  const route = (name, handler) => {
+    handlers[name] = handler;
+    app.post(`/api/crm/sample-agent/recovery/${name}`, async (req, res) => {
     try {
       const user = await readUser(req);
       if (!user) throw fail('Inicia sesión para recuperar contactos.', 401);
       if (!canGenerateAiSample(user, { assignedTo: user.uid })) throw fail('No tienes acceso a los contactos.', 403);
       return res.json(await handler(req.body || {}, user));
     } catch (error) { return res.status(error.status || 500).json({ error: error.message || 'No se pudo recuperar el contacto.' }); }
-  });
+    });
+  };
   route('candidates', async (body, user) => {
     const from = new Date(body.from), to = new Date(body.to);
     if (!Number.isFinite(+from) || !Number.isFinite(+to) || to < from || to - from > 3660 * 86400_000) throw fail('Selecciona un rango válido de hasta diez años.', 400);
@@ -117,7 +121,7 @@ export function registerSampleRecoveryRoutes(app, { db, readUser, readBusiness, 
     const business = await readBusiness(ref.id, lead);
     const preview = await buildSampleRecoveryPreview({ lead, business, messages, transcribe, extract });
     if (mode === 'renew' && !preview.canGenerate) throw fail('Faltan nombre y actividad. Reactiva la conversación para completarlos.', 400);
-    const draft = { ...preview, mode, promotion: clean(body.promotion, 1200), designDirection: clean(body.designDirection, 2000) || DEFAULT_RENEWAL_DIRECTION,
+    const draft = { ...preview, mode, promotion: clean(body.promotion, 1200), designDirection: clean(body.designDirection, 2000) || DEFAULT_RENEWAL_DIRECTION, deliveryMessage: clean(body.deliveryMessage, 2800),
       audioScript: audio?.script || '', audioVersion: audio?.storagePath || '', regenerationId: randomUUID(),
       source: reactivationSource(lead, messages), businessSource: hash(previousSampleFacts(lead, business)),
       createdBy: user.uid, createdAt: new Date(), expiresAt: new Date(Date.now() + 30 * 60_000), state: 'prepared' };
@@ -147,8 +151,9 @@ export function registerSampleRecoveryRoutes(app, { db, readUser, readBusiness, 
       for (const doc of pending.docs) if (millis(doc.data().receivedAt) <= millis(saved.createdAt)) tx.update(doc.ref, { state: 'done', recoveredBy: draftRef.id });
       tx.update(ref, { sampleAgent: { ...current.sampleAgent, enabled: false, status: saved.mode === 'renew' ? 'generating' : 'collecting',
         version: owner, brief: saved.brief, images: saved.images, history: saved.history, confirmationHash: '', deliveryPaused: false, error: '', pauseReason: '',
-        regenerationId: saved.regenerationId, regenerationRequestedAt: new Date(), designDirection: saved.designDirection,
+        regenerationId: saved.regenerationId, regenerationRequestedAt: new Date(), designDirection: saved.designDirection, deliveryMessage: saved.deliveryMessage || '',
         recoveryOffer: [saved.audioScript, saved.promotion].filter(Boolean).join('\n'), leaseOwner: owner, leaseUntil: new Date(Date.now() + 5 * 60_000), updatedAt: new Date() } });
+      if (saved.mode === 'renew') tx.update(ref, { sampleProposalCycle: { id: saved.regenerationId, requestedAt: new Date(), sentAt: null, openedAt: null } });
       return saved;
     });
     if (!draft) return { success: true, duplicate: true };
@@ -192,4 +197,5 @@ export function registerSampleRecoveryRoutes(app, { db, readUser, readBusiness, 
       throw error;
     }
   });
+  return handlers;
 }

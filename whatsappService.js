@@ -2226,6 +2226,7 @@ export async function connectToWhatsApp() {
             const current = { id: leadSnap.id, ...(existingLeadData || {}) };
             const updatePayload = {
               lastMessageAt: inboundAt,
+              lastInboundAt: inboundAt,
               jid,
               resolvedJid: jidResolved,
               lidJid,

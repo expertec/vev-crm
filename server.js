@@ -103,6 +103,7 @@ import { createSampleSalesKnowledgeLoader } from './services/sampleSalesKnowledg
 import { registerSampleReactivationRoutes } from './services/sampleAgentReactivation.js';
 import { registerSampleProgressRoutes } from './services/sampleProgress.js';
 import { registerSampleRecoveryRoutes } from './services/sampleRecovery.js';
+import { registerSampleFunnelRoutes, recordProposalDelivery, recordProposalOpen } from './services/sampleFunnel.js';
 import { createSampleAudioTranscriber } from './services/sampleAudioTranscription.js';
 import { registerSampleAgentAudioRoutes, createSampleFlowAudioSender, loadSampleFlowAudioOptions } from './services/sampleAgentAudioLibrary.js';
 
@@ -5407,13 +5408,13 @@ async function deliverAiSample(negocio) {
     const lead = (await leadCtx.leadRef.get()).data() || {};
     if (lead.sampleAgent?.deliveryPaused || lead.stopSequences || lead.humanControl || lead.salesBrainHumanControl || lead.archived || lead.archivedAt) throw new Error('La entrega automática fue pausada para este contacto.');
   }
-  await recordWebSalesEvent({ leadRef: leadCtx.leadRef, leadId: leadCtx.leadId, type: WEB_SALES_EVENTS.SAMPLE_GENERATED, source: 'crm', metadata: { negocioId: negocio.id, slug: negocio.slug, idempotencyKey: `sample_generated_${negocio.id}` } }).catch((error) => console.warn('[ai-sample] evento de generación:', error?.message));
+  await recordWebSalesEvent({ leadRef: leadCtx.leadRef, leadId: leadCtx.leadId, type: WEB_SALES_EVENTS.SAMPLE_GENERATED, source: 'crm', metadata: { negocioId: negocio.id, slug: negocio.slug, idempotencyKey: `sample_generated_${negocio.id}${negocio.regenerationId ? `_${negocio.regenerationId}` : ''}` } }).catch((error) => console.warn('[ai-sample] evento de generación:', error?.message));
   const alreadyDelivered = negocio.aiSampleLastSentHash === negocio.schema.aiPage.inputHash;
   if (!alreadyDelivered) {
     if (negocio.aiSampleIntroSentHash !== negocio.schema.aiPage.inputHash) {
       await sendWhatsappFallbackMessage({
         leadId: leadCtx.leadId, phoneDigits: negocio.leadPhone,
-        message: '¡Tu muestra ya está lista! 🎉\n\nTe comparto el enlace en el siguiente mensaje. Revísala con calma y cuéntame qué te gustaría ajustar. 👇',
+        message: negocio.sampleDeliveryIntro || '¡Tu muestra ya está lista! 🎉\n\nTe comparto el enlace en el siguiente mensaje. Revísala con calma y cuéntame qué te gustaría ajustar. 👇',
       });
       await db.collection('Negocios').doc(negocio.id).update({ aiSampleIntroSentHash: negocio.schema.aiPage.inputHash });
     }
@@ -5428,7 +5429,8 @@ async function deliverAiSample(negocio) {
   if (negocio.source === 'whatsapp_sample_agent') {
     await leadCtx.leadRef.update({ 'sampleAgent.enabled': false, 'sampleAgent.status': 'completed', 'sampleAgent.updatedAt': new Date() });
   }
-  await recordWebSalesEvent({ leadRef: leadCtx.leadRef, leadId: leadCtx.leadId, type: WEB_SALES_EVENTS.SAMPLE_SENT, source: 'crm', metadata: { negocioId: negocio.id, slug: negocio.slug, sampleUrl, isFunnelSample: true, idempotencyKey: `sample_sent_${negocio.id}` } }).catch((error) => console.warn('[ai-sample] evento de entrega:', error?.message));
+  await recordProposalDelivery(db, leadCtx.leadRef, negocio.regenerationId);
+  await recordWebSalesEvent({ leadRef: leadCtx.leadRef, leadId: leadCtx.leadId, type: WEB_SALES_EVENTS.SAMPLE_SENT, source: 'crm', metadata: { negocioId: negocio.id, slug: negocio.slug, sampleUrl, isFunnelSample: true, idempotencyKey: `sample_sent_${negocio.id}${negocio.regenerationId ? `_${negocio.regenerationId}` : ''}` } }).catch((error) => console.warn('[ai-sample] evento de entrega:', error?.message));
   await scheduleAiSampleFollowup({ leadRef: leadCtx.leadRef, schedule: scheduleSequenceForLead });
 }
 
@@ -5449,6 +5451,7 @@ async function queueConversationSample({ leadRef, leadId, lead, input }) {
     sampleGenerator: AI_SAMPLE_VERSION, designVersion: AI_SAMPLE_VERSION,
     businessObjective: input.businessObjective, sampleFlowType: 'funnel', suppressDefaultFollowups: true,
     source: 'whatsapp_sample_agent', sampleSubmittedAt: now, updatedAt: now, createdAt: current.createdAt || now,
+    sampleDeliveryIntro: input.regenerationId ? String(lead.sampleAgent?.deliveryMessage || '').replace(/\{\{negocio\}\}/g, () => input.companyInfo).slice(0, 2800) : '',
     reusableAiAssets: input.regenerationId ? [] : (current.schema?.aiPage?.assets || []).filter((asset) => asset.visualKey).map(({ url, visualKey }) => ({ url, visualKey })).slice(0, 3),
   };
   await leadRef.update({ 'sampleAgent.negocioId': ref.id });
@@ -5480,7 +5483,7 @@ const sampleConversationAgent = createSampleConversationAgent({
 const sampleReactivation = registerSampleReactivationRoutes(app, { db, extract: extractSampleBrief, generate: queueConversationSample, loadAudioOptions: () => loadSampleFlowAudioOptions(db), sendFlowAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }), readUser: (req) => readAiSampleUser(req, { admin, db }), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }), send: sendMessageToLead, cancelSequences: (leadId) => cancelAllSequences(leadId) });
 setSampleConversationHandler(sampleConversationAgent.receive, { activate: (leadId) => sampleReactivation.activate(leadId, { uid: 'website-inquiry-automation', role: 'admin' }) });
 registerSampleAgentAudioRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }) });
-registerSampleRecoveryRoutes(app, {
+const sampleRecoveryService = registerSampleRecoveryRoutes(app, {
   db, readUser: (req) => readAiSampleUser(req, { admin, db }), extract: extractSampleBrief,
   readBusiness: async (leadId, lead) => {
     const business = (await resolveNegocioByIdentity({ leadId, phoneDigits: normalizePhoneDigits(lead.telefono || '') })).negocioData || {};
@@ -5490,6 +5493,19 @@ registerSampleRecoveryRoutes(app, {
   transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }),
   sendAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }),
   send: sendMessageToLead, generate: queueConversationSample, cancelSequences: (leadId) => cancelAllSequences(leadId),
+});
+registerSampleFunnelRoutes(app, {
+  db, readUser: (req) => readAiSampleUser(req, { admin, db }), cancelSequences: (leadId) => cancelAllSequences(leadId),
+  resolveLead: async (identity) => { const result = await resolveLeadByIdentity({ leadId: identity.includes('@') ? identity : '', phone: normalizePhoneDigits(identity) }); return result?.leadId ? { id: result.leadId } : null; },
+  reactivate: async (leadId, user, settings) => {
+    const preview = await sampleRecoveryService.preview({ leadId, mode: 'audio', promotion: settings.promotion, designDirection: settings.designDirection }, user);
+    return sampleRecoveryService.execute({ leadId, draftId: preview.draftId }, user);
+  },
+  renew: async (leadId, user, settings) => {
+    const message = `${settings.renewalMessage}${settings.applyPromotionToRenewal && settings.promotion ? `\n\n${settings.promotion}` : ''}`;
+    const preview = await sampleRecoveryService.preview({ leadId, mode: 'renew', designDirection: settings.designDirection, deliveryMessage: message }, user);
+    return sampleRecoveryService.execute({ leadId, draftId: preview.draftId }, user);
+  },
 });
 
 app.post('/api/crm/lead-business/sample-agent', async (req, res) => {
@@ -9943,6 +9959,7 @@ app.post('/api/track/link-open', async (req, res) => {
       metadata: {
         leadPhone: leadPhone || '',
         slug: slug || '',
+        ...(leadData.sampleProposalCycle?.id ? { sampleCycleId: leadData.sampleProposalCycle.id } : {}),
         ...(tokenVerified ? { negocioId, tokenVerified: true } : {}),
       },
       requestContext: {
@@ -9955,6 +9972,7 @@ app.post('/api/track/link-open', async (req, res) => {
     });
 
     if (webEvent?.ignored !== true) {
+      if (tokenVerified && leadData.sampleProposalCycle?.id) await recordProposalOpen(db, leadRef, leadData.sampleProposalCycle.id);
       try {
         if (cancelSequences) {
           await cancelSequences(leadId, [

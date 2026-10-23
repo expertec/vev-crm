@@ -92,13 +92,14 @@ test('preparar no envía; ejecutar usa solo el audio y la promoción elegidos y 
 
 test('renovar una muestra entregada usa nueva generación, tres imágenes y dirección de diseño sin contactar antes', async () => {
   const h = harness();
-  const prepared = await h.call('preview', { leadId: 'lead', mode: 'renew', designDirection: 'Destaca el tequila blanco, hero más visual.' });
+  const prepared = await h.call('preview', { leadId: 'lead', mode: 'renew', designDirection: 'Destaca el tequila blanco, hero más visual.', deliveryMessage: 'Preparamos una nueva versión para {{negocio}}.' });
   assert.equal(prepared.statusCode, 200);
   const result = await h.call('execute', { leadId: 'lead', draftId: prepared.data.draftId });
   assert.equal(result.statusCode, 200); assert.equal(h.jobs.length, 1);
   assert.equal(h.jobs[0].input.aiImageCount, 3);
   assert.match(h.jobs[0].input.regenerationId, /^[a-f0-9-]{36}$/);
   assert.match(h.jobs[0].input.designDirection, /tequila blanco/);
+  assert.equal(h.jobs[0].lead.sampleAgent.deliveryMessage, 'Preparamos una nueva versión para {{negocio}}.');
   assert.equal(h.audios.length, 0); assert.equal(h.sends.length, 0);
   assert.equal(result.data.row.status, 'generating');
   assert.equal(h.rows.get('leads/lead').sampleAgent.enabled, false);
