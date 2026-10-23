@@ -68,6 +68,8 @@ export const SAMPLE_BRAND_HEADER_CSS = `
 .nw-digital-card .nw-brand{display:flex;align-items:center;gap:20px;min-width:0}
 .nw-digital-card img{width:clamp(112px,14vw,164px)!important;height:auto!important;max-width:min(42vw,180px)!important;max-height:144px!important;object-fit:contain;flex-shrink:0}
 .nw-digital-card .nw-wordmark{font-size:clamp(1.7rem,3.5vw,2.5rem);font-weight:850}
+.nw-digital-card .nw-brand:has(img) .nw-wordmark{display:none!important}
+.nw-digital-card .nw-brand:has(img)::before,.nw-digital-card .nw-brand:has(img)::after{content:none!important;display:none!important}
 @media(max-width:600px){
  body:has(>.nw-digital-card+main){display:block}
  body>.nw-digital-card{margin:0!important;width:100%;max-width:none!important;position:relative;z-index:3;display:flex!important;flex-direction:row!important;align-items:center!important;justify-content:center!important;padding:10px 16px!important;gap:14px!important;text-align:left;background:#fff!important;box-shadow:none}
