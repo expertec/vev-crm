@@ -96,6 +96,18 @@ test('las opciones incluyen la introducción al resumen, excluyen desactivados y
   assert.equal(sends.length, 0);
 });
 
+test('el audio de recuperación se administra y envía manualmente, pero no se ofrece al agente como respuesta automática', async () => {
+  const h = harness();
+  assert.equal((await h.dispatch('post', { moment: 'reactivation', form: uploadForm(true) })).status, 200);
+  assert.equal((await h.dispatch('get')).body.audios[0].moment, 'reactivation');
+  assert.deepEqual(await loadSampleFlowAudioOptions(h.db), []);
+  const sent = [];
+  const send = createSampleFlowAudioSender({ db: h.db, bucket: h.bucket, sendAudio: async (...args) => sent.push(args) });
+  assert.equal(await send({ leadId: 'lead', moment: 'reactivation', expectedStoragePath: 'outdated', isCurrent: async () => true }), false);
+  assert.equal(await send({ leadId: 'lead', moment: 'reactivation', isCurrent: async () => true }), true);
+  assert.equal(sent.length, 1);
+});
+
 test('convierte una grabación real a OGG/Opus válido y rechaza archivos corruptos', async () => {
   const samples = 16_000;
   const wav = Buffer.alloc(44 + samples * 2);

@@ -8,6 +8,7 @@ const millis = (value) => value?.toMillis?.() || (value ? new Date(value).getTim
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const error = (message, status = 409) => Object.assign(new Error(message), { status });
 export function hasDeliveredSample(lead) {
+  if (lead.sampleAgent?.regenerationId && lead.sampleAgent?.regenerationRequestedAt && lead.sampleAgent.status !== 'completed') return false;
   if (lead.sampleAgent?.status === 'completed' || lead.webSales?.sample?.sentAt || lead.siteSentAt) return true;
   // These legacy dates also mark form invitations and restored samples, not just delivered pages.
   if (!lead.sampleLinkSentAt && !lead.webLinkSentAt) return false;

@@ -32,6 +32,8 @@ export function normalizeAiSampleInput(data = {}) {
   return {
     companyInfo: clean(data.companyInfo || data.companyName, 120),
     businessStory: clean(data.businessStory || data.description, 4000),
+    ...(clean(data.designDirection, 2000) ? { designDirection: clean(data.designDirection, 2000) } : {}),
+    ...(clean(data.regenerationId, 100) ? { regenerationId: clean(data.regenerationId, 100) } : {}),
     businessObjective: clean(data.businessObjective || data.objective, 500),
     businessSector: clean(data.businessSector, 100),
     keyItems: (Array.isArray(data.keyItems) ? data.keyItems : []).map((item) => clean(item, 100)).filter(Boolean).slice(0, 8),
@@ -170,7 +172,7 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
   for (const url of input.referenceImageURLs) content.push({ type: 'input_image', image_url: url, detail: 'low' });
   const result = savedDesign ? null : await request('responses', {
     model, store: false, max_output_tokens: 16000,
-    instructions: SAMPLE_PAGE_INSTRUCTIONS,
+    instructions: `${SAMPLE_PAGE_INSTRUCTIONS}\ninput.designDirection es la dirección de diseño indicada por el asesor para renovar la muestra: aplícala al diseño sin cambiar hechos del negocio, inventar testimonios ni incumplir las reglas de contenido.`,
     input: [{ role: 'user', content }],
     text: { format: { type: 'json_schema', name: 'sample_page', strict: true, schema: PAGE_CONTRACT } },
   });
@@ -200,7 +202,7 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
     if (!imageStore) throw new Error('No se configuró almacenamiento de imágenes.');
     const task = visualPlan.pending[index];
     const prompt = sampleImagePrompt(task, clean(design.imagePrompts[index], 2500), input, palette);
-    const key = createHash('sha256').update(JSON.stringify({ imageModel, prompt, sourceUrls: task.sourceUrls })).digest('hex');
+    const key = createHash('sha256').update(JSON.stringify({ imageModel, prompt, sourceUrls: task.sourceUrls, ...(input.regenerationId ? { regenerationId: input.regenerationId } : {}) })).digest('hex');
     let url = await imageStore.get(key);
     if (!url) {
       const resource = task.sourceUrls.length ? 'images/edits' : 'images/generations';

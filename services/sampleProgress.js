@@ -16,6 +16,7 @@ export function manualSampleInput(lead) {
     brief.images = brief.images.map((image) => image.role === 'logo' ? { ...image, role: 'reference' } : image);
   }
   if (!brief.colorPreference && brief.palette.length) brief.colorPreference = `Colores detectados en el material de la marca: ${brief.palette.join(', ')}`;
+  if (!brief.colorPreference && brief.logoChoice === 'none') brief.colorPreference = 'Proponer una combinación de colores acorde al negocio para la muestra';
   return sampleInputFromConversation(brief, images, lead.telefono || '');
 }
 

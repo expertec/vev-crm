@@ -102,6 +102,7 @@ import { registerSamplePackageRoutes, createSamplePackageSender } from './servic
 import { createSampleSalesKnowledgeLoader } from './services/sampleSalesKnowledge.js';
 import { registerSampleReactivationRoutes } from './services/sampleAgentReactivation.js';
 import { registerSampleProgressRoutes } from './services/sampleProgress.js';
+import { registerSampleRecoveryRoutes } from './services/sampleRecovery.js';
 import { createSampleAudioTranscriber } from './services/sampleAudioTranscription.js';
 import { registerSampleAgentAudioRoutes, createSampleFlowAudioSender, loadSampleFlowAudioOptions } from './services/sampleAgentAudioLibrary.js';
 
@@ -5434,6 +5435,7 @@ async function deliverAiSample(negocio) {
 const aiSampleJobOptions = () => ({ db, bucket: admin.storage().bucket(), sendReady: deliverAiSample });
 
 async function queueConversationSample({ leadRef, leadId, lead, input }) {
+  input = { ...input, regenerationId: input.regenerationId || lead.sampleAgent?.regenerationId || '', designDirection: input.designDirection || lead.sampleAgent?.designDirection || '' };
   const phone = normalizePhoneDigits(lead.telefono || input.contactWhatsapp);
   if (!phone) throw new Error('El contacto no tiene teléfono válido.');
   const context = await resolveNegocioByIdentity({ leadId, phoneDigits: phone });
@@ -5447,7 +5449,7 @@ async function queueConversationSample({ leadRef, leadId, lead, input }) {
     sampleGenerator: AI_SAMPLE_VERSION, designVersion: AI_SAMPLE_VERSION,
     businessObjective: input.businessObjective, sampleFlowType: 'funnel', suppressDefaultFollowups: true,
     source: 'whatsapp_sample_agent', sampleSubmittedAt: now, updatedAt: now, createdAt: current.createdAt || now,
-    reusableAiAssets: (current.schema?.aiPage?.assets || []).filter((asset) => asset.visualKey).map(({ url, visualKey }) => ({ url, visualKey })).slice(0, 3),
+    reusableAiAssets: input.regenerationId ? [] : (current.schema?.aiPage?.assets || []).filter((asset) => asset.visualKey).map(({ url, visualKey }) => ({ url, visualKey })).slice(0, 3),
   };
   await leadRef.update({ 'sampleAgent.negocioId': ref.id });
   await ensureSampleOpenTracking({ id: ref.id, ...current, ...patch }, { slug, leadId, leadPhone: phone });
@@ -5478,6 +5480,17 @@ const sampleConversationAgent = createSampleConversationAgent({
 const sampleReactivation = registerSampleReactivationRoutes(app, { db, extract: extractSampleBrief, generate: queueConversationSample, loadAudioOptions: () => loadSampleFlowAudioOptions(db), sendFlowAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }), readUser: (req) => readAiSampleUser(req, { admin, db }), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }), send: sendMessageToLead, cancelSequences: (leadId) => cancelAllSequences(leadId) });
 setSampleConversationHandler(sampleConversationAgent.receive, { activate: (leadId) => sampleReactivation.activate(leadId, { uid: 'website-inquiry-automation', role: 'admin' }) });
 registerSampleAgentAudioRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }) });
+registerSampleRecoveryRoutes(app, {
+  db, readUser: (req) => readAiSampleUser(req, { admin, db }), extract: extractSampleBrief,
+  readBusiness: async (leadId, lead) => {
+    const business = (await resolveNegocioByIdentity({ leadId, phoneDigits: normalizePhoneDigits(lead.telefono || '') })).negocioData || {};
+    if (business.leadId && business.leadId !== leadId) throw Object.assign(new Error('El negocio pertenece a otro contacto.'), { status: 403 });
+    return business;
+  },
+  transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }),
+  sendAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }),
+  send: sendMessageToLead, generate: queueConversationSample, cancelSequences: (leadId) => cancelAllSequences(leadId),
+});
 
 app.post('/api/crm/lead-business/sample-agent', async (req, res) => {
   const user = await readAiSampleUser(req, { admin, db });

@@ -9,6 +9,8 @@ import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import ffprobeInstaller from '@ffprobe-installer/ffprobe';
 
 export const SAMPLE_AUDIO_MOMENTS = ['welcome', 'business', 'objective', 'services', 'branding', 'photos', 'confirmation', 'generating'];
+export const SAMPLE_MANUAL_AUDIO_MOMENTS = ['reactivation'];
+const allMoments = [...SAMPLE_AUDIO_MOMENTS, ...SAMPLE_MANUAL_AUDIO_MOMENTS];
 const collectionName = 'sampleAgentAudios';
 const exec = promisify(execFile);
 const clean = (value, limit) => String(value || '').trim().slice(0, limit);
@@ -48,7 +50,7 @@ export function registerSampleAgentAudioRoutes(app, { db, bucket, readUser, prep
       next();
     } catch { res.status(500).json({ error: 'No se pudo validar el acceso.' }); }
   };
-  const validMoment = (req, res, next) => SAMPLE_AUDIO_MOMENTS.includes(req.params.moment) ? next() : res.status(400).json({ error: 'Momento del flujo no válido.' });
+  const validMoment = (req, res, next) => allMoments.includes(req.params.moment) ? next() : res.status(400).json({ error: 'Momento del flujo no válido.' });
   const handleError = (res, error) => {
     logger.warn('[sample-agent-audio]', error.message);
     res.status(400).json({ error: error.message || 'No se pudo guardar el audio.' });
@@ -56,7 +58,7 @@ export function registerSampleAgentAudioRoutes(app, { db, bucket, readUser, prep
   app.get('/api/crm/sample-agent/audios', authorize, async (_req, res) => {
     try {
       const snap = await db.collection(collectionName).get();
-      res.json({ audios: snap.docs.filter((doc) => SAMPLE_AUDIO_MOMENTS.includes(doc.id)).map((doc) => ({ ...doc.data(), moment: doc.id })) });
+      res.json({ audios: snap.docs.filter((doc) => allMoments.includes(doc.id)).map((doc) => ({ ...doc.data(), moment: doc.id })) });
     } catch (error) { handleError(res, error); }
   });
   app.post('/api/crm/sample-agent/audios/:moment', authorize, validMoment, (req, res) => {
@@ -118,9 +120,10 @@ export function sampleAudioMoment(turn, agent) {
 }
 
 export function createSampleFlowAudioSender({ db, bucket, sendAudio }) {
-  return async ({ leadId, moment, isCurrent }) => {
-    if (!SAMPLE_AUDIO_MOMENTS.includes(moment)) return false;
+  return async ({ leadId, moment, isCurrent, expectedStoragePath }) => {
+    if (!allMoments.includes(moment)) return false;
     const audio = (await db.collection(collectionName).doc(moment).get()).data();
+    if (expectedStoragePath && audio?.storagePath !== expectedStoragePath) return false;
     if (!audio?.enabled || !new RegExp(`^sample-agent-audio/${moment}/[a-f0-9-]+\\.ogg$`).test(audio.storagePath || '')) return false;
     const [url] = await bucket.file(audio.storagePath).getSignedUrl({ action: 'read', expires: '2100-01-01' });
     if (isCurrent && !await isCurrent()) return false;

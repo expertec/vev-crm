@@ -126,6 +126,22 @@ test('genera código e imágenes con los modelos acordados y reutiliza imágenes
   assert.equal(api.calls.length, 2, 'un reintento con diseño guardado no vuelve a consumir la API');
 });
 
+test('renovar cambia la generación y sus tres imágenes sin perder la caché de reintentos', async () => {
+  const api = apiStub(design(3)), store = imageStore();
+  let savedDesign;
+  const first = { ...business, aiImageCount: 3, regenerationId: 'renewal-1', designDirection: 'Más impacto visual en el hero' };
+  const schema = await generateAiSample(first, { request: api.request, imageStore: store, saveDesign: async (page) => { savedDesign = page; } });
+  const calls = api.calls.length;
+  await generateAiSample(first, { request: api.request, imageStore: store, savedDesign });
+  assert.equal(api.calls.length, calls);
+  const renewed = { ...first, regenerationId: 'renewal-2' };
+  const next = await generateAiSample(renewed, { request: api.request, imageStore: store });
+  assert.equal(api.calls.length - calls, 4);
+  assert.notEqual(aiSampleInputHash(normalizeAiSampleInput(first)), aiSampleInputHash(normalizeAiSampleInput(renewed)));
+  assert.notEqual(schema.aiPage.assets[0].url, next.aiPage.assets[0].url);
+  assert.equal(normalizeAiSampleInput(first).designDirection, first.designDirection);
+});
+
 test('conserva fotografías y logo, y siempre crea una portada basada en el material recibido', async () => {
   const photo = 'https://storage.googleapis.com/test/photo.jpg';
   const logo = 'https://storage.googleapis.com/test/logo.png';
