@@ -10,6 +10,7 @@ export function manualSampleInput(lead) {
   const images = lead.sampleAgent?.images || [];
   const brief = normalizeConversationBrief(lead.sampleAgent?.brief || {}, images);
   if (!brief.companyName || !brief.activity) throw Object.assign(new Error('Falta el nombre o la actividad del negocio. Completa esos datos en el chat antes de generar.'), { status: 400 });
+  if (brief.logoChoice === 'none') brief.images = brief.images.filter((image) => image.role !== 'logo');
   brief.images = brief.images.map((image) => image.role === 'logo' && ['crop', 'original_required'].includes(image.logoStatus) ? { ...image, role: 'reference' } : image);
   if (brief.logoChoice !== 'provided' || !brief.images.some((image) => image.role === 'logo')) {
     brief.logoChoice = 'none';

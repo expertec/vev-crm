@@ -6,6 +6,8 @@ import { hasDeliveredSample } from './sampleAgentReactivation.js';
 import { summarizeSampleProgress } from './sampleProgress.js';
 import { recoverySalesQualification, DEFAULT_RENEWAL_DIRECTION } from './sampleRecovery.js';
 import { isWebsiteCampaignIntro } from '../utils/websiteCampaignContext.js';
+import { manualSampleContext } from './sampleManualContext.js';
+import { normalizeConversationBrief, sampleBriefHash, agentCanReply } from './sampleConversationAgent.js';
 
 const DAY = 86400_000;
 const clean = (value, max = 500) => String(value || '').trim().slice(0, max);
@@ -172,6 +174,26 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
     historyCache.set(key, messages); return messages;
   };
   const getSettings = async () => normalizeFunnelSettings((await db.collection('config').doc('sampleFunnelSettings').get()).data());
+  const contextVersion = (lead) => sampleBriefHash({ brief: lead.sampleAgent?.brief || {}, images: lead.sampleAgent?.images || [], version: lead.sampleAgent?.version || '' });
+  route('get', 'context', async (req, user) => {
+    const { lead } = await contact(String(req.query.leadId || ''), user);
+    return { revision: contextVersion(lead), brief: normalizeConversationBrief(lead.sampleAgent?.brief || {}, lead.sampleAgent?.images || []), images: (lead.sampleAgent?.images || []).map((image, index) => ({ index, url: image.url, caption: image.caption || lead.sampleAgent?.brief?.images?.find((item) => item.index === index)?.description || `Imagen ${index + 1}` })) };
+  });
+  route('post', 'context', async (req, user) => {
+    const { ref } = await contact(String(req.body.leadId || ''), user);
+    await db.runTransaction(async (tx) => {
+      const lead = (await tx.get(ref)).data() || {};
+      if (!canGenerateAiSample(user, lead)) throw fail('No tienes acceso a este contacto.', 403);
+      if (!lead.sampleAgent || hasDeliveredSample(lead) || !agentCanReply({ ...lead, sampleAgent: { ...lead.sampleAgent, enabled: true } })) throw fail('Este contacto no admite cambios de datos para la muestra.');
+      if (lead.sampleAgent.status === 'generating' || funnelMillis(lead.sampleAgent.leaseUntil) > Date.now()) throw fail('Espera a que termine el proceso actual antes de editar.');
+      if (req.body.revision !== contextVersion(lead)) throw fail('El contexto cambió. Cierra y vuelve a abrir los datos para conservar la información reciente.');
+      const brief = manualSampleContext(lead, req.body.fields || {});
+      tx.update(ref, { 'sampleAgent.brief': brief, 'sampleAgent.version': randomUUID(), 'sampleAgent.enabled': false, 'sampleAgent.status': 'paused', 'sampleAgent.confirmationHash': '', 'sampleAgent.error': '', 'sampleAgent.updatedAt': new Date(), 'sampleAgent.manualContextUpdatedAt': new Date(), 'sampleAgent.manualContextUpdatedBy': user.uid });
+    });
+    await cancelSequences(ref.id);
+    listCache.clear();
+    return { success: true };
+  });
   route('get', 'settings', async () => ({ settings: await getSettings() }));
   route('post', 'settings', async (req, user) => {
     if (!canManageSampleAudios(user)) throw fail('Solo un administrador puede configurar los mensajes.', 403);

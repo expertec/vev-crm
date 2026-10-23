@@ -167,3 +167,24 @@ test('cada propuesta conserva su propio envío y apertura sin borrar el historia
   assert.deepEqual(h.rows.get('leads/a').sampleProposalCycle.openedAt, opened);
   assert.deepEqual(h.rows.get('leads/a').linkOpenedAt, before);
 });
+
+test('edición manual verifica acceso, revisión y estado; guarda sin enviar ni generar muestras', async () => {
+  const h = harness();
+  h.add('manual', { sampleAgent: { version: 'v1', status: 'collecting', enabled: true, brief: complete, images: [] } });
+  const initial = await h.call('get', 'context', { leadId: 'manual' });
+  assert.equal(initial.code, 200);
+  assert.equal((await h.call('get', 'context', { leadId: 'manual' }, { uid: 'other', role: 'salesAgent' })).code, 403);
+  const fields = { ...complete, companyName: 'Coroinox', withoutLogo: true, logoImageIndex: '' };
+  const payload = { leadId: 'manual', revision: initial.body.revision, fields };
+  assert.equal((await h.call('post', 'context', { ...payload, revision: 'stale' })).code, 409);
+  assert.equal((await h.call('post', 'context', payload)).code, 200);
+  const saved = h.rows.get('leads/manual').sampleAgent;
+  assert.equal(saved.brief.companyName, 'Coroinox'); assert.equal(saved.enabled, false); assert.equal(saved.status, 'paused'); assert.equal(saved.manualContextUpdatedBy, 'seller');
+  assert.equal(h.renewals.length, 0); assert.equal(h.reactivations.length, 0);
+  assert.equal((await h.call('post', 'context', payload)).code, 409);
+  for (const patch of [{ status: 'generating' }, { status: 'collecting', leaseUntil: new Date(Date.now() + 60000) }]) {
+    Object.assign(h.rows.get('leads/manual').sampleAgent, patch);
+    const current = await h.call('get', 'context', { leadId: 'manual' });
+    assert.equal((await h.call('post', 'context', { ...payload, revision: current.body.revision })).code, 409);
+  }
+});

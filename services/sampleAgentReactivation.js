@@ -59,7 +59,7 @@ export async function buildReactivationPreview({ lead, messages, transcribe, ext
     }
     if (text || message.mediaType) history.push({ role: message.sender === 'lead' ? 'customer' : 'assistant', text: String(text).slice(0, 2000), mediaType: message.mediaType || 'text' });
   }
-  const decision = await extract({ brief: lead.sampleAgent?.brief || {}, images, history, audioOptions: [], message: { reactivation: true, text: '', mediaType: 'reactivation' } });
+  const decision = await extract({ brief: lead.sampleAgent?.brief || {}, images, history, audioOptions: [], message: { reactivation: true, briefReviewedByAdvisor: Boolean(lead.sampleAgent?.manualContextUpdatedAt), text: '', mediaType: 'reactivation' } });
   if (decision.action === 'pause') throw error('El historial indica que no debemos reactivar este contacto.');
   const brief = normalizeConversationBrief(decision.brief, images);
   for (let index = 0; index < images.length; index++) if (!brief.images.some((image) => image.index === index)) brief.images.push({ index, role: 'unclassified', description: '' });
