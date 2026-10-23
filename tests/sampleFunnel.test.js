@@ -85,7 +85,7 @@ test('prioriza el día de interacción y después el score; los sin evaluar no s
   assert.equal(sortSampleFunnel(rows, 'score')[0].id, 'old');
 });
 
-function harness() {
+function harness(extra = {}) {
   const rows = new Map(), routes = new Map(), reactivations = [], renewals = [], cancellations = [];
   const snapshot = (ref) => ({ id: ref.id, ref, exists: rows.has(ref.path), data: () => structuredClone(rows.get(ref.path)) });
   const update = (ref, patch) => { const data = structuredClone(rows.get(ref.path) || {}); for (const [key, value] of Object.entries(patch)) { const parts = key.split('.'); let target = data; for (const part of parts.slice(0, -1)) target = target[part] ||= {}; target[parts.at(-1)] = structuredClone(value); } rows.set(ref.path, data); };
@@ -96,7 +96,7 @@ function harness() {
   });
   const db = { collection, runTransaction: async (fn) => fn({ get: async (ref) => snapshot(ref), update }) };
   registerSampleFunnelRoutes({ get: (url, fn) => routes.set(`get ${url.split('/').at(-1)}`, fn), post: (url, fn) => routes.set(`post ${url.split('/').at(-1)}`, fn) }, { db, readUser: async (req) => req.user,
-    reactivate: async (...args) => { reactivations.push(args); return { success: true }; }, renew: async (...args) => { renewals.push(args); return { success: true }; }, cancelSequences: async (id) => cancellations.push(id),
+    reactivate: async (...args) => { reactivations.push(args); return { success: true }; }, renew: async (...args) => { renewals.push(args); return { success: true }; }, cancelSequences: async (id) => cancellations.push(id), ...extra,
   });
   const add = (id, data = {}) => { rows.set(`leads/${id}`, lead(data)); rows.set(`leads/${id}/messages/1`, customer('Quiero una muestra', Date.now() - 2 * DAY)); };
   return { rows, db, reactivations, renewals, cancellations, add, async call(method, name, data = {}, user = { uid: 'seller', role: 'salesAgent' }) {
@@ -187,4 +187,41 @@ test('edición manual verifica acceso, revisión y estado; guarda sin enviar ni 
     const current = await h.call('get', 'context', { leadId: 'manual' });
     assert.equal((await h.call('post', 'context', { ...payload, revision: current.body.revision })).code, 409);
   }
+});
+
+
+test('recorte manual toma solo la imagen del contacto, guarda el logo y conserva la fuente', async () => {
+  const calls = [];
+  const original = 'https://storage.googleapis.com/own/images/screenshot.jpg';
+  const cropped = 'https://storage.googleapis.com/own/sample-logos/cropped.png';
+  const h = harness({ prepareLogo: async (args) => { calls.push(args); return cropped; } });
+  h.add('crop', { sampleAgent: { version: 'v1', status: 'paused', brief: complete, images: [{ url: original }] } });
+  const initial = await h.call('get', 'context', { leadId: 'crop' });
+  const payload = { leadId: 'crop', revision: initial.body.revision, fields: { ...complete, withoutLogo: false, logoImageIndex: '' }, logoCrop: { imageIndex: 0, crop: [0.1, 0.3, 0.8, 0.4], url: 'https://attacker.example/ignored.jpg' } };
+  assert.equal((await h.call('post', 'context', payload, { uid: 'other', role: 'salesAgent' })).code, 403);
+  assert.equal(calls.length, 0);
+  assert.equal((await h.call('post', 'context', payload)).code, 200);
+  assert.deepEqual(calls, [{ url: original, crop: payload.logoCrop.crop }]);
+  const saved = h.rows.get('leads/crop').sampleAgent;
+  assert.equal(saved.images[0].url, cropped); assert.equal(saved.images[0].sourceUrl, original);
+  assert.equal(saved.brief.logoChoice, 'provided'); assert.equal(saved.brief.images[0].logoStatus, 'clean');
+  assert.equal(saved.enabled, false); assert.equal(h.renewals.length, 0); assert.equal(h.reactivations.length, 0);
+  assert.equal((await h.call('get', 'context', { leadId: 'crop' })).body.images[0].url, original);
+});
+
+test('rechaza recortes inválidos y no sobrescribe cambios del cliente durante el recorte', async () => {
+  let calls = 0;
+  const h = harness({ prepareLogo: async () => {
+    calls++; h.rows.get('leads/crop').sampleAgent.inboxRevision = 1;
+    return 'https://storage.googleapis.com/own/sample-logos/cropped.png';
+  } });
+  const original = 'https://storage.googleapis.com/own/images/screenshot.jpg';
+  h.add('crop', { sampleAgent: { version: 'v1', status: 'paused', brief: complete, images: [{ url: original }] } });
+  const initial = await h.call('get', 'context', { leadId: 'crop' });
+  const payload = { leadId: 'crop', revision: initial.body.revision, fields: { ...complete, withoutLogo: false, logoImageIndex: '' } };
+  assert.equal((await h.call('post', 'context', { ...payload, logoCrop: { imageIndex: 99, crop: [0, 0, 0.5, 0.5] } })).code, 400);
+  assert.equal((await h.call('post', 'context', { ...payload, logoCrop: { imageIndex: 0, crop: [-1, 0, 0.5, 0.5] } })).code, 400);
+  assert.equal(calls, 0);
+  assert.equal((await h.call('post', 'context', { ...payload, logoCrop: { imageIndex: 0, crop: [0, 0, 0.5, 0.5] } })).code, 409);
+  assert.equal(h.rows.get('leads/crop').sampleAgent.images[0].url, original);
 });
