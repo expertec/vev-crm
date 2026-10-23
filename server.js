@@ -104,6 +104,7 @@ import { registerSampleReactivationRoutes } from './services/sampleAgentReactiva
 import { registerSampleProgressRoutes } from './services/sampleProgress.js';
 import { registerSampleRecoveryRoutes } from './services/sampleRecovery.js';
 import { registerSampleFunnelRoutes, recordProposalDelivery, recordProposalOpen } from './services/sampleFunnel.js';
+import { registerAiPageEditorRoutes } from './services/aiPageEditor.js';
 import { createSampleAudioTranscriber } from './services/sampleAudioTranscription.js';
 import { registerSampleAgentAudioRoutes, createSampleFlowAudioSender, loadSampleFlowAudioOptions } from './services/sampleAgentAudioLibrary.js';
 
@@ -3810,6 +3811,20 @@ app.use('/api/stripe-onetime', stripeOneTimeRoutes);
 // ============== 🆕 RUTAS DE AUTENTICACIÓN DE CLIENTE ==============
 app.post('/api/cliente/login', loginCliente);
 app.post('/api/cliente/verificar-sesion', verificarSesion);
+registerAiPageEditorRoutes(app, {
+  db,
+  bucket: admin.storage().bucket(),
+  authenticate: async (req) => {
+    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (!token) return null;
+    let payload, status = 401;
+    await verificarSesion({ body: { token } }, {
+      status(code) { status = code; return this; },
+      json(value) { payload = value; return value; },
+    });
+    return payload?.success ? payload.data : { status, error: payload?.error };
+  },
+});
 app.post('/api/cliente/logout', logoutCliente);
 
 // Cuenta multinegocio: listar / cambiar de negocio / generar enlace de alta.
