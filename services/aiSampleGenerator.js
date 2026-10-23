@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import sanitizeHtml from 'sanitize-html';
 import postcss from 'postcss';
+import { recordOpenAiUsage } from './openAiUsage.js';
 import { appendSampleVideos } from './aiSampleVideos.js';
 import { sampleIconPlaceholder, renderSampleIcons } from './aiSampleIcons.js';
 import { AI_SAMPLE_GENERATOR_REVISION, buildSampleVisualPlan, sampleImagePrompt, SAMPLE_PAGE_INSTRUCTIONS, sampleHeroCss, SAMPLE_BRAND_HEADER_CSS } from './aiSampleVisuals.js';
@@ -62,8 +63,9 @@ export function aiSampleInputHash(data, model = process.env.OPENAI_SAMPLE_MODEL 
   return createHash('sha256').update(JSON.stringify({ version: AI_SAMPLE_VERSION, revision: AI_SAMPLE_GENERATOR_REVISION, model, imageModel, input })).digest('hex');
 }
 
-export async function requestSampleOpenAI(resource, body, { fetchImpl = fetch, timeoutMs = 180_000, apiKey = process.env.OPENAI_API_KEY } = {}) {
+export async function requestSampleOpenAI(resource, body, { fetchImpl = fetch, timeoutMs = 180_000, apiKey = process.env.OPENAI_API_KEY, usageContext = {}, recordUsage = recordOpenAiUsage } = {}) {
   if (!apiKey) throw new Error('Falta OPENAI_API_KEY para generar la muestra.');
+  const startedAt = Date.now();
   const response = await fetchImpl(`https://api.openai.com/v1/${resource}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -71,7 +73,13 @@ export async function requestSampleOpenAI(resource, body, { fetchImpl = fetch, t
     signal: AbortSignal.timeout(timeoutMs),
   });
   const result = await response.json();
-  if (!response.ok) throw new Error(clean(result?.error?.message || `OpenAI: HTTP ${response.status}`, 500));
+  await recordUsage({ resource, model: body.model, purpose: body.text?.format?.name || resource.replace('/', '_'), context: usageContext, usage: result.usage, requestId: result.id || response.headers?.get?.('x-request-id') || '', status: response.status || 200, durationMs: Date.now() - startedAt, imageCount: (body.input || []).flatMap((item) => item.content || []).filter((item) => item.type === 'input_image').length || (resource.startsWith('images/') ? Number(body.n || 1) : 0) });
+  if (!response.ok) {
+    const failure = new Error(clean(result?.error?.message || `OpenAI: HTTP ${response.status}`, 500));
+    failure.code = result?.error?.code || '';
+    if (failure.code === 'insufficient_quota' || /no credits remaining|exceeded your current quota/i.test(failure.message)) { failure.code = 'insufficient_quota'; failure.status = 503; failure.message = 'Se agotó el saldo de OpenAI. Recarga la cuenta y vuelve a activar el asistente.'; }
+    throw failure;
+  }
   return result;
 }
 
@@ -161,7 +169,7 @@ export function samplePageCsp(assets = [], videos = []) {
   return `default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src ${origins.length ? origins.join(' ') : "'none'"}; media-src ${mediaOrigins.length ? mediaOrigins.join(' ') : "'none'"}; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-popups allow-popups-to-escape-sandbox`;
 }
 
-export async function generateAiSample(data, { request = requestSampleOpenAI, imageStore, savedDesign = null, saveDesign = async () => {}, model = process.env.OPENAI_SAMPLE_MODEL || DEFAULT_SAMPLE_MODEL, imageModel = process.env.OPENAI_SAMPLE_IMAGE_MODEL || DEFAULT_SAMPLE_IMAGE_MODEL } = {}) {
+export async function generateAiSample(data, { request = requestSampleOpenAI, imageStore, savedDesign = null, saveDesign = async () => {}, model = process.env.OPENAI_SAMPLE_MODEL || DEFAULT_SAMPLE_MODEL, imageModel = process.env.OPENAI_SAMPLE_IMAGE_MODEL || DEFAULT_SAMPLE_IMAGE_MODEL, usageContext = {} } = {}) {
   const input = normalizeAiSampleInput(data);
   if (!input.companyInfo || !input.businessStory) throw new Error('Faltan nombre y descripción del negocio.');
   if (!input.logoURL && !input.primaryColor && !input.colorPreference) throw new Error('¿Qué colores te gustaría usar? Elige colores o indica que deseas una propuesta.');
@@ -175,7 +183,7 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
     instructions: `${SAMPLE_PAGE_INSTRUCTIONS}\ninput.designDirection es la dirección de diseño indicada por el asesor para renovar la muestra: aplícala al diseño sin cambiar hechos del negocio, inventar testimonios ni incumplir las reglas de contenido.`,
     input: [{ role: 'user', content }],
     text: { format: { type: 'json_schema', name: 'sample_page', strict: true, schema: PAGE_CONTRACT } },
-  });
+  }, { usageContext });
   if (result?.status === 'incomplete') throw new Error('OpenAI no terminó la página; intenta nuevamente.');
   const output = result?.output_text || (result?.output || []).flatMap((item) => item.content || []).filter((item) => item.type === 'output_text').map((item) => item.text).join('');
   const design = savedDesign || JSON.parse(output);
@@ -206,7 +214,7 @@ export async function generateAiSample(data, { request = requestSampleOpenAI, im
     let url = await imageStore.get(key);
     if (!url) {
       const resource = task.sourceUrls.length ? 'images/edits' : 'images/generations';
-      const image = await request(resource, { model: imageModel, prompt, n: 1, size: '1536x1024', quality: 'medium', output_format: 'webp', ...(task.sourceUrls.length ? { images: task.sourceUrls.map((image_url) => ({ image_url })) } : {}) });
+      const image = await request(resource, { model: imageModel, prompt, n: 1, size: '1536x1024', quality: 'medium', output_format: 'webp', ...(task.sourceUrls.length ? { images: task.sourceUrls.map((image_url) => ({ image_url })) } : {}) }, { usageContext });
       const b64 = image.data?.[0]?.b64_json;
       if (!b64) throw new Error('OpenAI no devolvió la imagen solicitada.');
       url = await imageStore.put(key, Buffer.from(b64, 'base64'));

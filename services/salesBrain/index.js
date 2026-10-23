@@ -24,6 +24,7 @@ import {
   decideRouting,
 } from '../salesQueue/routing.js';
 import { commercialProgressFromLead } from './commercialProgress.js';
+import { isSalesBrainEnabled } from './defaultMode.js';
 
 const { FieldValue } = admin.firestore;
 
@@ -49,6 +50,7 @@ function toMillis(value) {
 }
 
 export function resolveSalesBrainMode(lead = {}) {
+  if (!isSalesBrainEnabled()) return SALES_BRAIN_MODES.OFF;
   const mode = cleanText(lead?.salesBrainMode || SALES_BRAIN_MODES.OFF, 40).toLowerCase();
   return mode === SALES_BRAIN_MODES.COPILOT ? SALES_BRAIN_MODES.COPILOT : SALES_BRAIN_MODES.OFF;
 }

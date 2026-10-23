@@ -3,6 +3,7 @@ import {
   normalizeNextBestAction,
 } from './catalog.js';
 import { Configuration, OpenAIApi } from 'openai';
+import { recordOpenAiUsage } from '../openAiUsage.js';
 
 const AI_MODEL = String(process.env.SALES_BRAIN_REPLY_MODEL || process.env.SALES_BRAIN_AI_MODEL || 'gpt-4o-mini').trim() || 'gpt-4o-mini';
 const AI_DISABLED = String(process.env.SALES_BRAIN_REPLY_AI || process.env.SALES_BRAIN_AI || '').trim().toLowerCase() === 'off';
@@ -321,6 +322,7 @@ export async function generateReply({
         { role: 'user', content: user },
       ],
     });
+    await recordOpenAiUsage({ resource: 'chat/completions', purpose: 'sales_reply', model: AI_MODEL, context: { leadId: lead.id || '' }, usage: response?.data?.usage, requestId: response?.data?.id || '' });
     const message = cleanText(response?.data?.choices?.[0]?.message?.content || fallback);
     return {
       message: message || fallback,

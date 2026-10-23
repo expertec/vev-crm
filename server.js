@@ -105,6 +105,7 @@ import { registerSampleProgressRoutes } from './services/sampleProgress.js';
 import { registerSampleRecoveryRoutes } from './services/sampleRecovery.js';
 import { registerSampleFunnelRoutes, recordProposalDelivery, recordProposalOpen } from './services/sampleFunnel.js';
 import { registerAiPageEditorRoutes } from './services/aiPageEditor.js';
+import { configureOpenAiUsage } from './services/openAiUsage.js';
 import { createSampleAudioTranscriber } from './services/sampleAudioTranscription.js';
 import { registerSampleAgentAudioRoutes, createSampleFlowAudioSender, loadSampleFlowAudioOptions } from './services/sampleAgentAudioLibrary.js';
 
@@ -5482,6 +5483,7 @@ async function queueConversationSample({ leadRef, leadId, lead, input }) {
 }
 
 const loadSampleSalesKnowledge = createSampleSalesKnowledgeLoader(db);
+configureOpenAiUsage(db);
 registerSampleProgressRoutes(app, { db, readUser: (req) => readAiSampleUser(req, { admin, db }), generate: queueConversationSample, resume: (leadId, user) => sampleReactivation.activate(leadId, user, { generateWhenReady: false }), cancelSequences: (leadId) => cancelAllSequences(leadId) });
 const prepareSampleLogo = createSampleLogoPreparer({ bucket: admin.storage().bucket() });
 const extractSampleBrief = (params) => extractConversationBrief({ ...params, prepareLogo: prepareSampleLogo });

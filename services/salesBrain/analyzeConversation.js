@@ -1,4 +1,5 @@
 import { Configuration, OpenAIApi } from 'openai';
+import { recordOpenAiUsage } from '../openAiUsage.js';
 import {
   AWARENESS_LEVELS,
   FACT_KEYS,
@@ -423,6 +424,7 @@ async function aiAnalyze({ lead = {}, recentMessages = [], latestText = '', acqu
         { role: 'user', content: user },
       ],
     });
+    await recordOpenAiUsage({ resource: 'chat/completions', purpose: 'sales_analysis', model: AI_MODEL, context: { leadId: lead.id || '' }, usage: response?.data?.usage, requestId: response?.data?.id || '' });
     const content = response?.data?.choices?.[0]?.message?.content || '';
     const parsed = parseAiJson(content);
     if (!parsed) return null;

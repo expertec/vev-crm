@@ -21,6 +21,7 @@ import {
   resolveSalesBrainMode,
 } from './salesBrain/index.js';
 import { SALES_BRAIN_MODES } from './salesBrain/catalog.js';
+import { isSalesBrainEnabled } from './salesBrain/defaultMode.js';
 import { ROUTING_STATUSES, updateRoutingAfterInbound } from './salesQueue/index.js';
 
 const { FieldValue } = admin.firestore;
@@ -395,7 +396,7 @@ export async function classifyLeadReply({ lead = {}, recentMessages = [], latest
   const fallback = keywordClassify(text);
   fallback.automated = keywordAuto;
 
-  if (!HOT_LEAD_AI_ENABLED) return fallback;
+  if (!HOT_LEAD_AI_ENABLED || !isSalesBrainEnabled()) return fallback;
 
   const analysis = await analyzeConversation({
     lead,

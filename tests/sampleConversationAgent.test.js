@@ -61,6 +61,17 @@ test('recopila por chat, confirma y genera una sola vez sin otra llamada de IA',
   assert.match(s.replies.at(-1), /sigue en preparación/);
 });
 
+test('sin saldo pausa el agente y el cron no repite la llamada fallida', async () => {
+  let calls = 0;
+  const s = setup(async () => { calls++; throw Object.assign(Error('Se agotó el saldo de OpenAI.'), { code: 'insufficient_quota' }); });
+  await s.receive('Mi taller está en Monterrey', 'quota-1');
+  assert.equal((await s.leadRef.get()).data().sampleAgent.enabled, false);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.status, 'error');
+  await s.agent.resume();
+  assert.equal(calls, 1);
+  assert.equal(s.replies.length, 0);
+});
+
 test('entrega la muestra lista con enlace solo y reintenta el enlace sin repetir el aviso', async () => {
   const messages = [];
   const url = 'https://negociosweb.mx/taller-norte';
@@ -180,7 +191,7 @@ test('usa visión y salida estructurada sin aceptar URLs inventadas en el brief'
   const response = await extractConversationBrief({ message: { text: 'Mi logo' }, images }, async (resource, body) => {
     assert.equal(resource, 'responses'); assert.equal(body.store, false);
     assert.equal(body.text.format.strict, true);
-    assert.equal(body.input[0].content[1].detail, 'high');
+    assert.equal(body.input[0].content.find((item) => item.type === 'input_image').detail, 'high');
     return { output_text: JSON.stringify({ action: 'ask', reply: '¿Qué servicios ofreces?', brief: complete() }) };
   });
   assert.equal(response.brief.companyName, 'Makiatto');

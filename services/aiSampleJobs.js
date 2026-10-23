@@ -80,6 +80,7 @@ export async function runAiSampleJob({ db, negocioRef, bucket, sendReady, genera
       ? claimed.schema
       : await generate(input, {
         imageStore,
+        usageContext: { leadId: claimed.leadId || '', negocioId: negocioRef.id },
         savedDesign: claimed.aiSampleDraft?.inputHash === inputHash ? claimed.aiSampleDraft.design : null,
         saveDesign: (design) => negocioRef.update({ aiSampleDraft: { inputHash, design } }),
       });

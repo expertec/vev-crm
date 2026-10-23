@@ -1,3 +1,5 @@
+import { recordOpenAiUsage } from './openAiUsage.js';
+
 const MAX_AUDIO_BYTES = 24 * 1024 * 1024;
 const AUDIO_TYPES = { ogg: 'audio/ogg', mp3: 'audio/mpeg', mp4: 'audio/mp4', m4a: 'audio/mp4', wav: 'audio/wav', webm: 'audio/webm', flac: 'audio/flac' };
 
@@ -50,10 +52,13 @@ export function createSampleAudioTranscriber({ bucket, fetchImpl = fetch, apiKey
     form.append('model', model());
     form.append('language', 'es');
     form.append('response_format', 'json');
+    const startedAt = Date.now();
+    const modelName = form.get('model');
     const response = await fetchImpl('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: form, signal: AbortSignal.timeout(90_000),
     });
     const result = await response.json();
+    await recordOpenAiUsage({ resource: 'audio/transcriptions', purpose: 'sample_transcription', model: modelName, usage: result.usage, requestId: response.headers?.get?.('x-request-id') || '', status: response.status || 200, durationMs: Date.now() - startedAt });
     if (!response.ok) throw new Error(`No se pudo transcribir el audio (HTTP ${response.status}).`);
     const text = String(result.text || '').trim();
     if (!text) throw new Error('No se detectó voz comprensible en el audio.');
