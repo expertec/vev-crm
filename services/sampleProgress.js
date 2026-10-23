@@ -128,7 +128,12 @@ export function registerSampleProgressRoutes(app, { db, readUser, generate, resu
       await cancelSequences(leadId);
       const current = (await ref.get()).data() || {};
       if (current.sampleAgent?.version !== owner || current.sampleAgent?.deliveryPaused) throw Object.assign(new Error('El contacto cambió durante la solicitud. Revisa su estado.'), { status: 409 });
-      generation = await generate({ leadRef: ref, leadId, lead: current, input: manualSampleInput(lead) });
+      let input = manualSampleInput(lead);
+      if (lead.sampleAgent?.status === 'error' && lead.sampleAgent?.negocioId) {
+        const business = (await db.collection('Negocios').doc(lead.sampleAgent.negocioId).get()).data() || {};
+        if (business.leadId === leadId && business.aiSampleJob?.state === 'failed' && business.aiSampleJob.input) input = business.aiSampleJob.input;
+      }
+      generation = await generate({ leadRef: ref, leadId, lead: current, input });
       await db.runTransaction(async (tx) => {
         const current = (await tx.get(ref)).data() || {};
         if (current.sampleAgent?.version === owner && current.sampleAgent.status === 'generating') tx.update(ref, { 'sampleAgent.negocioId': generation.negocioId, 'sampleAgent.status': generation.ready ? 'completed' : 'generating', 'sampleAgent.updatedAt': new Date() });

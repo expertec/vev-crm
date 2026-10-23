@@ -130,12 +130,13 @@ function manualHarness(generateError = false) {
   const update = (_ref, patch) => { for (const [key, value] of Object.entries(patch)) { const parts = key.split('.'); let row = current; for (const part of parts.slice(0, -1)) row = row[part] ||= {}; row[parts.at(-1)] = value; } };
   const ref = { id: 'lead', get: async () => ({ exists: true, data: () => structuredClone(current) }) };
   let chain = Promise.resolve();
-  const db = { collection: () => ({ doc: () => ref }), runTransaction(fn) { const result = chain.then(() => fn({ get: () => ref.get(), update })); chain = result.catch(() => {}); return result; } };
+  const businesses = new Map();
+  const db = { collection: (name) => ({ doc: (id) => name === 'Negocios' ? { get: async () => ({ data: () => businesses.get(id) }) } : ref }), runTransaction(fn) { const result = chain.then(() => fn({ get: () => ref.get(), update })); chain = result.catch(() => {}); return result; } };
   registerSampleProgressRoutes({ get: () => {}, post: (_path, fn) => { handler = fn; } }, { db, readUser: async (req) => req.user,
     cancelSequences: async (id) => cancelled.push(id),
     generate: async (args) => { requests.push(args); if (generateError) throw Error('Error al solicitar la muestra'); return { negocioId: 'business', queued: true }; },
   });
-  return { requests, cancelled, get current() { return current; }, set current(value) { current = value; }, async dispatch(user = { uid: 'seller', role: 'salesAgent' }) {
+  return { requests, cancelled, businesses, get current() { return current; }, set current(value) { current = value; }, async dispatch(user = { uid: 'seller', role: 'salesAgent' }) {
     const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
     await handler({ user, body: { leadId: 'lead' } }, res);
     return res;
@@ -178,4 +179,15 @@ test('si falla la solicitud manual deja un error visible y no reactiva el chat',
   assert.equal(h.current.sampleAgent.enabled, false);
   assert.equal(h.current.sampleAgent.deliveryPaused, true);
   assert.match(h.current.sampleAgent.error, /Error al solicitar/);
+});
+
+
+test('reintentar usa la solicitud fallida exacta para conservar borrador y caché de imágenes', async () => {
+  const h = manualHarness();
+  h.current.sampleAgent.status = 'error';
+  h.current.sampleAgent.negocioId = 'business';
+  const input = { companyInfo: 'Gran Valor', businessStory: 'Datos originales confirmados', regenerationId: 'same-cycle', aiImageCount: 3 };
+  h.businesses.set('business', { leadId: 'lead', aiSampleJob: { state: 'failed', input } });
+  assert.equal((await h.dispatch()).code, 200);
+  assert.deepEqual(h.requests[0].input, input);
 });

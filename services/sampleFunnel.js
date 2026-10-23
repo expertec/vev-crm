@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { canGenerateAiSample } from './aiSampleAccess.js';
+import { syncAiSampleFailure } from './aiSampleFailure.js';
 import { canManageSampleAudios } from './sampleAgentAudioLibrary.js';
 import { hasDeliveredSample } from './sampleAgentReactivation.js';
 import { summarizeSampleProgress } from './sampleProgress.js';
@@ -109,7 +110,7 @@ export function classifySampleFunnel(id, lead, messages = [], now = Date.now()) 
   const sentAt = funnelMillis(cycle?.sentAt || lead.webSales?.sample?.sentAt || lead.siteSentAt || historicalDelivery?.at || (delivered ? lead.sampleLinkSentAt || lead.webLinkSentAt : null));
   const working = agent.status === 'generating';
   let stage;
-  if (working) stage = 'process';
+  if (working || (!delivered && agent.status === 'error' && agent.negocioId)) stage = 'process';
   else if (delivered) stage = Math.max(lastCustomerAt, sentAt) && now - Math.max(lastCustomerAt, sentAt) >= DAY ? 'proposals' : 'process';
   else if (['collecting', 'awaiting_confirmation', 'paused', 'error'].includes(agent.status) && lastCustomerAt && now - lastCustomerAt < DAY) stage = 'process';
   else if (!evidence) return null;
@@ -190,8 +191,9 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
       // Solo consulta contexto guardado; no llama a IA ni recalifica al abrir la tabla.
       for (let index = 0; index < docs.length; index += 20) {
         const batch = await Promise.all(docs.slice(index, index + 20).map(async (doc) => {
-          const lead = doc.data();
+          let lead = doc.data();
           if (lead.archived || lead.archivedAt || lead.stopSequences || ['compro', 'cliente', 'no interesado'].includes(normalize(lead.estado))) return null;
+          if (lead.sampleAgent?.status === 'generating' && lead.sampleAgent?.negocioId) lead = await syncAiSampleFailure(db, doc.ref);
           return classifySampleFunnel(doc.id, lead, await history(doc.ref, lead));
         }));
         rows.push(...batch.filter(Boolean));

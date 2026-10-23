@@ -45,6 +45,7 @@ test('las etapas son exclusivas y no llama inconforme a quien no abrió o apenas
   assert.equal(classifySampleFunnel('a', { ...data, linkOpenedAt: new Date(NOW) }, old, NOW).stage, 'process');
   assert.equal(classifySampleFunnel('a', { ...data, sampleLinkSentUrl: 'https://app.negociosweb.mx/muestra/521831' }, old, NOW).stage, 'interested');
   assert.equal(classifySampleFunnel('a', lead({ sampleAgent: { status: 'generating' } }), [], NOW).stage, 'process');
+  assert.equal(classifySampleFunnel('a', lead({ sampleAgent: { status: 'error', negocioId: 'failed-business', error: 'Sin saldo' } }), old, NOW).stage, 'process');
 });
 
 test('una muestra antigua enviada en el chat califica como entrega, pero el enlace del formulario no', () => {

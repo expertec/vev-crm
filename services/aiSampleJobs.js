@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { AI_SAMPLE_VERSION, aiSampleInputHash, generateAiSample, normalizeAiSampleInput, publicImageUrl } from './aiSampleGenerator.js';
+import { syncAiSampleFailure } from './aiSampleFailure.js';
 
 const LEASE_MS = 15 * 60_000;
 const runningJobs = new Set();
@@ -105,6 +106,8 @@ export async function runAiSampleJob({ db, negocioRef, bucket, sendReady, genera
       // Keep an existing usable schema and let the CRM retry delivery without new API calls.
       status: 'Error muestra IA',
     }).catch(() => {});
+    if (claimed?.leadId) await syncAiSampleFailure(db, db.collection('leads').doc(claimed.leadId), negocioRef.id)
+      .catch((syncError) => logger.warn('[ai-sample] estado del contacto pendiente:', syncError.message));
   } finally {
     runningJobs.delete(negocioRef.id);
   }
@@ -124,5 +127,8 @@ export async function resumeAiSampleJobs(options) {
         tx.update(doc.ref, { 'aiSampleJob.state': 'failed', 'aiSampleJob.error': 'La generación se interrumpió. Puedes reintentar desde el CRM.', status: 'Error muestra IA' });
       }
     });
+    const leadId = doc.data().leadId;
+    if (leadId && expires && expires < Date.now()) await syncAiSampleFailure(options.db, options.db.collection('leads').doc(leadId), doc.id)
+      .catch((error) => (options.logger || console).warn('[ai-sample] estado del contacto pendiente:', error.message));
   }
 }
