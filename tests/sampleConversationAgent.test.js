@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSampleConversationAgent, normalizeConversationBrief, missingBriefQuestion, isExplicitSampleConfirmation, sampleInputFromConversation, extractConversationBrief, interpretSampleApproval, agentCanReply, briefSummary } from '../services/sampleConversationAgent.js';
+import { createSampleConversationAgent, createSampleConversationContextLoader, normalizeConversationBrief, missingBriefQuestion, isExplicitSampleConfirmation, sampleInputFromConversation, extractConversationBrief, interpretSampleApproval, agentCanReply, briefSummary } from '../services/sampleConversationAgent.js';
 import { shouldBlockSequenceByLeadContext } from '../utils/sequenceTriggerGuards.js';
 import { isWebsiteCampaignIntro } from '../utils/websiteCampaignContext.js';
 
@@ -480,6 +480,93 @@ test('la bienvenida con pregunta tiene prioridad sobre negocio y no duplica la p
 });
 
 const campaignIntro = 'Hola, tengo un negocio y quiero información sobre la página web de $990 al año.';
+
+test('cede otra negociación sin enviar texto, audio, paquete ni perder el brief', async () => {
+  const original = { ...complete(), companyName: 'Gran Valor' };
+  const s = setup(async ({ conversationContext }) => {
+    assert.match(conversationContext[0].text, /2,490/);
+    return { brief: { ...original, companyName: 'Dato ajeno' }, action: 'handoff', reply: 'No debería interrumpir', packageId: 'web', audioMoment: 'welcome' };
+  }, undefined, {
+    loadConversationContext: async () => [{ role: 'business', text: 'El paquete de publicidad cuesta $2,490.', outsideAgent: true }],
+    loadAudioOptions: async () => [{ moment: 'welcome', script: 'Hola' }],
+    sendFlowAudio: async () => assert.fail('No debe enviar audio'),
+    sendPackage: async () => assert.fail('No debe enviar el paquete web'),
+  });
+  await s.leadRef.update({ 'sampleAgent.brief': original });
+  await s.receive('Es más rentable el de $2,490', 'other-service');
+  const agent = (await s.leadRef.get()).data().sampleAgent;
+  assert.equal(agent.enabled, false);
+  assert.equal(agent.status, 'paused');
+  assert.equal(agent.pauseReason, 'other_service_or_human_conversation');
+  assert.equal(agent.brief.companyName, 'Gran Valor');
+  assert.equal(agent.history.at(-1).role, 'customer');
+  assert.deepEqual(s.replies, []);
+  assert.equal(s.jobs.length, 0);
+});
+
+for (const [action, reply] of [
+  ['related', 'La página no incluye campañas de publicidad pagada.'],
+  ['clarify', '¿Te refieres a los paquetes de publicidad o al de página web?'],
+]) test(`${action}: responde sin insistir en los datos pendientes ni enviar paquetes`, async () => {
+  const s = setup(async () => ({ brief: normalizeConversationBrief({ companyName: 'Gran Valor' }), action, reply, packageId: 'web', audioMoment: 'welcome' }), undefined, {
+    loadAudioOptions: async () => [{ moment: 'welcome', script: 'Hola' }],
+    sendFlowAudio: async () => assert.fail('No debe enviar bienvenida'),
+    sendPackage: async () => assert.fail('No debe asumir el paquete'),
+  });
+  await s.receive('¿Y esos paquetes?', 'topic-question');
+  assert.deepEqual(s.replies, [reply]);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.enabled, true);
+  assert.equal(s.jobs.length, 0);
+});
+
+test('aceptar otra oferta durante la aprobación no genera la muestra por el atajo de «ok»', async () => {
+  const context = [{ role: 'business', text: 'La publicidad es $2,490 anuales', outsideAgent: true }];
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }), undefined, {
+    loadConversationContext: async () => context,
+    interpretApproval: async ({ text, conversationContext }) => {
+      assert.equal(text, 'ok'); assert.deepEqual(conversationContext, context);
+      return { intent: 'handoff', reply: '' };
+    },
+  });
+  await s.receive('Mis datos', 'data');
+  await s.receive('ok', 'other-approval');
+  assert.equal(s.jobs.length, 0);
+  assert.equal(s.replies.length, 1);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.status, 'paused');
+});
+
+test('lee mensajes del asesor y reutiliza la transcripción de su audio', async () => {
+  let calls = 0;
+  const rows = [
+    { id: '2', sender: 'business', mediaType: 'audio_ptt', mediaUrl: 'stored-audio' },
+    { id: '1', sender: 'business', content: '¿Cómo se llama tu negocio?' },
+  ];
+  const leadRef = { collection: () => ({ orderBy: () => ({ limit: (limit) => {
+    assert.equal(limit, 20);
+    return { get: async () => ({ docs: rows.map((row) => ({ id: row.id, data: () => row, ref: { update: async (patch) => Object.assign(row, patch) } })) }) };
+  } }) }) };
+  const load = createSampleConversationContextLoader({ transcribe: async () => { calls++; return 'Publicidad por $2,490 al año'; } });
+  const history = [{ role: 'assistant', text: '¿Cómo se llama tu negocio?' }];
+  const context = await load({ leadRef, history });
+  assert.equal(context[0].outsideAgent, false);
+  assert.equal(context[1].outsideAgent, true);
+  assert.match(context[1].text, /2,490/);
+  await load({ leadRef, history });
+  assert.equal(calls, 1);
+});
+
+test('la extracción y la aprobación reciben el contexto y aceptan la cesión por tema', async () => {
+  const context = [{ role: 'business', text: 'Oferta de otro servicio' }];
+  const request = async (_path, body) => {
+    assert.deepEqual(JSON.parse(body.input[0].content[0].text).conversationContext, context);
+    assert.match(body.instructions, /nunca afirmes que no existen/);
+    return { output_text: JSON.stringify(body.text.format.name === 'sample_brief'
+      ? { brief: complete(), action: 'handoff', reply: '', audioMoment: 'none', packageId: '' }
+      : { intent: 'handoff', reply: '', packageId: '' }) };
+  };
+  assert.equal((await extractConversationBrief({ conversationContext: context, message: { text: 'De acuerdo' } }, request)).action, 'handoff');
+  assert.equal((await interpretSampleApproval({ brief: complete(), conversationContext: context, text: 'ok' }, request)).intent, 'handoff');
+});
 
 test('el mensaje prellenado de campaña envía solo bienvenida sin precio ni paquete', async () => {
   const sent = [];

@@ -96,11 +96,12 @@ import { AI_SAMPLE_VERSION, samplePageDocument } from './services/aiSampleGenera
 import { queueAiSampleJob, runAiSampleJob, resumeAiSampleJobs, scheduleAiSampleFollowup } from './services/aiSampleJobs.js';
 import { canGenerateAiSample, readAiSampleUser, isAiSampleAvailable } from './services/aiSampleAccess.js';
 import { buildAiSamplePublicUrl } from './services/sampleUrls.js';
-import { createSampleConversationAgent, agentCanReply, extractConversationBrief } from './services/sampleConversationAgent.js';
+import { createSampleConversationAgent, createSampleConversationContextLoader, agentCanReply, extractConversationBrief } from './services/sampleConversationAgent.js';
 import { createSampleLogoPreparer } from './services/sampleLogoPreparation.js';
 import { registerSamplePackageRoutes, createSamplePackageSender } from './services/samplePackages.js';
 import { createSampleSalesKnowledgeLoader } from './services/sampleSalesKnowledge.js';
 import { registerSampleReactivationRoutes } from './services/sampleAgentReactivation.js';
+import { registerSampleProgressRoutes } from './services/sampleProgress.js';
 import { createSampleAudioTranscriber } from './services/sampleAudioTranscription.js';
 import { registerSampleAgentAudioRoutes, createSampleFlowAudioSender, loadSampleFlowAudioOptions } from './services/sampleAgentAudioLibrary.js';
 
@@ -5461,11 +5462,13 @@ async function queueConversationSample({ leadRef, leadId, lead, input }) {
 }
 
 const loadSampleSalesKnowledge = createSampleSalesKnowledgeLoader(db);
+registerSampleProgressRoutes(app, { db, readUser: (req) => readAiSampleUser(req, { admin, db }), generate: queueConversationSample, resume: (leadId, user) => sampleReactivation.activate(leadId, user, { generateWhenReady: false }), cancelSequences: (leadId) => cancelAllSequences(leadId) });
 const prepareSampleLogo = createSampleLogoPreparer({ bucket: admin.storage().bucket() });
 const extractSampleBrief = (params) => extractConversationBrief({ ...params, prepareLogo: prepareSampleLogo });
 registerSamplePackageRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }), invalidate: () => loadSampleSalesKnowledge.invalidate() });
 const sampleConversationAgent = createSampleConversationAgent({
   extract: extractSampleBrief,
+  loadConversationContext: createSampleConversationContextLoader({ transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }) }),
   sendPackage: createSamplePackageSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead, sendImage: sendImageToLead, sendText: sendMessageToLead }),
   loadSalesKnowledge: loadSampleSalesKnowledge, db, send: sendMessageToLead, generate: queueConversationSample,
   transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }),

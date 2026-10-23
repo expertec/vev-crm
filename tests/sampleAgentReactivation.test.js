@@ -196,6 +196,17 @@ test('activar continúa inmediatamente y genera cuando el historial está comple
   assert.doesNotMatch(h.sends[0][1], /¿Confirmas/);
 });
 
+test('play permite retomar para pedir confirmación aunque ya haya datos completos, sin generar', async () => {
+  const h = harness({ generate: async () => assert.fail('Play debe pedir confirmar, no generar') });
+  const result = await h.service.activate('lead', user, { generateWhenReady: false });
+  assert.equal(result.generated, false);
+  assert.equal(result.sampleAgent.enabled, true);
+  assert.equal(result.sampleAgent.status, 'awaiting_confirmation');
+  assert.equal(h.sends.length, 1);
+  assert.match(h.sends[0][1], /¿Confirmas/);
+  assert.deepEqual(h.cancellations, ['lead']);
+});
+
 test('activar con información incompleta pregunta solo lo pendiente y conserva las imágenes', async () => {
   const h = harness({ extract: async () => ({ brief: { ...complete(), objective: '', images: [{ index: 0, role: 'work', description: 'Foto del taller' }] }, action: 'ask' }), generate: async () => assert.fail('Faltan datos') });
   h.rows.set('leads/lead/messages/photo', { sender: 'lead', mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/photo.jpg', timestamp: new Date() });

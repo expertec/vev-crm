@@ -202,12 +202,12 @@ export function registerSampleReactivationRoutes(app, { db, readUser, transcribe
       activating.set(key, work);
       return work;
     },
-    activate(leadId, user) {
+    activate(leadId, user, { generateWhenReady = true } = {}) {
       const key = `${user.uid}:${leadId}`;
       if (activating.has(key)) return activating.get(key);
       const work = (async () => {
         const preview = await prepare(leadId, user);
-        return deliver(leadId, preview.draftId, user, true);
+        return deliver(leadId, preview.draftId, user, generateWhenReady);
       })().finally(() => activating.delete(key));
       activating.set(key, work);
       return work;
