@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSampleConversationAgent, normalizeConversationBrief, missingBriefQuestion, isExplicitSampleConfirmation, sampleInputFromConversation, extractConversationBrief, interpretSampleApproval, agentCanReply, briefSummary } from '../services/sampleConversationAgent.js';
 import { shouldBlockSequenceByLeadContext } from '../utils/sequenceTriggerGuards.js';
+import { isWebsiteCampaignIntro } from '../utils/websiteCampaignContext.js';
 
 const complete = () => normalizeConversationBrief({ companyName: 'Makiatto', activity: 'Venta de bocinas y amplificadores', objective: 'Cotizaciones por WhatsApp', offerings: ['Bocinas activas', 'Amplificadores'], customers: 'Músicos y organizadores', differentiators: 'Asesoría para elegir equipo', serviceArea: 'Monterrey', logoChoice: 'none', colorPreference: 'Verde y negro', photosChoice: 'none' });
 
@@ -476,6 +477,49 @@ test('la bienvenida con pregunta tiene prioridad sobre negocio y no duplica la p
   await s.receive('Quiero información sobre la página web', '1');
   assert.deepEqual(sent, ['welcome']); assert.equal(s.replies.length, 0);
   assert.equal((await s.leadRef.get()).data().sampleAgent.history.at(-1).text, welcome);
+});
+
+const campaignIntro = 'Hola, tengo un negocio y quiero información sobre la página web de $990 al año.';
+
+test('el mensaje prellenado de campaña envía solo bienvenida sin precio ni paquete', async () => {
+  const sent = [];
+  const s = setup(async () => assert.fail('La plantilla no necesita interpretación comercial'), undefined, {
+    loadAudioOptions: async () => [{ moment: 'welcome', script: 'Hola. ¿Cómo se llama tu negocio y a qué se dedica?' }],
+    sendFlowAudio: async ({ moment }) => { sent.push(moment); return true; },
+    sendPackage: async () => assert.fail('No solicitó un paquete'),
+  });
+  await s.receive(campaignIntro, 'campaign');
+  assert.deepEqual(sent, ['welcome']);
+  assert.deepEqual(s.replies, []);
+  assert.equal(s.jobs.length, 0);
+});
+
+test('sin audio la plantilla de campaña pregunta por el negocio sin repetir el precio', async () => {
+  const s = setup(async () => assert.fail('No necesita extracción'));
+  await s.receive(campaignIntro, 'campaign');
+  assert.deepEqual(s.replies, ['¿Cómo se llama tu negocio y a qué se dedica?']);
+});
+
+test('la detección de plantilla no confunde preguntas ni datos adicionales del cliente', () => {
+  assert.equal(isWebsiteCampaignIntro(campaignIntro), true);
+  assert.equal(isWebsiteCampaignIntro('¡Hola! Tengo un negocio y quiero información sobre la página web de $1390 al año.'), true);
+  assert.equal(isWebsiteCampaignIntro(`${campaignIntro} ¿Qué incluye?`), false);
+  assert.equal(isWebsiteCampaignIntro(`${campaignIntro} Mi negocio es una taquería.`), false);
+  assert.equal(isWebsiteCampaignIntro('¿Cuánto cuesta la página web de $990 al año?'), false);
+});
+
+test('una pregunta real junto a la plantilla en la misma tanda sí recibe respuesta comercial', async () => {
+  let time = 1_792_690_000_000;
+  const reply = 'Cuesta $990 MXN al año. ¿Cómo se llama tu negocio?';
+  const s = setup(async ({ message }) => {
+    assert.match(message.text, /¿Qué incluye/);
+    return { brief: normalizeConversationBrief({}), action: 'respond', reply };
+  }, undefined, { debounceMs: 4000, now: () => time });
+  await s.receive(campaignIntro, 'campaign');
+  await s.receive('¿Qué incluye y cuánto cuesta?', 'question');
+  time += 4000;
+  await s.agent.resume();
+  assert.deepEqual(s.replies, [reply]);
 });
 
 test('si falla la bienvenida fija conserva la pregunta por texto y permite continuar', async () => {
