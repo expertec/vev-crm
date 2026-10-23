@@ -584,3 +584,39 @@ test('envía el paquete antes de continuar y no repite materiales si falla la pr
   assert.deepEqual(events, ['package', '¿Continuamos con tu muestra?', '¿Continuamos con tu muestra?']);
   assert.match((await s.leadRef.get()).data().sampleAgent.history.at(-1).text, /Paquete \$990/);
 });
+
+test('un logo no utilizable no oculta una pregunta del cliente sobre resultados', async () => {
+  const images = [{ url: 'https://storage.googleapis.com/own/images/logo.jpg' }];
+  const brief = normalizeConversationBrief({ ...complete(), logoChoice: 'provided', palette: ['#285581', '#438DC0', '#EFE2CD'], images: [{ index: 0, role: 'logo', description: 'Etiqueta de Gran Valor', logoStatus: 'original_required' }] }, images);
+  const reply = 'No tengo un estudio de mercado que permita garantizar un aumento en ventas.';
+  const s = setup(async () => ({ brief, action: 'respond', reply }));
+  await s.leadRef.update({ 'sampleAgent.images': images });
+  await s.receive('¿Tienes un estudio de mercado del impacto en ventas?', 'results');
+  assert.deepEqual(s.replies, [reply]);
+  assert.equal(s.jobs.length, 0);
+});
+
+test('tras pedir el original una vez continúa con el nombre sin repetir la solicitud ni generar sin aprobación', async () => {
+  const images = [{ url: 'https://storage.googleapis.com/own/images/logo.jpg' }];
+  const brief = normalizeConversationBrief({ ...complete(), logoChoice: 'provided', colorPreference: '', palette: ['#285581', '#438DC0', '#EFE2CD'], images: [{ index: 0, role: 'logo', description: 'Etiqueta de Gran Valor', logoStatus: 'original_required' }] }, images);
+  const s = setup(async () => ({ brief, action: 'ask', reply: '¿Me compartes la imagen original del logo?' }));
+  await s.leadRef.update({ 'sampleAgent.images': images, 'sampleAgent.history': [{ role: 'assistant', text: '¿Me compartes la imagen original del logo? Si no la tienes, podemos usar el nombre de tu negocio.' }] });
+  await s.receive('Sin problema', 'continue');
+  const state = (await s.leadRef.get()).data().sampleAgent;
+  assert.equal(state.brief.logoChoice, 'none');
+  assert.equal(state.brief.images[0].role, 'reference');
+  assert.match(state.brief.colorPreference, /#285581/);
+  assert.match(s.replies[0], /Así prepararé tu muestra/);
+  assert.doesNotMatch(s.replies[0], /imagen original/);
+  assert.equal(s.jobs.length, 0);
+});
+
+test('un logo nuevo utilizable reemplaza al anterior sin forzar el uso del nombre', async () => {
+  const images = [{ url: 'https://storage.googleapis.com/own/images/logo.jpg' }];
+  const brief = normalizeConversationBrief({ ...complete(), logoChoice: 'provided', palette: ['#285581', '#438DC0', '#EFE2CD'], images: [{ index: 0, role: 'logo', description: 'Logo recortado legible', logoStatus: 'clean' }] }, images);
+  const s = setup(async () => ({ brief, action: 'confirm', reply: '' }));
+  await s.leadRef.update({ 'sampleAgent.images': images, 'sampleAgent.history': [{ role: 'assistant', text: '¿Me compartes la imagen original del logo?' }] });
+  await s.receive('Aquí está el logo recortado', 'clean-logo');
+  assert.equal((await s.leadRef.get()).data().sampleAgent.brief.logoChoice, 'provided');
+  assert.match(s.replies[0], /con tu logo y sus colores/);
+});
