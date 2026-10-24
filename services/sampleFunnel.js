@@ -113,7 +113,7 @@ export function classifySampleFunnel(id, lead, messages = [], now = Date.now()) 
   const working = agent.status === 'generating';
   let stage;
   if (working || (!delivered && agent.status === 'error' && agent.negocioId)) stage = 'process';
-  else if (delivered) stage = Math.max(lastCustomerAt, sentAt) && now - Math.max(lastCustomerAt, sentAt) >= DAY ? 'proposals' : 'process';
+  else if (delivered) stage = 'proposals';
   else if (['collecting', 'awaiting_confirmation', 'paused', 'error'].includes(agent.status) && lastCustomerAt && now - lastCustomerAt < DAY) stage = 'process';
   else if (!evidence) return null;
   else if (!lastCustomerAt) return null;

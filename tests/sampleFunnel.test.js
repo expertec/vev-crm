@@ -33,7 +33,7 @@ test('considera consentimiento y archivos para la muestra sin confundir otros se
   assert.equal(sampleInterestEvidence({}, [{ sender: 'business', content: 'Envíame tu recibo de pago.' }, { ...customer(''), mediaType: 'image' }]), null);
 });
 
-test('las etapas son exclusivas y no llama inconforme a quien no abrió o apenas recibió la muestra', () => {
+test('las entregadas pasan a propuestas aunque se acaben de enviar, abrir o responder', () => {
   const data = lead({ sampleLinkSentAt: new Date(NOW - 2 * DAY), sampleLinkSentUrl: 'https://negociosweb.mx/taller' });
   const old = [customer(undefined, NOW - 3 * DAY)];
   const proposal = classifySampleFunnel('a', data, old, NOW);
@@ -41,8 +41,10 @@ test('las etapas son exclusivas y no llama inconforme a quien no abrió o apenas
   assert.equal(proposal.pending, 'Sin apertura registrada');
   assert.equal(proposal.canRenew, true);
   assert.equal(proposal.canResume, false);
-  assert.equal(classifySampleFunnel('a', { ...data, sampleLinkSentAt: new Date(NOW) }, old, NOW).stage, 'process');
-  assert.equal(classifySampleFunnel('a', { ...data, linkOpenedAt: new Date(NOW) }, old, NOW).stage, 'process');
+  assert.equal(classifySampleFunnel('a', { ...data, sampleLinkSentAt: new Date(NOW) }, old, NOW).stage, 'proposals');
+  assert.equal(classifySampleFunnel('a', { ...data, linkOpenedAt: new Date(NOW) }, old, NOW).stage, 'proposals');
+  assert.equal(classifySampleFunnel('a', data, [customer('Gracias, voy a revisarla', NOW)], NOW).stage, 'proposals');
+  assert.equal(classifySampleFunnel('a', { ...data, sampleAgent: { status: 'generating' } }, old, NOW).stage, 'process');
   assert.equal(classifySampleFunnel('a', { ...data, sampleLinkSentUrl: 'https://app.negociosweb.mx/muestra/521831' }, old, NOW).stage, 'interested');
   assert.equal(classifySampleFunnel('a', lead({ sampleAgent: { status: 'generating' } }), [], NOW).stage, 'process');
   assert.equal(classifySampleFunnel('a', lead({ sampleAgent: { status: 'error', negocioId: 'failed-business', error: 'Sin saldo' } }), old, NOW).stage, 'process');
@@ -115,6 +117,19 @@ test('la tabla comprueba acceso y pagina después de clasificar, filtrar y orden
   assert.equal(result.body.rows[0].id, 'own-29'); assert.equal(result.body.rows.some((row) => row.id === 'foreign'), false);
   const last = await h.call('get', 'list', { stage: 'interested', order: 'score', page: 1 });
   assert.equal(last.body.rows.length, 5); assert.equal(last.body.hasMore, false);
+});
+
+test('las pestañas y sus contadores no mezclan muestras entregadas, activas e interesados antiguos', async () => {
+  const h = harness();
+  h.add('active', { sampleAgent: { status: 'generating' } });
+  h.add('cold');
+  h.add('delivered', { sampleLinkSentAt: new Date(), sampleLinkSentUrl: 'https://negociosweb.mx/taller', linkOpenedAt: new Date() });
+  for (const [stage, expected] of [['process', 'active'], ['interested', 'cold'], ['proposals', 'delivered']]) {
+    const result = await h.call('get', 'list', { stage });
+    assert.deepEqual(result.body.rows.map((row) => row.id), [expected]);
+    assert.deepEqual(result.body.counts, { process: 1, interested: 1, proposals: 1 });
+    assert.equal(result.body.total, 1);
+  }
 });
 
 test('configurar promociones requiere administrador y generar otra propuesta requiere entrega real', async () => {
