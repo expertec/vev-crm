@@ -97,6 +97,18 @@ export const SAMPLE_BRAND_HEADER_CSS = `
 @keyframes nw-show-mobile-cta{from{opacity:0;visibility:hidden;pointer-events:none}to{opacity:1;visibility:visible;pointer-events:auto}}
 `;
 
+// Applied after stored CSS, including pages generated before this correction.
+export const SAMPLE_SERVICE_RESPONSIVE_CSS = `
+.nw-service-card,.nw-service-card>div,.nw-service-card>div>div{min-width:0;max-width:100%;box-sizing:border-box}
+.nw-service-card h3,.nw-service-card p{max-width:100%;white-space:normal;overflow-wrap:anywhere}
+@media(max-width:600px){
+ .nw-service-grid:has(.nw-service-card img){grid-template-columns:minmax(0,1fr)!important}
+ .nw-service-card:has(img){width:100%;min-width:0}
+ .nw-featured-copy{padding:20px!important;gap:12px!important}
+ .nw-featured-copy>div{min-width:0;flex:1}
+}
+`;
+
 export function sampleHeroCss(palette) {
   const base = /^#[0-9a-f]{6}$/i.test(palette?.[0] || '') ? palette[0] : '#333333';
   const channels = [1, 3, 5].map((offset) => parseInt(base.slice(offset, offset + 2), 16));
