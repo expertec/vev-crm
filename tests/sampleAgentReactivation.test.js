@@ -67,6 +67,26 @@ test('recupera fotos, texto y audios; distingue cliente de negocio y solo pregun
   assert.equal(preview.videoCount, 1);
 });
 
+test('un contacto que vuelve por campaña conserva sus datos sin afirmar que dejó una muestra pendiente', async () => {
+  const messages = [
+    { sender: 'lead', content: 'Persianas, cortinas y decoración' },
+    { sender: 'business', content: 'Tu página por $790 al año. Estos son ejemplos de otras páginas.' },
+    { sender: 'lead', content: 'Bienvenido a Decorstyle en Puebla' },
+    { sender: 'lead', content: 'Hola, tengo un negocio y quiero información sobre la página web de $990 al año.' },
+  ];
+  const extract = async ({ message }) => {
+    assert.equal(message.returningCampaign, true);
+    return { brief: { ...complete(), companyName: 'Decorstyle', activity: 'Persianas, cortinas y decoración', serviceArea: 'Puebla' }, action: 'confirm' };
+  };
+  const first = await buildReactivationPreview({ lead: {}, messages, extract });
+  assert.match(first.reply, /Ya nos habías contado de Decorstyle/);
+  assert.doesNotMatch(first.reply, /retomamos|790/);
+  assert.equal(first.brief.companyName, 'Decorstyle');
+  assert.equal(first.status, 'awaiting_confirmation');
+  const pending = await buildReactivationPreview({ lead: { sampleAgent: { brief: complete() } }, messages, extract });
+  assert.match(pending.reply, /retomamos tu muestra/);
+});
+
 test('no repite la solicitud de fotos recibidas y admite transcripciones existentes', async () => {
   const result = await buildReactivationPreview({ lead: {}, messages: [{ sender: 'lead', mediaType: 'audio', transcription: 'Sí, son mías' }, { sender: 'lead', mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/a.jpg' }], transcribe: async () => assert.fail('No debe retranscribir'), extract: async () => ({ brief: { ...complete(), photosChoice: 'pending', images: [{ index: 0, role: 'work', description: 'Producto' }] }, action: 'ask' }) });
   assert.match(result.reply, /Ya tengo 1 imagen/); assert.doesNotMatch(result.reply, /Envíame/);

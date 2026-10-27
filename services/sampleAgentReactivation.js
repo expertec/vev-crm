@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { agentCanReply, briefSummary, extractConversationBrief, missingBriefQuestion, normalizeConversationBrief, sampleBriefHash, sampleInputFromConversation } from './sampleConversationAgent.js';
 import { canGenerateAiSample } from './aiSampleAccess.js';
 import { publicImageUrl } from './aiSampleGenerator.js';
-import { hasUnreadWebsiteCampaign } from '../utils/websiteCampaignContext.js';
+import { hasUnreadWebsiteCampaign, isWebsiteCampaignIntro } from '../utils/websiteCampaignContext.js';
 
 const millis = (value) => value?.toMillis?.() || (value ? new Date(value).getTime() : 0) || 0;
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -41,6 +41,10 @@ export async function buildReactivationPreview({ lead, messages, transcribe, ext
     return { brief: normalizeConversationBrief({}), images: [], history: [], reply: '¡Hola! Te ayudo a preparar una muestra de tu página web. ¿Cómo se llama tu negocio y a qué se dedica?', status: 'collecting', failedAudios: 0, videoCount: 0 };
   }
   const images = [...(lead.sampleAgent?.images || [])];
+  const inbound = messages.filter((message) => message.sender === 'lead');
+  const returningCampaign = inbound.length > 1 && isWebsiteCampaignIntro(inbound.at(-1)?.content);
+  const startedSample = Boolean(lead.sampleAgent?.brief?.companyName || lead.sampleAgent?.confirmationHash
+    || lead.webSales?.sample?.formStartedAt || lead.webSales?.sample?.formCompletedAt || lead.sampleSubmittedAt);
   const history = [];
   let audioCount = 0;
   let failedAudios = 0;
@@ -59,13 +63,15 @@ export async function buildReactivationPreview({ lead, messages, transcribe, ext
     }
     if (text || message.mediaType) history.push({ role: message.sender === 'lead' ? 'customer' : 'assistant', text: String(text).slice(0, 2000), mediaType: message.mediaType || 'text' });
   }
-  const decision = await extract({ brief: lead.sampleAgent?.brief || {}, images, history, audioOptions: [], message: { reactivation: true, briefReviewedByAdvisor: Boolean(lead.sampleAgent?.manualContextUpdatedAt), text: '', mediaType: 'reactivation' } });
+  const decision = await extract({ brief: lead.sampleAgent?.brief || {}, images, history, audioOptions: [], message: { reactivation: true, returningCampaign, briefReviewedByAdvisor: Boolean(lead.sampleAgent?.manualContextUpdatedAt), text: '', mediaType: 'reactivation' } });
   if (decision.action === 'pause') throw error('El historial indica que no debemos reactivar este contacto.');
   const brief = normalizeConversationBrief(decision.brief, images);
   for (let index = 0; index < images.length; index++) if (!brief.images.some((image) => image.index === index)) brief.images.push({ index, role: 'unclassified', description: '' });
   let missing = missingBriefQuestion(brief);
   if (brief.photosChoice === 'pending' && images.length && missing.startsWith('Envíame hasta tres fotos')) missing = `Ya tengo ${images.length} imagen${images.length === 1 ? '' : 'es'} que compartiste. ¿Quieres añadir alguna otra o son todas?`;
-  const intro = `Hola, retomamos tu muestra${brief.companyName ? ` de ${brief.companyName}` : ' de tu página web'}.`;
+  const intro = returningCampaign && !startedSample
+    ? `¡Hola!${brief.companyName ? ` Ya nos habías contado de ${brief.companyName}.` : ' Gracias por volver a escribirnos.'} Podemos preparar una muestra personalizada de tu página web.`
+    : `Hola, retomamos tu muestra${brief.companyName ? ` de ${brief.companyName}` : ' de tu página web'}.`;
   const reply = missing ? `${intro} Ya revisé lo que me compartiste. ${missing}` : `${intro}\n\n${briefSummary(brief)}`;
   return { brief, images, history: history.slice(-24), reply, status: missing ? 'collecting' : 'awaiting_confirmation', failedAudios, videoCount: Math.min(2, messages.filter((m) => m.sender === 'lead' && m.mediaType === 'video').length) };
 }
