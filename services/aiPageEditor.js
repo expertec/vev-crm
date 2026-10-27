@@ -1,8 +1,11 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import multer from 'multer';
+import sharp from 'sharp';
 import { parseDocument } from 'htmlparser2';
 import render from 'dom-serializer';
 import { samplePageDocument, publicImageUrl } from './aiSampleGenerator.js';
 import { isAiSampleAvailable } from './aiSampleAccess.js';
+import { EXTRA_GALLERY_LIMIT } from './aiPageExtraGallery.js';
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
 const children = (node) => node.children || [];
@@ -51,24 +54,45 @@ function indexPage(page) {
   walk(root, (node) => { if (!brand && classes(node).includes('nw-brand')) brand = node; });
   if (brand && !fields.some((field) => field.type === 'image' && field.label === 'Logo')) add('image', '', brand, 'Logo');
   let gallery = null;
+  const serviceCards = [];
   walk(root, (node) => {
     if (!gallery && classes(node).includes('nw-gallery-grid') && children(node).some((n) => n.name === 'figure')) gallery = node;
+    if (classes(node).includes('nw-service-card') && ancestor(node.parent, (n) => classes(n).includes('nw-service-grid'))) {
+      let title = false, description = false;
+      walk(node, (n) => { if (n.name === 'h3') title = true; if (n.name === 'p') description = true; });
+      if (title && description) serviceCards.push(node);
+    }
   });
-  return { root, fields, targets, gallery };
+  return { root, fields, targets, gallery, serviceCards };
 }
 
 export function describeAiPage(page, logo = '') {
-  const { fields, gallery } = indexPage(page);
-  return { revision: aiPageRevision(page), fields, canAddPhotos: Boolean(gallery), document: samplePageDocument(page, logo), title: page.title };
+  const { fields, gallery, serviceCards } = indexPage(page);
+  return { revision: aiPageRevision(page), fields, canAddServices: serviceCards.length > 0 && serviceCards.length < 24, serviceCount: serviceCards.length, serviceLimit: 24, canAddPhotos: Boolean(gallery), extraGallery: page.extraGallery || { title: 'Más de nuestro trabajo', items: [] }, extraGalleryLimit: EXTRA_GALLERY_LIMIT, document: samplePageDocument(page, logo), title: page.title };
 }
 
-export async function editAiPage(page, { changes = {}, photos = [] } = {}, { validateImage = async () => false } = {}) {
+export async function editAiPage(page, { changes = {}, photos = [], extraGallery, services = [] } = {}, { validateImage = async () => false } = {}) {
   if (!changes || typeof changes !== 'object' || Array.isArray(changes) || !Array.isArray(photos) || photos.length > 12) throw fail('Cambios inválidos.');
-  const { root, fields, targets, gallery } = indexPage(page);
+  if (!Array.isArray(services) || services.length > 12) throw fail('Puedes añadir hasta 12 servicios por guardado.');
+  const { root, fields, targets, gallery, serviceCards } = indexPage(page);
   const byId = new Map(fields.map((field) => [field.id, field]));
   const next = { ...page, assets: [...(page.assets || [])] };
   const replacements = new Map();
   let newLogo;
+  if (extraGallery !== undefined) {
+    if (!extraGallery || typeof extraGallery.title !== 'string' || extraGallery.title.length > 120 || !Array.isArray(extraGallery.items) || extraGallery.items.length > EXTRA_GALLERY_LIMIT) throw fail('La galería adicional admite hasta 20 fotos y un título de hasta 120 caracteres.');
+    const existing = new Set((page.extraGallery?.items || []).flatMap((item) => [item.url, item.thumbnailUrl]).filter(Boolean));
+    const items = [];
+    for (const photo of extraGallery.items) {
+      if (!photo || typeof photo.url !== 'string' || typeof photo.caption !== 'string' || photo.caption.length > 200) throw fail('La foto o su descripción no son válidas.');
+      const thumbnailUrl = photo.thumbnailUrl || photo.url;
+      for (const url of new Set([photo.url, thumbnailUrl])) if (!publicImageUrl(url) || (!existing.has(url) && !await validateImage(url))) throw fail('Sube las fotos desde el editor de este negocio.');
+      items.push({ url: photo.url, thumbnailUrl, caption: photo.caption });
+    }
+    next.extraGallery = { title: extraGallery.title.trim() || 'Más de nuestro trabajo', items };
+    next.assets = next.assets.filter((asset) => asset.purpose !== 'extra_gallery');
+    for (const item of items) for (const url of new Set([item.url, item.thumbnailUrl])) next.assets.push({ url, origin: 'client_upload', purpose: 'extra_gallery' });
+  }
   for (const [id, value] of Object.entries(changes)) {
     const field = byId.get(id);
     if (!field || typeof value !== 'string') throw fail('Uno de los campos ya no existe. Recarga el editor.');
@@ -127,6 +151,52 @@ export async function editAiPage(page, { changes = {}, photos = [] } = {}, { val
   }
   next.assets = next.assets.map((asset) => replacements.has(asset.url) ? { ...asset, url: replacements.get(asset.url), origin: 'client_upload' } : asset);
   for (const url of replacements.values()) if (!next.assets.some((asset) => asset.url === url)) next.assets.push({ url, origin: 'client_upload' });
+  if (services.length) {
+    if (!serviceCards.length) throw fail('Esta página no tiene tarjetas de servicios compatibles.');
+    if (serviceCards.length + services.length > 24) throw fail('La página admite hasta 24 servicios.');
+    let template = serviceCards.at(-1);
+    const simple = serviceCards.find((card) => { let image = false; walk(card, (n) => { if (n.name === 'img') image = true; }); return !image; });
+    if (simple) template = simple;
+    const parent = template.parent;
+    const remove = (node) => {
+      if (node.prev) node.prev.next = node.next;
+      if (node.next) node.next.prev = node.prev;
+      node.parent.children = node.parent.children.filter((n) => n !== node);
+    };
+    const setText = (node, value) => {
+      node.children = parseDocument(value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')).children;
+      node.children.forEach((child) => { child.parent = node; });
+    };
+    for (const service of services) {
+      if (!service || typeof service.title !== 'string' || !service.title.trim() || service.title.length > 120 || typeof service.description !== 'string' || !service.description.trim() || service.description.length > 800 || (service.imageUrl && (typeof service.imageUrl !== 'string' || !await validateImage(service.imageUrl)))) throw fail('Indica nombre y descripción del servicio. La foto debe subirse desde este editor.');
+      const clone = parseDocument(render(template)).children[0], oldImages = [];
+      let heading, paragraph, image;
+      walk(clone, (node) => {
+        if (ancestor(node, (n) => n.name === 'svg')) return;
+        if (node.attribs) delete node.attribs.id;
+        if (!heading && node.name === 'h3') heading = node;
+        if (!paragraph && node.name === 'p') paragraph = node;
+        if (node.name === 'img') oldImages.push(node);
+        if (node.name === 'a') {
+          const href = node.attribs.href || '';
+          node.attribs.href = href.startsWith('https://wa.me/') ? `${href.split('?')[0]}?text=${encodeURIComponent(`Hola, quiero información sobre ${service.title.trim()}`)}` : '#contacto';
+        }
+        if (node.type === 'text') node.data = ancestor(node, (n) => n.name === 'a') ? 'Consultar servicio' : '';
+      });
+      setText(heading, service.title.trim()); setText(paragraph, service.description.trim());
+      if (service.imageUrl) {
+        image = oldImages.shift();
+        if (!image) { image = parseDocument('<img loading="lazy" decoding="async">').children[0]; image.parent = clone; image.next = clone.children[0] || null; if (image.next) image.next.prev = image; clone.children.unshift(image); }
+        image.attribs.src = service.imageUrl; image.attribs.alt = service.title.trim(); delete image.attribs.srcset;
+        image.attribs.loading = 'lazy'; image.attribs.decoding = 'async';
+        next.assets.push({ url: service.imageUrl, origin: 'client_upload', purpose: 'service' });
+      }
+      oldImages.forEach(remove);
+      clone.parent = parent; clone.prev = parent.children.at(-1) || null; clone.next = null;
+      if (clone.prev) clone.prev.next = clone;
+      parent.children.push(clone);
+    }
+  }
   next.html = render(root, { encodeEntities: 'utf8' });
   if (Buffer.byteLength(next.html + next.css) > 220_000) throw fail('La página excede el tamaño permitido.');
   next.editedAt = new Date().toISOString();
@@ -134,6 +204,41 @@ export async function editAiPage(page, { changes = {}, photos = [] } = {}, { val
 }
 
 export function registerAiPageEditorRoutes(app, { db, authenticate, bucket }) {
+  const receiveImage = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 1, fields: 0, parts: 2 } }).single('image');
+  app.post('/api/cliente/ai-page-editor/upload', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const auth = await authenticate(req);
+      if (!auth?.negocioId) return res.status(auth?.status || 401).json({ error: auth?.error || 'Inicia sesión para subir imágenes.' });
+      const data = (await db.collection('Negocios').doc(auth.negocioId).get()).data() || {};
+      if (!isAiSampleAvailable(data) || data.siteTemporarilyDisabled || data.websiteArchived) throw fail('El sitio no está habilitado para edición.', 403);
+      if (['queued', 'running'].includes(data.aiSampleJob?.state)) throw fail('Espera a que termine la generación de la página.', 409);
+      await new Promise((resolve, reject) => receiveImage(req, res, (err) => err ? reject(err) : resolve()));
+      if (!req.file || !['image/jpeg', 'image/png', 'image/webp'].includes(req.file.mimetype)) throw fail('Usa JPG, PNG o WebP de hasta 8 MB.');
+      let main, thumb;
+      try {
+        const image = sharp(req.file.buffer, { limitInputPixels: 32_000_000, animated: false }).rotate();
+        const metadata = await image.metadata();
+        if (!['jpeg', 'png', 'webp'].includes(metadata.format)) throw new Error('Formato inválido');
+        [main, thumb] = await Promise.all([
+          image.clone().resize({ width: 1920, height: 1920, fit: 'inside', withoutEnlargement: true }).webp({ quality: 82 }).toBuffer(),
+          image.clone().resize({ width: 240, height: 180, fit: 'cover', withoutEnlargement: true }).webp({ quality: 75 }).toBuffer(),
+        ]);
+      } catch { throw fail('El archivo no es una imagen válida o es demasiado grande.'); }
+      const prefix = `${auth.negocioId}/site-editor/${randomUUID()}`;
+      const store = async (buffer, suffix) => {
+        const file = bucket.file(`${prefix}${suffix}.webp`);
+        await file.save(buffer, { resumable: false, metadata: { contentType: 'image/webp', cacheControl: 'public,max-age=31536000,immutable' } });
+        return (await file.getSignedUrl({ action: 'read', expires: '2100-01-01' }))[0];
+      };
+      const [url, thumbnailUrl] = await Promise.all([store(main, ''), store(thumb, '-thumb')]);
+      return res.json({ url, thumbnailUrl });
+    } catch (error) {
+      const status = error instanceof multer.MulterError ? 413 : error.status || 500;
+      if (status === 500) console.error('[ai-page-editor-upload]', error.message);
+      return res.status(status).json({ error: error instanceof multer.MulterError ? 'Sube una imagen JPG, PNG o WebP de hasta 8 MB.' : error.status ? error.message : 'No se pudo subir la imagen. Intenta nuevamente.' });
+    }
+  });
   const validateImage = async (url, negocioId) => {
     try {
       const parsed = new URL(url);

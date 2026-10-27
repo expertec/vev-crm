@@ -3,6 +3,7 @@ import sanitizeHtml from 'sanitize-html';
 import postcss from 'postcss';
 import { recordOpenAiUsage } from './openAiUsage.js';
 import { appendSampleVideos, sampleVideoPlaybackHtml, SAMPLE_VIDEO_CSS } from './aiSampleVideos.js';
+import { appendExtraGallery, EXTRA_GALLERY_CSS } from './aiPageExtraGallery.js';
 import { sampleIconPlaceholder, renderSampleIcons } from './aiSampleIcons.js';
 import { AI_SAMPLE_GENERATOR_REVISION, buildSampleVisualPlan, sampleImagePrompt, SAMPLE_PAGE_INSTRUCTIONS, sampleHeroCss, SAMPLE_BRAND_HEADER_CSS, SAMPLE_SERVICE_RESPONSIVE_CSS } from './aiSampleVisuals.js';
 export { AI_SAMPLE_GENERATOR_REVISION } from './aiSampleVisuals.js';
@@ -159,7 +160,9 @@ export function sanitizeSamplePage(page, { input, assets = [] }) {
 }
 
 export function samplePageDocument(page, logoURL = '') {
-  const csp = samplePageCsp([...(page.assets || []), { url: logoURL }], page.videos || []).split('; frame-ancestors')[0];
+  const galleryAssets = (page.extraGallery?.items || []).flatMap((item) => [{ url: item.url }, { url: item.thumbnailUrl }]);
+  const csp = samplePageCsp([...(page.assets || []), ...galleryAssets, { url: logoURL }], page.videos || []).split('; frame-ancestors')[0];
+  page = { ...page, html: appendExtraGallery(page.html, page.extraGallery), css: `${page.css}\n${page.extraGallery?.items?.length ? EXTRA_GALLERY_CSS : ''}` };
   return `<!doctype html><html lang="es-MX"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${escapeHtml(csp)}"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${escapeHtml(page.title)}</title><meta name="description" content="${escapeHtml(page.description)}"><style>*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;overflow-wrap:break-word}img{max-width:100%;height:auto} ${page.css}\n${SAMPLE_BRAND_HEADER_CSS}\n${SAMPLE_SERVICE_RESPONSIVE_CSS}\n${page.videos?.length ? SAMPLE_VIDEO_CSS : ''}</style></head><body>${sampleVideoPlaybackHtml(page.html, page.videos || [])}</body></html>`;
 }
 
