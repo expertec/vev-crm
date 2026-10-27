@@ -130,7 +130,9 @@ function scheduleWhatsAppReconnect(reason = null) {
   if (reconnectTimer) return;
   if (reason === WA_SESSION_REJECTED) return;
 
-  const delay = Math.floor(Math.random() * 8000) + 5000;
+  const delay = reason === DisconnectReason.restartRequired
+    ? 0
+    : Math.floor(Math.random() * 8000) + 5000;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectToWhatsApp().catch((error) => {
@@ -1249,11 +1251,17 @@ export async function connectToWhatsApp() {
     });
     const generation = ++socketGeneration;
     whatsappSock = sock;
+    let pairingRestartPending = false;
 
     // ── eventos de conexión
-    sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    const onConnectionUpdate = ({ connection, lastDisconnect, qr, isNewLogin }) => {
       if (generation !== socketGeneration) return;
 
+      if (isNewLogin) {
+        pairingRestartPending = true;
+        latestQR = null;
+        connectionStatus = 'Conectando';
+      }
       if (qr) {
         latestQR = qr;
         connectionStatus = 'QR disponible. Escanéalo.';
@@ -1269,6 +1277,8 @@ export async function connectToWhatsApp() {
         if (sock.user?.id) sessionPhone = sock.user.id.split('@')[0];
       }
       if (connection === 'close') {
+        socketGeneration += 1;
+        latestQR = null;
         if (whatsappSock === sock) whatsappSock = null;
         const reason = lastDisconnect?.error?.output?.statusCode;
         const reasonName = getDisconnectReasonName(reason);
@@ -1304,6 +1314,25 @@ export async function connectToWhatsApp() {
         }
         scheduleWhatsAppReconnect(reason);
       }
+    };
+    sock.ev.on('connection.update', onConnectionUpdate);
+
+    // El cierre del transporte puede llegar antes de que Baileys termine su limpieza.
+    sock.ws.once('close', () => {
+      setTimeout(() => {
+        if (generation !== socketGeneration) return;
+        const reason = pairingRestartPending
+          ? DisconnectReason.restartRequired
+          : DisconnectReason.connectionClosed;
+        onConnectionUpdate({
+          connection: 'close',
+          lastDisconnect: {
+            error: Object.assign(new Error('WhatsApp WebSocket cerrado'), {
+              output: { statusCode: reason },
+            }),
+          },
+        });
+      }, 0);
     });
 
     sock.ev.on('creds.update', saveCreds);
