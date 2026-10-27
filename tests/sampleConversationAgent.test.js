@@ -61,6 +61,29 @@ test('recopila por chat, confirma y genera una sola vez sin otra llamada de IA',
   assert.match(s.replies.at(-1), /sigue en preparación/);
 });
 
+test('muestra todos los servicios y confirma una corrección sin ocultar el quinto ni repetir todo el resumen', async () => {
+  const brief = complete();
+  brief.offerings = ['Clutch', 'Frenos', 'Suspensión', 'Motores', 'Sistema eléctrico'];
+  assert.match(briefSummary(brief), /Sistema eléctrico/);
+  let calls = 0;
+  const s = setup(async () => {
+    calls++;
+    return { brief: { ...brief, offerings: calls === 1 ? brief.offerings : [...brief.offerings.slice(0, 4), 'Servicio eléctrico automotriz'] }, action: 'confirm', reply: '' };
+  });
+  await s.receive('Estos son mis servicios', 'services-1');
+  assert.match(s.replies.at(-1), /Sistema eléctrico/);
+  await s.receive('Servicio eléctrico automotriz igual por fa', 'services-2');
+  assert.match(s.replies.at(-1), /Servicio eléctrico automotriz/);
+  assert.doesNotMatch(s.replies.at(-1), /Así prepararé|Diseño:/);
+  assert.equal(s.jobs.length, 0);
+  await s.receive('Solo faltó servicio eléctrico automotriz', 'services-3');
+  assert.match(s.replies.at(-1), /Servicio eléctrico automotriz/);
+  assert.equal(s.jobs.length, 0);
+  await s.receive('sí', 'services-4');
+  assert.equal(s.jobs.length, 1);
+  assert.ok(s.jobs[0].input.keyItems.includes('Servicio eléctrico automotriz'));
+});
+
 test('sin saldo pausa el agente y el cron no repite la llamada fallida', async () => {
   let calls = 0;
   const s = setup(async () => { calls++; throw Object.assign(Error('Se agotó el saldo de OpenAI.'), { code: 'insufficient_quota' }); });

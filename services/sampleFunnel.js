@@ -15,6 +15,7 @@ export const funnelMillis = (value) => value?.toMillis?.() || (value ? +new Date
 const fail = (message, status = 409) => Object.assign(new Error(message), { status });
 const normalize = (value) => clean(value, 4000).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 export const DEFAULT_FUNNEL_SETTINGS = {
+  reminderMessage: 'Hola, te escribo de Negocios Web. Tenemos pendiente la muestra de {{negocio}}. ¿Te gustaría que continuemos? Podemos retomar con la información que ya nos compartiste.',
   promotion: '', applyPromotionToRenewal: false, designDirection: DEFAULT_RENEWAL_DIRECTION,
   renewalMessage: 'Preparamos una nueva versión de la página de {{negocio}}, con un diseño más visual y aprovechando lo que nos compartiste. Te envío el enlace para que veas cómo quedó. ¿Qué te parece esta propuesta?',
 };
@@ -36,7 +37,8 @@ export async function recordProposalOpen(db, leadRef, cycleId) {
   });
 }
 export function normalizeFunnelSettings(value = {}) {
-  return { promotion: clean(value.promotion, 1200), applyPromotionToRenewal: value.applyPromotionToRenewal === true,
+  return { reminderMessage: clean(value.reminderMessage, 1200) || DEFAULT_FUNNEL_SETTINGS.reminderMessage,
+    promotion: clean(value.promotion, 1200), applyPromotionToRenewal: value.applyPromotionToRenewal === true,
     designDirection: clean(value.designDirection, 2000) || DEFAULT_RENEWAL_DIRECTION,
     renewalMessage: clean(value.renewalMessage, 1600) || DEFAULT_FUNNEL_SETTINGS.renewalMessage };
 }
@@ -133,6 +135,9 @@ export function classifySampleFunnel(id, lead, messages = [], now = Date.now()) 
     canGenerate: !delivered && !human && Boolean(progress?.canForce),
     canResume: !working && !human && !delivered && funnelMillis(agent.leaseUntil) <= now,
     canRenew: delivered && !working && !human,
+    canRemind: !delivered && !working && !human && lastCustomerAt > 0 && now - lastCustomerAt >= 6 * 3600_000
+      && funnelMillis(agent.leaseUntil) <= now && now - funnelMillis(lead.sampleReminder?.sentAt) >= DAY,
+    lastReminderAt: funnelMillis(lead.sampleReminder?.sentAt),
     sampleUrl: /^https:\/\/(?:app\.)?negociosweb\.mx\//.test(lead.sampleLinkSentUrl || '') && !/\/muestra\//.test(lead.sampleLinkSentUrl) ? lead.sampleLinkSentUrl : historicalDelivery?.url || '',
     error: clean(agent.error, 300), lastReply: progress?.lastReply || '',
   };
@@ -150,7 +155,7 @@ export function sortSampleFunnel(rows, order = 'priority') {
   });
 }
 
-export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, renew, cancelSequences = async () => {}, resolveLead, prepareLogo }) {
+export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, renew, send, cancelSequences = async () => {}, resolveLead, prepareLogo }) {
   const historyCache = new Map(), listCache = new Map();
   const authorize = async (req) => { const user = await readUser(req); if (!user) throw fail('Inicia sesión para consultar el embudo.', 401); if (!canGenerateAiSample(user, { assignedTo: user.uid })) throw fail('No tienes acceso al embudo.', 403); return user; };
   const route = (method, name, handler) => app[method](`/api/crm/sample-funnel/${name}`, async (req, res) => {
@@ -175,6 +180,59 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
   };
   const getSettings = async () => normalizeFunnelSettings((await db.collection('config').doc('sampleFunnelSettings').get()).data());
   const contextVersion = (lead) => sampleBriefHash({ brief: lead.sampleAgent?.brief || {}, images: lead.sampleAgent?.images || [], version: lead.sampleAgent?.version || '', inboxRevision: lead.sampleAgent?.inboxRevision || 0, lastInboundAt: funnelMillis(lead.lastInboundAt) });
+  const assertReminder = (id, lead, messages) => {
+    const row = classifySampleFunnel(id, lead, messages);
+    if (!row?.canRemind || !agentCanReply({ ...lead, sampleAgent: { ...lead.sampleAgent, enabled: true } })) throw fail('No se puede recordar ahora: debe llevar al menos 6 horas sin actividad, no tener muestra entregada ni otro recordatorio en las últimas 24 horas.');
+    return row;
+  };
+  route('get', 'reminder', async (req, user) => {
+    const { ref, lead } = await contact(clean(req.query.leadId, 200), user);
+    const row = assertReminder(ref.id, lead, await history(ref, lead));
+    const settings = await getSettings();
+    return { message: settings.reminderMessage.replace(/\{\{negocio\}\}/g, () => row.business || 'tu página web'), revision: contextVersion(lead) };
+  });
+  route('post', 'reminder', async (req, user) => {
+    const { ref, lead } = await contact(clean(req.body.leadId, 200), user);
+    const message = clean(req.body.message, 1201);
+    if (!message || message.length > 1200) throw fail('Escribe un recordatorio de hasta 1,200 caracteres.', 400);
+    if (!send) throw fail('El envío no está configurado.', 503);
+    const messages = await history(ref, lead), owner = randomUUID();
+    const previous = await db.runTransaction(async (tx) => {
+      const current = (await tx.get(ref)).data() || {};
+      if (!canGenerateAiSample(user, current)) throw fail('No tienes acceso a este contacto.', 403);
+      assertReminder(ref.id, current, messages);
+      if (req.body.revision !== contextVersion(current)) throw fail('El cliente respondió o cambió el contexto. Revisa el chat antes de recordar.');
+      tx.update(ref, { 'sampleAgent.version': owner, 'sampleAgent.enabled': true,
+        'sampleAgent.leaseOwner': owner, 'sampleAgent.leaseUntil': new Date(Date.now() + 5 * 60_000) });
+      return current.sampleAgent || {};
+    });
+    let sent = false;
+    try {
+      await cancelSequences(ref.id);
+      const latest = (await ref.get()).data() || {};
+      const latestRow = classifySampleFunnel(ref.id, latest, messages);
+      if (latest.sampleAgent?.version !== owner || !agentCanReply(latest) || !canGenerateAiSample(user, latest)
+        || !latestRow || latestRow.delivered || latest.sampleAgent.status === 'generating'
+        || (latest.sampleAgent.inboxRevision || 0) !== (previous.inboxRevision || 0)
+        || funnelMillis(latest.lastInboundAt) !== funnelMillis(lead.lastInboundAt)) throw fail('La conversación cambió. Revisa el chat antes de recordar.');
+      await send(ref.id, message); sent = true;
+    } finally {
+      await db.runTransaction(async (tx) => {
+        const current = (await tx.get(ref)).data() || {};
+        if (sent) tx.update(ref, { sampleReminder: { sentAt: new Date(), by: user.uid, message } });
+        if (current.sampleAgent?.version !== owner) return;
+        const storedHistory = previous.history?.length ? previous.history : messages.filter((m) => ['business', 'lead'].includes(m.sender)).map((m) => ({ role: m.sender === 'lead' ? 'customer' : 'assistant', text: clean(m.transcription || m.content, 2000) })).filter((m) => m.text);
+        tx.update(ref, { 'sampleAgent.leaseOwner': '', 'sampleAgent.leaseUntil': new Date(0),
+          'sampleAgent.enabled': sent || previous.enabled === true,
+          ...(sent ? { 'sampleAgent.status': previous.status === 'awaiting_confirmation' ? 'awaiting_confirmation' : 'collecting',
+            'sampleAgent.deliveryPaused': false, 'sampleAgent.pauseReason': '',
+            'sampleAgent.history': [...storedHistory, { role: 'assistant', text: message }].slice(-24),
+            'sampleAgent.audioMomentsSent': [...new Set([...(previous.audioMomentsSent || []), 'welcome'])] } : {}) });
+      });
+      listCache.clear();
+    }
+    return { success: true };
+  });
   route('get', 'context', async (req, user) => {
     const { lead } = await contact(String(req.query.leadId || ''), user);
     return { revision: contextVersion(lead), brief: normalizeConversationBrief(lead.sampleAgent?.brief || {}, lead.sampleAgent?.images || []), images: (lead.sampleAgent?.images || []).map((image, index) => ({ index, url: image.sourceUrl || image.url, caption: image.caption || lead.sampleAgent?.brief?.images?.find((item) => item.index === index)?.description || `Imagen ${index + 1}` })) };

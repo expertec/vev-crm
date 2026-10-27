@@ -132,6 +132,63 @@ test('las pestañas y sus contadores no mezclan muestras entregadas, activas e i
   }
 });
 
+test('recordar muestra permite revisar el texto, conserva los datos y evita otro envío en 24 horas', async () => {
+  const sent = [], h = harness({ send: async (...args) => sent.push(args) });
+  h.add('pending', { sampleAgent: { status: 'paused', enabled: false, brief: complete, images: [{ url: 'foto' }], confirmationHash: 'approval', history: [{ role: 'customer', text: 'Mis servicios' }] } });
+  const preview = await h.call('get', 'reminder', { leadId: 'pending' });
+  assert.equal(preview.code, 200); assert.match(preview.body.message, /Taller Norte/); assert.match(preview.body.message, /Te gustaría/); assert.equal(sent.length, 0);
+  const result = await h.call('post', 'reminder', { leadId: 'pending', ...preview.body });
+  assert.equal(result.code, 200); assert.equal(sent.length, 1);
+  const agent = h.rows.get('leads/pending').sampleAgent;
+  assert.deepEqual(agent.brief, complete); assert.deepEqual(agent.images, [{ url: 'foto' }]);
+  assert.equal(agent.confirmationHash, 'approval'); assert.equal(agent.enabled, true);
+  assert.equal(agent.history.at(-1).text, preview.body.message); assert.equal(+agent.leaseUntil, 0);
+  assert.equal(h.cancellations.length, 1);
+  assert.equal((await h.call('post', 'reminder', { leadId: 'pending', ...preview.body })).code, 409);
+  assert.equal(sent.length, 1);
+  const list = await h.call('get', 'list', { stage: 'interested' });
+  assert.equal(list.body.rows[0].canRemind, false); assert.ok(list.body.rows[0].lastReminderAt);
+});
+
+test('recordatorio rechaza contexto cambiado, contactos recientes, entregados, pagados y atención humana', async () => {
+  const sent = [], h = harness({ send: async (...args) => sent.push(args) });
+  h.add('pending');
+  const preview = await h.call('get', 'reminder', { leadId: 'pending' });
+  h.rows.get('leads/pending').lastInboundAt = new Date();
+  assert.equal((await h.call('post', 'reminder', { leadId: 'pending', ...preview.body })).code, 409);
+  for (const [id, patch] of Object.entries({ human: { humanControl: true }, stopped: { stopSequences: true }, paid: { webSales: { stage: 'won' } }, delivered: { sampleLinkSentAt: new Date(), sampleLinkSentUrl: 'https://negociosweb.mx/taller' }, recent: { lastInboundAt: new Date() }, busy: { sampleAgent: { leaseUntil: new Date(Date.now() + 60_000) } } })) {
+    h.add(id, patch);
+    assert.equal((await h.call('get', 'reminder', { leadId: id })).code, 409, id);
+    assert.equal((await h.call('post', 'reminder', { leadId: id, message: 'Hola', revision: '' })).code, 409, id);
+  }
+  h.add('foreign', { assignedTo: 'other' });
+  assert.equal((await h.call('get', 'reminder', { leadId: 'foreign' })).code, 403);
+  assert.equal(sent.length, 0);
+});
+
+test('recordatorio libera el contacto si falla WhatsApp y no marca un envío inexistente', async () => {
+  const h = harness({ send: async () => { throw new Error('WhatsApp desconectado'); } });
+  h.add('pending', { sampleAgent: { status: 'paused', enabled: false, brief: complete } });
+  const preview = await h.call('get', 'reminder', { leadId: 'pending' });
+  const result = await h.call('post', 'reminder', { leadId: 'pending', ...preview.body });
+  assert.equal(result.code, 500);
+  const data = h.rows.get('leads/pending');
+  assert.equal(data.sampleReminder, undefined); assert.equal(data.sampleAgent.enabled, false);
+  assert.equal(data.sampleAgent.status, 'paused'); assert.equal(+data.sampleAgent.leaseUntil, 0);
+});
+
+test('un envío de recordatorio en curso bloquea un segundo clic', async () => {
+  let release, started;
+  const sending = new Promise(resolve => { started = resolve; });
+  const h = harness({ send: async () => { started(); await new Promise(resolve => { release = resolve; }); } });
+  h.add('pending');
+  const preview = await h.call('get', 'reminder', { leadId: 'pending' });
+  const first = h.call('post', 'reminder', { leadId: 'pending', ...preview.body });
+  await sending;
+  assert.equal((await h.call('post', 'reminder', { leadId: 'pending', ...preview.body })).code, 409);
+  release(); assert.equal((await first).code, 200);
+});
+
 test('configurar promociones requiere administrador y generar otra propuesta requiere entrega real', async () => {
   const h = harness(); h.add('a');
   assert.equal((await h.call('post', 'settings', { renewalMessage: 'Nueva propuesta' })).code, 403);

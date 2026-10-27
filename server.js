@@ -5512,6 +5512,7 @@ const sampleRecoveryService = registerSampleRecoveryRoutes(app, {
   send: sendMessageToLead, generate: queueConversationSample, cancelSequences: (leadId) => cancelAllSequences(leadId),
 });
 registerSampleFunnelRoutes(app, {
+  send: sendMessageToLead,
   prepareLogo: prepareSampleLogo,
   db, readUser: (req) => readAiSampleUser(req, { admin, db }), cancelSequences: (leadId) => cancelAllSequences(leadId),
   resolveLead: async (identity) => { const result = await resolveLeadByIdentity({ leadId: identity.includes('@') ? identity : '', phone: normalizePhoneDigits(identity) }); return result?.leadId ? { id: result.leadId } : null; },

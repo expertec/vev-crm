@@ -90,7 +90,7 @@ export function continueWithoutUnusableLogo(brief, history = []) {
 export function briefSummary(brief) {
   const compact = (value, limit) => { const text = String(value || '').replace(/\s+/g, ' ').trim(); return text.length > limit ? `${text.slice(0, limit - 1).trim()}…` : text; };
   const photos = brief.images.filter((item) => ['work', 'product'].includes(item.role)).length;
-  return `Así prepararé tu muestra:\n\n${compact(brief.companyName, 80)} · ${compact(brief.serviceArea, 70)}\nServicios: ${brief.offerings.slice(0, 3).map((item) => compact(item, 55)).join(', ')}.\nDiseño: ${brief.logoChoice === 'provided' ? 'con tu logo y sus colores' : compact(brief.colorPreference, 90)}.\n${photos ? `Usaré hasta ${Math.min(3, photos)} de tus fotos` : 'Usaré imágenes ilustrativas'} y un botón para contactarte.\n\n¿Confirmas que prepare tu muestra? Puedes decir «sí» o indicarme un cambio.`;
+  return `Así prepararé tu muestra:\n\n${compact(brief.companyName, 80)} · ${compact(brief.serviceArea, 70)}\nServicios: ${brief.offerings.map((item) => compact(item, 100)).join(', ')}.\nDiseño: ${brief.logoChoice === 'provided' ? 'con tu logo y sus colores' : compact(brief.colorPreference, 90)}.\n${photos ? `Usaré hasta ${Math.min(3, photos)} de tus fotos` : 'Usaré imágenes ilustrativas'} y un botón para contactarte.\n\n¿Confirmas que prepare tu muestra? Puedes decir «sí» o indicarme un cambio.`;
 }
 
 export function isExplicitSampleConfirmation(text) {
@@ -341,7 +341,14 @@ export function createSampleConversationAgent({ db, send, generate, extract = ex
             reply = '¡Gracias! Voy a preparar tu muestra con los datos que confirmaste. Te enviaré el enlace por aquí cuando esté lista.';
             audioMoment = audioOptions.some((audio) => audio.moment === 'generating') ? 'generating' : '';
           } else if (decision.packageId) { action = 'respond'; }
-          else if (action !== 'respond') { action = 'confirm'; reply = briefSummary(decision.brief); }
+          else if (action !== 'respond') {
+            action = 'confirm';
+            const servicesOnly = agent.confirmationHash && agent.status === 'awaiting_confirmation'
+              && fingerprint({ ...agent.brief, offerings: decision.brief.offerings }) === hash;
+            reply = servicesOnly
+              ? `Incluiré estos servicios: ${decision.brief.offerings.join(', ')}.\n\n¿Confirmas que prepare tu muestra con estos datos?`
+              : briefSummary(decision.brief);
+          }
           if (!['ask', 'generate'].includes(action)) audioMoment = '';
           const welcome = audioOptions.find((audio) => audio.moment === 'welcome');
           if (['ask', 'confirm'].includes(action) && !failedAudio && !agent.history?.length && welcome) {
