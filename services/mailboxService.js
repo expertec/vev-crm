@@ -753,6 +753,7 @@ export class MailboxService {
     // El remitente se fuerza al correo del buzón autenticado (no arbitrario).
     const result = await this.corporate.sendCorporateEmail({
       empresaId,
+      mailboxEmail,
       fromAlias: mailboxEmail,
       to,
       cc,
@@ -1143,7 +1144,7 @@ export class MailboxService {
   }
 
   async getSent({ empresaId, mailboxEmail }) {
-    const all = await this.corporate.listCorporateEmailMessages({ empresaId, limit: 100 });
+    const all = await this.corporate.listCorporateEmailMessages({ empresaId, mailboxEmail, limit: 100 });
     const address = normalizeEmail(mailboxEmail);
     return (Array.isArray(all) ? all : []).filter(
       (item) => normalizeEmail(item?.fromAlias) === address
@@ -1162,7 +1163,7 @@ export class MailboxService {
   }
 
   async getContacts({ empresaId, mailboxEmail, limit = 200 }) {
-    const all = await this.corporate.listCorporateEmailMessages({ empresaId, limit });
+    const all = await this.corporate.listCorporateEmailMessages({ empresaId, mailboxEmail, limit });
     const address = normalizeEmail(mailboxEmail);
     const contacts = new Map();
 

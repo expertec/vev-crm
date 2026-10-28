@@ -444,8 +444,20 @@ export class CorporateEmailService {
     return this.sesClient;
   }
 
-  async getCompanyOrThrow(empresaId) {
+  async getCompanyOrThrow(empresaId, { mailboxEmail = '' } = {}) {
     const company = await this.repository.getCompanyById(empresaId);
+    // Firestore permite buzones en subcolecciones sin documento padre.
+    // Esta compatibilidad se usa únicamente desde el buzón autenticado.
+    if (!company && isValidEmailAddress(normalizeEmailAddress(mailboxEmail))) {
+      const address = normalizeEmailAddress(mailboxEmail);
+      const [alias, domain] = address.split('@');
+      const mailbox = await this.repository.getCorporateEmailByAliasAndDomain({ empresaId, alias, domain });
+      if (mailbox?.mailboxEnabled === true
+        && normalizeEmailAddress(mailbox.email) === address
+        && cleanString(mailbox.status || '', 60).toLowerCase() !== 'deleted') {
+        return { id: empresaId, domain };
+      }
+    }
     if (!company) {
       throw new CorporateEmailServiceError('Empresa no encontrada', {
         code: 'COMPANY_NOT_FOUND',
@@ -2299,6 +2311,7 @@ export class CorporateEmailService {
    */
   async sendCorporateEmail({
     empresaId,
+    mailboxEmail = '',
     domain,
     fromAlias,
     fromEmail,
@@ -2321,7 +2334,7 @@ export class CorporateEmailService {
       }
 
       const safeEmpresaId = this.ensureEmpresaId(empresaId);
-      const company = await this.getCompanyOrThrow(safeEmpresaId);
+      const company = await this.getCompanyOrThrow(safeEmpresaId, { mailboxEmail });
       const safeDomain = this.resolveDomain({ requestedDomain: domain, company });
 
       const resolvedFromEmail = cleanString(fromAlias, 320)
@@ -2734,11 +2747,12 @@ export class CorporateEmailService {
 
   async listCorporateEmailMessages({
     empresaId,
+    mailboxEmail = '',
     limit = 50,
   }) {
     try {
       const safeEmpresaId = this.ensureEmpresaId(empresaId);
-      await this.getCompanyOrThrow(safeEmpresaId);
+      await this.getCompanyOrThrow(safeEmpresaId, { mailboxEmail });
       const records = await this.repository.listCorporateEmailMessagesByCompany(safeEmpresaId, {
         limit: Math.max(1, Math.min(200, parseInteger(limit, 50))),
       });

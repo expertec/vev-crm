@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CorporateEmailService } from '../services/corporateEmailService.js';
+import { MailboxService } from '../services/mailboxService.js';
 import { CloudflareEmailRoutingError } from '../services/cloudflareEmailRoutingClient.js';
 import { buildCorporateEmailRecordId } from '../utils/corporateEmailUtils.js';
 
@@ -1476,6 +1477,50 @@ test('envia con fromAlias validado (Cloudflare) y guarda el mensaje en el histor
   assert.equal(history[0].provider, 'cloudflare_email_sending');
   assert.deepEqual(history[0].to, ['destino@gmail.com']);
   assert.deepEqual(history[0].cc, ['copia@gmail.com']);
+});
+
+test('buzon sin documento padre puede enviar y consultar enviados y contactos', async () => {
+  const address = 'ventas@cliente.com';
+  const aliasId = buildCorporateEmailRecordId({ alias: 'ventas', domain: 'cliente.com' });
+  const { service: corporate, emailSendingClient } = createService({
+    corporateEmails: {
+      orphan: [{ id: aliasId, email: address, domain: 'cliente.com', status: 'active', mailboxEnabled: true }],
+    },
+  });
+  const service = new MailboxService({ mailboxRepository: {}, corporateEmailService: corporate });
+  const context = { empresaId: 'orphan', mailboxEmail: address };
+  await service.send({ ...context, to: ['destino@gmail.com'], subject: 'Hola', text: 'Mensaje' });
+  assert.equal(emailSendingClient.sent[0].from, address);
+  const sent = await service.getSent(context);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].status, 'sent');
+  const contacts = await service.getContacts(context);
+  assert.equal(contacts.length, 1);
+  assert.equal(contacts[0].email, 'destino@gmail.com');
+  await assert.rejects(() => corporate.listCorporateEmailMessages({ empresaId: 'orphan' }),
+    (error) => error.code === 'COMPANY_NOT_FOUND');
+});
+
+test('compatibilidad de buzon sin empresa rechaza direcciones ajenas, deshabilitadas y eliminadas', async () => {
+  const address = 'ventas@cliente.com';
+  const aliasId = buildCorporateEmailRecordId({ alias: 'ventas', domain: 'cliente.com' });
+  for (const patch of [{ mailboxEnabled: false }, { status: 'deleted' }, { email: 'otro@cliente.com' }]) {
+    const { service, emailSendingClient } = createService({
+      corporateEmails: {
+        orphan: [{ id: aliasId, email: address, mailboxEnabled: true, status: 'active', ...patch }],
+      },
+    });
+    await assert.rejects(() => service.sendCorporateEmail({
+      empresaId: 'orphan', mailboxEmail: address, fromAlias: address,
+      to: ['destino@gmail.com'], subject: 'Hola', text: 'Mensaje',
+    }), (error) => error.code === 'COMPANY_NOT_FOUND');
+    assert.equal(emailSendingClient.sent.length, 0);
+  }
+  const { service } = createService({
+    corporateEmails: { other: [{ id: aliasId, email: address, mailboxEnabled: true }] },
+  });
+  await assert.rejects(() => service.listCorporateEmailMessages({ empresaId: 'orphan', mailboxEmail: address }),
+    (error) => error.code === 'COMPANY_NOT_FOUND');
 });
 
 test('rechaza envio cuando el fromAlias no existe como correo corporativo', async () => {
