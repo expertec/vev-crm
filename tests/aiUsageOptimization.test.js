@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compactSampleContext, sampleVisionIndexes } from '../services/sampleAgentContext.js';
+import { compactSampleContext, sampleVisionIndexes, mergeSampleImages } from '../services/sampleAgentContext.js';
 import { extractConversationBrief, normalizeConversationBrief } from '../services/sampleConversationAgent.js';
 import { requestSampleOpenAI } from '../services/aiSampleGenerator.js';
 import { recordOpenAiUsage } from '../services/openAiUsage.js';
@@ -36,6 +36,22 @@ test('reviews each image once, keeps original indexes, rechecks changed files an
   const fresh = [{ url: 'https://storage.googleapis.com/test/fresh.png' }];
   await assert.rejects(extractConversationBrief({ images: fresh }, async () => { throw Error('failed'); }));
   assert.equal(fresh[0].visionReviewedUrl, undefined);
+});
+
+test('admits a logo arriving after thirty product photos while keeping bounded context, cached roles and primary photos', () => {
+  const images = Array.from({ length: 12 }, (_, index) => ({ url: `https://storage.googleapis.com/test/shoe${index}.jpg`, visionReviewedUrl: `https://storage.googleapis.com/test/shoe${index}.jpg` }));
+  const brief = { images: images.map((_, index) => ({ index, role: index === 10 ? 'logo' : 'product', description: `Imagen ${index}` })) };
+  const incoming = Array.from({ length: 30 }, (_, i) => ({ url: `https://storage.googleapis.com/test/new${i}.jpg` }));
+  const logo = { url: 'https://storage.googleapis.com/test/lona.jpg' };
+  const result = mergeSampleImages(brief, images, [...incoming, logo]);
+  assert.equal(result.images.length, 12); assert.equal(result.images.at(-1).url, logo.url);
+  assert.ok(result.images.some((image) => image.url === images[10].url));
+  for (const role of result.brief.images) assert.equal(role.description, brief.images.find((old) => images[old.index].url === result.images[role.index].url).description);
+  for (const i of [0, 1, 2]) assert.ok(result.images.some((image) => image.url === images[i].url));
+  assert.ok(sampleVisionIndexes(result.images).includes(11));
+  const cached = result.images.map((image) => ({ ...image, visionReviewedUrl: image.url }));
+  assert.deepEqual(sampleVisionIndexes(cached, { text: 'Ese es el logotipo que te mandé en la foto del toldo' }), [9, 10, 11]);
+  assert.deepEqual(sampleVisionIndexes(cached, { text: 'Gracias' }), []);
 });
 
 test('records provider counters without customer content and marks unavailable usage honestly', async () => {

@@ -281,6 +281,42 @@ test('recorte manual toma solo la imagen del contacto, guarda el logo y conserva
   assert.equal((await h.call('get', 'context', { leadId: 'crop' })).body.images[0].url, original);
 });
 
+test('el recorte manual recupera del chat el logo que quedó fuera de las primeras doce fotos', async () => {
+  const source = 'https://storage.googleapis.com/own/images/lona.jpg';
+  const cropped = 'https://storage.googleapis.com/own/sample-logos/lona.png';
+  const h = harness({ prepareLogo: async ({ url }) => { assert.equal(url, source); return cropped; } });
+  h.add('late', { sampleAgent: { status: 'paused', brief: { ...complete, images: [] }, images: Array.from({ length: 12 }, (_, i) => ({ url: `https://storage.googleapis.com/own/images/shoe${i}.jpg` })) } });
+  h.rows.set('leads/late/messages/2', { sender: 'lead', mediaType: 'image', mediaUrl: source, timestamp: new Date() });
+  const initial = await h.call('get', 'context', { leadId: 'late' });
+  const image = initial.body.images.find((item) => item.url === source);
+  assert.ok(image); assert.equal(initial.body.images.length, 12);
+  assert.equal(h.rows.get('leads/late').sampleAgent.images.some((item) => item.url === source), false);
+  const saved = await h.call('post', 'context', { leadId: 'late', revision: initial.body.revision, fields: { ...complete, withoutLogo: false }, logoCrop: { imageIndex: image.index, crop: [0.1, 0.2, 0.8, 0.5] } });
+  assert.equal(saved.code, 200);
+  const agent = h.rows.get('leads/late').sampleAgent;
+  assert.equal(agent.images[agent.brief.images.find((item) => item.role === 'logo').index].url, cropped);
+});
+
+test('puede guardar un logo subido completo sin recortarlo y rechaza archivos de otro contacto', async () => {
+  const id = '01234567-89ab-4cde-8123-0123456789ab';
+  const logo = 'https://storage.googleapis.com/own/images/manual-logo.webp';
+  const bucket = { file: () => ({ getMetadata: async () => [{ contentType: 'image/webp', size: 1000, metadata: { leadId: 'upload' } }], getSignedUrl: async () => [logo] }) };
+  const h = harness({ bucket, prepareLogo: async ({ url }) => { assert.equal(url, logo); return 'https://storage.googleapis.com/own/sample-logos/upload-crop.png'; } });
+  h.add('upload', { sampleAgent: { status: 'paused', brief: complete, images: [] } });
+  const initial = await h.call('get', 'context', { leadId: 'upload' });
+  const saved = await h.call('post', 'context', { leadId: 'upload', revision: initial.body.revision, fields: { ...complete, withoutLogo: false }, logoUploadId: id });
+  assert.equal(saved.code, 200);
+  const agent = h.rows.get('leads/upload').sampleAgent;
+  assert.equal(agent.brief.logoChoice, 'provided'); assert.equal(agent.images[0].url, logo);
+  const updated = await h.call('get', 'context', { leadId: 'upload' });
+  const recropped = await h.call('post', 'context', { leadId: 'upload', revision: updated.body.revision, fields: { ...complete, withoutLogo: false }, logoUploadId: id, logoCrop: { imageIndex: 1000, crop: [0.1, 0.2, 0.8, 0.5] } });
+  assert.equal(recropped.code, 200);
+  assert.equal(h.rows.get('leads/upload').sampleAgent.images[0].url, 'https://storage.googleapis.com/own/sample-logos/upload-crop.png');
+  h.add('other', { sampleAgent: { status: 'paused', brief: complete } });
+  const other = await h.call('get', 'context', { leadId: 'other' });
+  assert.equal((await h.call('post', 'context', { leadId: 'other', revision: other.body.revision, fields: { ...complete, withoutLogo: false }, logoUploadId: id })).code, 400);
+});
+
 test('rechaza recortes inválidos y no sobrescribe cambios del cliente durante el recorte', async () => {
   let calls = 0;
   const h = harness({ prepareLogo: async () => {

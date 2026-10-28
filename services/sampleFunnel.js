@@ -7,6 +7,9 @@ import { summarizeSampleProgress } from './sampleProgress.js';
 import { recoverySalesQualification, DEFAULT_RENEWAL_DIRECTION } from './sampleRecovery.js';
 import { isWebsiteCampaignIntro } from '../utils/websiteCampaignContext.js';
 import { manualSampleContext, cropManualSampleLogo } from './sampleManualContext.js';
+import { mergeSampleImages } from './sampleAgentContext.js';
+import { publicImageUrl } from './aiSampleGenerator.js';
+import { createManualLogoUploadHandler, readManualLogoUpload } from './sampleManualLogoUpload.js';
 import { normalizeConversationBrief, sampleBriefHash, agentCanReply } from './sampleConversationAgent.js';
 
 const DAY = 86400_000;
@@ -155,7 +158,7 @@ export function sortSampleFunnel(rows, order = 'priority') {
   });
 }
 
-export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, renew, send, cancelSequences = async () => {}, resolveLead, prepareLogo }) {
+export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, renew, send, cancelSequences = async () => {}, resolveLead, prepareLogo, bucket }) {
   const historyCache = new Map(), listCache = new Map();
   const authorize = async (req) => { const user = await readUser(req); if (!user) throw fail('Inicia sesión para consultar el embudo.', 401); if (!canGenerateAiSample(user, { assignedTo: user.uid })) throw fail('No tienes acceso al embudo.', 403); return user; };
   const route = (method, name, handler) => app[method](`/api/crm/sample-funnel/${name}`, async (req, res) => {
@@ -180,6 +183,17 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
   };
   const getSettings = async () => normalizeFunnelSettings((await db.collection('config').doc('sampleFunnelSettings').get()).data());
   const contextVersion = (lead) => sampleBriefHash({ brief: lead.sampleAgent?.brief || {}, images: lead.sampleAgent?.images || [], version: lead.sampleAgent?.version || '', inboxRevision: lead.sampleAgent?.inboxRevision || 0, lastInboundAt: funnelMillis(lead.lastInboundAt) });
+  const recoverVisualContext = (lead, messages) => {
+    const recovered = mergeSampleImages(lead.sampleAgent?.brief || {}, lead.sampleAgent?.images || [], messages.filter((message) => message.sender === 'lead' && message.mediaType === 'image' && publicImageUrl(message.mediaUrl)).map((message) => ({ url: message.mediaUrl, caption: clean(message.content, 300) || 'Imagen recuperada del chat' })));
+    return { ...lead, sampleAgent: { ...lead.sampleAgent, ...recovered } };
+  };
+  app.post('/api/crm/sample-funnel/logo-upload', createManualLogoUploadHandler({ bucket, authorize: async (req) => {
+    const user = await authorize(req);
+    const { ref, lead } = await contact(clean(req.query.leadId, 200), user);
+    if (!lead.sampleAgent || hasDeliveredSample(lead) || !agentCanReply({ ...lead, sampleAgent: { ...lead.sampleAgent, enabled: true } })
+      || lead.sampleAgent.status === 'generating' || funnelMillis(lead.sampleAgent.leaseUntil) > Date.now()) throw fail('Este contacto no admite cambios de logo en este momento.');
+    return { leadId: ref.id, user };
+  } }));
   const assertReminder = (id, lead, messages) => {
     const row = classifySampleFunnel(id, lead, messages);
     if (!row?.canRemind || !agentCanReply({ ...lead, sampleAgent: { ...lead.sampleAgent, enabled: true } })) throw fail('No se puede recordar ahora: debe llevar al menos 6 horas sin actividad, no tener muestra entregada ni otro recordatorio en las últimas 24 horas.');
@@ -234,8 +248,9 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
     return { success: true };
   });
   route('get', 'context', async (req, user) => {
-    const { lead } = await contact(String(req.query.leadId || ''), user);
-    return { revision: contextVersion(lead), brief: normalizeConversationBrief(lead.sampleAgent?.brief || {}, lead.sampleAgent?.images || []), images: (lead.sampleAgent?.images || []).map((image, index) => ({ index, url: image.sourceUrl || image.url, caption: image.caption || lead.sampleAgent?.brief?.images?.find((item) => item.index === index)?.description || `Imagen ${index + 1}` })) };
+    const { ref, lead } = await contact(String(req.query.leadId || ''), user);
+    const recovered = recoverVisualContext(lead, await history(ref, lead));
+    return { revision: contextVersion(lead), brief: normalizeConversationBrief(recovered.sampleAgent.brief, recovered.sampleAgent.images), images: recovered.sampleAgent.images.map((image, index) => ({ index, url: image.sourceUrl || image.url, caption: image.caption || recovered.sampleAgent.brief.images?.find((item) => item.index === index)?.description || `Imagen ${index + 1}` })) };
   });
   route('post', 'context', async (req, user) => {
     const { ref, lead: initial } = await contact(String(req.body.leadId || ''), user);
@@ -246,14 +261,30 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
       if (req.body.revision !== contextVersion(lead)) throw fail('El contexto cambió. Cierra y vuelve a abrir los datos para conservar la información reciente.');
     };
     assertEditable(initial);
-    manualSampleContext(initial, req.body.fields || {});
-    if (req.body.logoCrop && req.body.fields?.withoutLogo) throw fail('Elige usar el recorte o continuar sin logo.', 400);
-    const cropped = req.body.logoCrop ? await cropManualSampleLogo(initial, req.body.logoCrop, prepareLogo) : null;
+    const messages = await history(ref, initial);
+    let recovered = recoverVisualContext(initial, messages);
+    manualSampleContext(recovered, req.body.fields || {});
+    if ((req.body.logoCrop || req.body.logoUploadId) && req.body.fields?.withoutLogo) throw fail('Elige usar el logo o continuar sin logo.', 400);
+    let uploadedIndex;
+    if (req.body.logoUploadId) {
+      if (!bucket) throw fail('La carga de logos no está configurada.', 503);
+      const upload = await readManualLogoUpload(bucket, ref.id, req.body.logoUploadId);
+      const visual = mergeSampleImages(recovered.sampleAgent.brief, recovered.sampleAgent.images, [upload]);
+      recovered = { ...recovered, sampleAgent: { ...recovered.sampleAgent, ...visual } };
+      uploadedIndex = visual.images.findIndex((image) => image.url === upload.url);
+      recovered.sampleAgent.brief = { ...visual.brief, logoChoice: 'provided', images: [
+        ...visual.brief.images.filter((image) => image.role !== 'logo' && image.index !== uploadedIndex),
+        { index: uploadedIndex, role: 'logo', logoStatus: 'clean', logoCrop: [], description: 'Logo subido y seleccionado por el asesor.' },
+      ] };
+    }
+    const selection = req.body.logoCrop ? { ...req.body.logoCrop, ...(uploadedIndex !== undefined ? { imageIndex: uploadedIndex } : {}) } : null;
+    const cropped = selection ? await cropManualSampleLogo(recovered, selection, prepareLogo) : req.body.logoUploadId ? recovered : null;
     await db.runTransaction(async (tx) => {
       const lead = (await tx.get(ref)).data() || {};
       assertEditable(lead);
-      const brief = manualSampleContext(cropped || lead, req.body.fields || {});
-      tx.update(ref, { 'sampleAgent.brief': brief, ...(cropped ? { 'sampleAgent.images': cropped.sampleAgent.images } : {}), 'sampleAgent.version': randomUUID(), 'sampleAgent.enabled': false, 'sampleAgent.status': 'paused', 'sampleAgent.confirmationHash': '', 'sampleAgent.error': '', 'sampleAgent.updatedAt': new Date(), 'sampleAgent.manualContextUpdatedAt': new Date(), 'sampleAgent.manualContextUpdatedBy': user.uid });
+      const visualLead = cropped || recoverVisualContext(lead, messages);
+      const brief = manualSampleContext(visualLead, req.body.fields || {});
+      tx.update(ref, { 'sampleAgent.brief': brief, 'sampleAgent.images': visualLead.sampleAgent.images, 'sampleAgent.version': randomUUID(), 'sampleAgent.enabled': false, 'sampleAgent.status': 'paused', 'sampleAgent.confirmationHash': '', 'sampleAgent.error': '', 'sampleAgent.updatedAt': new Date(), 'sampleAgent.manualContextUpdatedAt': new Date(), 'sampleAgent.manualContextUpdatedBy': user.uid });
     });
     await cancelSequences(ref.id);
     listCache.clear();

@@ -84,6 +84,20 @@ test('muestra todos los servicios y confirma una corrección sin ocultar el quin
   assert.ok(s.jobs[0].input.keyItems.includes('Servicio eléctrico automotriz'));
 });
 
+test('analiza la lona recibida después de llenar las doce posiciones y usa ese logo al generar', async () => {
+  const original = Array.from({ length: 12 }, (_, index) => ({ url: `https://storage.googleapis.com/test/shoe${index}.jpg` }));
+  const logoUrl = 'https://storage.googleapis.com/test/lona-logo.jpg';
+  const s = setup(async ({ images }) => {
+    assert.equal(images.length, 12); assert.equal(images.at(-1).url, logoUrl);
+    return { brief: normalizeConversationBrief({ ...complete(), logoChoice: 'provided', palette: ['#112233', '#FF0000', '#FFFF00'], images: images.map((image, index) => ({ index, role: image.url === logoUrl ? 'logo' : 'product', logoStatus: 'clean', description: image.url === logoUrl ? 'Marca legible en la lona de la zapatería' : 'Zapato' })) }, images), action: 'confirm', reply: '' };
+  });
+  await s.leadRef.update({ 'sampleAgent.images': original });
+  await s.receive('Este es el logo de la lona', 'late-logo', { mediaType: 'image', mediaUrl: logoUrl });
+  assert.equal((await s.leadRef.get()).data().sampleAgent.brief.logoChoice, 'provided');
+  await s.receive('sí', 'approve-logo');
+  assert.equal(s.jobs.length, 1); assert.equal(s.jobs[0].input.logoURL, logoUrl);
+});
+
 test('sin saldo pausa el agente y el cron no repite la llamada fallida', async () => {
   let calls = 0;
   const s = setup(async () => { calls++; throw Object.assign(Error('Se agotó el saldo de OpenAI.'), { code: 'insufficient_quota' }); });

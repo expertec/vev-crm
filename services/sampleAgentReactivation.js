@@ -3,6 +3,7 @@ import { agentCanReply, briefSummary, extractConversationBrief, missingBriefQues
 import { canGenerateAiSample } from './aiSampleAccess.js';
 import { publicImageUrl } from './aiSampleGenerator.js';
 import { hasUnreadWebsiteCampaign, isWebsiteCampaignIntro } from '../utils/websiteCampaignContext.js';
+import { mergeSampleImages } from './sampleAgentContext.js';
 
 const millis = (value) => value?.toMillis?.() || (value ? new Date(value).getTime() : 0) || 0;
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -40,7 +41,7 @@ export async function buildReactivationPreview({ lead, messages, transcribe, ext
     if (!hasUnreadWebsiteCampaign(lead)) throw error('No hay mensajes anteriores del cliente para retomar.', 400);
     return { brief: normalizeConversationBrief({}), images: [], history: [], reply: '¡Hola! Te ayudo a preparar una muestra de tu página web. ¿Cómo se llama tu negocio y a qué se dedica?', status: 'collecting', failedAudios: 0, videoCount: 0 };
   }
-  const images = [...(lead.sampleAgent?.images || [])];
+  let images = [...(lead.sampleAgent?.images || [])];
   const inbound = messages.filter((message) => message.sender === 'lead');
   const returningCampaign = inbound.length > 1 && isWebsiteCampaignIntro(inbound.at(-1)?.content);
   const startedSample = Boolean(lead.sampleAgent?.brief?.companyName || lead.sampleAgent?.confirmationHash
@@ -50,7 +51,7 @@ export async function buildReactivationPreview({ lead, messages, transcribe, ext
   let failedAudios = 0;
   for (const message of messages) {
     let text = String(message.content || '').slice(0, 2000);
-    if (message.sender === 'lead' && message.mediaType === 'image' && publicImageUrl(message.mediaUrl) && images.length < 12 && !images.some((image) => image.url === message.mediaUrl)) images.push({ url: message.mediaUrl, caption: text.slice(0, 300) });
+    if (message.sender === 'lead' && message.mediaType === 'image' && publicImageUrl(message.mediaUrl) && !images.some((image) => image.url === message.mediaUrl || image.sourceUrl === message.mediaUrl)) images.push({ url: message.mediaUrl, caption: text.slice(0, 300) });
     if (message.sender === 'lead' && ['audio', 'audio_ptt', 'ptt'].includes(message.mediaType)) {
       text = message.transcription?.text || message.transcription || '';
       if (!text && transcribe && audioCount++ < 8) {
@@ -63,7 +64,9 @@ export async function buildReactivationPreview({ lead, messages, transcribe, ext
     }
     if (text || message.mediaType) history.push({ role: message.sender === 'lead' ? 'customer' : 'assistant', text: String(text).slice(0, 2000), mediaType: message.mediaType || 'text' });
   }
-  const decision = await extract({ brief: lead.sampleAgent?.brief || {}, images, history, audioOptions: [], message: { reactivation: true, returningCampaign, briefReviewedByAdvisor: Boolean(lead.sampleAgent?.manualContextUpdatedAt), text: '', mediaType: 'reactivation' } });
+  const visualContext = mergeSampleImages(lead.sampleAgent?.brief || {}, lead.sampleAgent?.images || [], images);
+  images = visualContext.images;
+  const decision = await extract({ brief: visualContext.brief, images, history, audioOptions: [], message: { reactivation: true, returningCampaign, briefReviewedByAdvisor: Boolean(lead.sampleAgent?.manualContextUpdatedAt), text: '', mediaType: 'reactivation' } });
   if (decision.action === 'pause') throw error('El historial indica que no debemos reactivar este contacto.');
   const brief = normalizeConversationBrief(decision.brief, images);
   for (let index = 0; index < images.length; index++) if (!brief.images.some((image) => image.index === index)) brief.images.push({ index, role: 'unclassified', description: '' });

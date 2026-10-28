@@ -87,6 +87,15 @@ test('un contacto que vuelve por campaña conserva sus datos sin afirmar que dej
   assert.match(pending.reply, /retomamos tu muestra/);
 });
 
+test('al retomar recupera un logo reciente aunque ya hubiera doce fotos almacenadas', async () => {
+  const images = Array.from({ length: 12 }, (_, i) => ({ url: `https://storage.googleapis.com/test/shoe${i}.jpg` }));
+  const recent = 'https://storage.googleapis.com/test/late-logo.jpg';
+  await buildReactivationPreview({ lead: { sampleAgent: { images, brief: complete() } }, messages: [{ sender: 'lead', mediaType: 'image', mediaUrl: recent }], extract: async ({ images }) => {
+    assert.equal(images.length, 12); assert.equal(images.at(-1).url, recent);
+    return { brief: complete(), action: 'ask' };
+  } });
+});
+
 test('no repite la solicitud de fotos recibidas y admite transcripciones existentes', async () => {
   const result = await buildReactivationPreview({ lead: {}, messages: [{ sender: 'lead', mediaType: 'audio', transcription: 'Sí, son mías' }, { sender: 'lead', mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/a.jpg' }], transcribe: async () => assert.fail('No debe retranscribir'), extract: async () => ({ brief: { ...complete(), photosChoice: 'pending', images: [{ index: 0, role: 'work', description: 'Producto' }] }, action: 'ask' }) });
   assert.match(result.reply, /Ya tengo 1 imagen/); assert.doesNotMatch(result.reply, /Envíame/);

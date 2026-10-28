@@ -5512,6 +5512,7 @@ const sampleRecoveryService = registerSampleRecoveryRoutes(app, {
   send: sendMessageToLead, generate: queueConversationSample, cancelSequences: (leadId) => cancelAllSequences(leadId),
 });
 registerSampleFunnelRoutes(app, {
+  bucket: admin.storage().bucket(),
   send: sendMessageToLead,
   prepareLogo: prepareSampleLogo,
   db, readUser: (req) => readAiSampleUser(req, { admin, db }), cancelSequences: (leadId) => cancelAllSequences(leadId),
