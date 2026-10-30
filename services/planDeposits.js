@@ -28,22 +28,22 @@ function instructionsFor(intent, record) {
   return { remainingCents: Math.max(0, record.amountCents - Number(intent.amount_received || 0)), clabe: spei.clabe, bank: spei.bank_name || '', holder: spei.account_holder_name || '', reference: details.reference || '', url: details.hosted_instructions_url || '', expiresAt: null };
 }
 
-export function depositMessage(record, instructions) {
-  const lines = [`Hola ${record.customerName}, estos son los datos para el anticipo de ${record.planName}:`, '',
-    `Precio del plan: ${money(record.totalCents)} MXN`, `${instructions.remainingCents != null && instructions.remainingCents < record.amountCents ? 'Pendiente del anticipo' : 'Anticipo a pagar'}: ${money(instructions.remainingCents ?? record.amountCents)} MXN`,
-    `Saldo del plan después de este anticipo: ${money(record.totalCents - record.amountCents)} MXN`, ''];
+export function depositMessage(record, instructions, { voucherImage = false } = {}) {
+  const firstName = record.customerName.split(/\s+/)[0];
+  const amountLabel = instructions.remainingCents != null && instructions.remainingCents < record.amountCents ? 'Pendiente del anticipo' : 'Anticipo';
+  const lines = [`Hola ${firstName} 👋`, `Te comparto los datos para iniciar tu *${record.planName}* ✨`, '',
+    `💰 ${amountLabel}: ${money(instructions.remainingCents ?? record.amountCents)} MXN`,
+    `📌 Saldo después del anticipo: ${money(record.totalCents - record.amountCents)} MXN`, ''];
   if (record.method === 'oxxo') {
-    lines.push('Pago en efectivo en OXXO', `Referencia: ${instructions.number}`);
-    if (instructions.expiresAt) lines.push(`Vence: ${new Date(instructions.expiresAt).toLocaleString('es-MX', { timeZone: 'America/Mexico_City' })}`);
-    lines.push(`Ficha y código de barras: ${instructions.url}`, '', 'La confirmación del pago en OXXO puede llegar el siguiente día hábil.');
+    lines.push('🏪 Pago en OXXO', `Referencia: ${instructions.number}`);
+    if (instructions.expiresAt) lines.push(`⏳ Vence: ${new Date(instructions.expiresAt).toLocaleString('es-MX', { timeZone: 'America/Mexico_City' })}`);
+    lines.push(voucherImage ? '🎟️ Muestra esta ficha en caja para pagar.' : `🎟️ Ficha y código de barras: ${instructions.url}`, '', '✅ Te avisamos cuando se confirme el pago; en OXXO puede tardar hasta el siguiente día hábil.');
   } else {
-    lines.push('Transferencia SPEI', `CLABE: ${instructions.clabe}`);
-    if (instructions.bank) lines.push(`Banco: ${instructions.bank}`);
-    if (instructions.holder) lines.push(`Beneficiario: ${instructions.holder}`);
+    lines.push(instructions.bank ? `🏦 SPEI · ${instructions.bank}` : '🏦 Transferencia SPEI', `CLABE: ${instructions.clabe}`);
+    if (instructions.holder) lines.push(`A nombre de: ${instructions.holder}`);
     if (instructions.reference) lines.push(`Referencia: ${instructions.reference}`);
-    if (instructions.url) lines.push(`Instrucciones: ${instructions.url}`);
+    lines.push('', '✅ En cuanto se confirme tu pago, te avisamos por aquí. ¡Gracias!');
   }
-  lines.push('', 'Este cobro corresponde al anticipo, no al pago completo del plan. Te confirmaremos cuando Stripe acredite el pago.');
   return lines.join('\n');
 }
 
@@ -95,7 +95,7 @@ export async function handlePlanDepositEvent(db, event) {
   return true;
 }
 
-export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess, loadPlans, resolveBusiness, send, paymentsReady = true }) {
+export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess, loadPlans, resolveBusiness, send, paymentsReady = true, renderVoucher, sendImage }) {
   const contact = async (req, id) => {
     const user = await readUser(req);
     if (!user) throw fail('Inicia sesión para solicitar anticipos.', 401);
@@ -205,10 +205,18 @@ export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess
     try {
       const intent = await stripe.paymentIntents.retrieve(record.paymentIntentId);
       if (intent.status !== 'requires_action') throw fail('El estado del cobro cambió. Genera o consulta la referencia nuevamente.', 409);
-      const instructions = instructionsFor(intent, record), message = depositMessage(record, instructions);
-      await send(leadId, message);
-      await ref.update({ instructions, message, sentAt: new Date() });
-      return { success: true };
+      const instructions = instructionsFor(intent, record);
+      const imageSent = record.method === 'oxxo' && Boolean(renderVoucher && sendImage);
+      const message = depositMessage(record, instructions, { voucherImage: imageSent });
+      if (imageSent) {
+        const imageUrl = await renderVoucher({ requestId, paymentIntentId: intent.id, instructions });
+        // Recheck after rendering: the voucher may expire or be paid while Chrome is loading it.
+        const latest = await stripe.paymentIntents.retrieve(intent.id);
+        if (latest.status !== 'requires_action' || (instructions.expiresAt && millis(instructions.expiresAt) <= Date.now())) throw fail('La ficha ya no está disponible para pagar. Consulta la referencia nuevamente.', 409);
+        await sendImage(leadId, imageUrl, message);
+      } else await send(leadId, message);
+      await ref.update({ instructions, message, imageSent, sentAt: new Date() });
+      return { success: true, imageSent };
     } finally {
       await db.runTransaction(async tx => { const current = (await tx.get(ref)).data(); if (current?.sendOwner === owner) tx.update(ref, { sendLockUntil: new Date(0) }); });
     }

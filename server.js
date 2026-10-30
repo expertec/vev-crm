@@ -84,6 +84,7 @@ import mercadopagoRoutes from './mercadopagoRoutes.js';
 import stripeOneTimeRoutes, { PLANES as STRIPE_ONE_TIME_PLANS } from './stripeOneTimeRoutes.js';
 import { stripe, STRIPE_CONFIG } from './stripeConfig.js';
 import { registerPlanDepositRoutes } from './services/planDeposits.js';
+import { createOxxoVoucherRenderer } from './services/oxxoVoucherImage.js';
 
 // ================ Secuencias / Scheduler (web) ================
 import {
@@ -7463,7 +7464,8 @@ registerPlanDepositRoutes(app, {
     if (context.negocioData?.leadId && context.negocioData.leadId !== leadId) throw Object.assign(Error('El negocio no corresponde al contacto.'), { status: 403 });
     return context.negocioId || '';
   },
-  send: sendMessageToLead,
+  send: sendMessageToLead, sendImage: sendImageToLead,
+  renderVoucher: createOxxoVoucherRenderer({ bucket: admin.storage().bucket() }),
 });
 
 app.get('/api/whatsapp/payment-catalog', async (req, res) => {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registerPlanDepositRoutes, handlePlanDepositEvent, depositAmountCents } from '../services/planDeposits.js';
 
-function harness() {
+function harness(extra = {}) {
   let rows = new Map([
     ['leads/a', { nombre: 'Ana Lopez', telefono: '528112345678', assignedTo: 'seller', email: 'ana@example.com' }],
     ['leads/b', { nombre: 'Otro Cliente', assignedTo: 'other' }],
@@ -39,7 +39,7 @@ function harness() {
   };
   registerPlanDepositRoutes({ get: (url, fn) => routes.set(`GET ${url.split('/').at(-1)}`, fn), post: (url, fn) => routes.set(`POST ${url.split('/').at(-1)}`, fn) }, {
     db, stripe, readUser: async req => req.user, canAccess: (user, lead) => user.role === 'admin' || lead.assignedTo === user.uid,
-    loadPlans: async () => [{ id: 'basic', name: 'Plan Web', totalCents: 99000 }], resolveBusiness: async () => 'shop', send: async (...args) => sends.push(args),
+    loadPlans: async () => [{ id: 'basic', name: 'Plan Web', totalCents: 99000 }], resolveBusiness: async () => 'shop', send: async (...args) => sends.push(args), ...extra,
   });
   const user = { uid: 'seller', role: 'salesAgent' };
   const call = async (path, body = {}, as = user) => {
@@ -56,6 +56,9 @@ test('SPEI genera CLABE por el anticipo, reutiliza el cobro y no envía ni regis
   const first = await h.prepare(), second = await h.prepare();
   assert.equal(first.code, 200); assert.equal(second.body.requestId, first.body.requestId);
   assert.match(first.body.message, /CLABE: 123456789012345678/); assert.equal(first.body.remaining, 495);
+  assert.match(first.body.message, /^Hola Ana 👋/);
+  assert.match(first.body.message, /💰 Anticipo: \$495\.00 MXN/);
+  assert.doesNotMatch(first.body.message, /https?:|Instrucciones:|Ana Lopez|Este cobro corresponde/);
   assert.equal(h.creates.length, 1); assert.equal(h.customers.size, 1); assert.equal(h.creates[0].amount, 49500);
   assert.equal(h.creates[0].metadata.paymentType, 'plan_deposit');
   assert.equal(h.sends.length, 0); assert.equal(h.list('CrmFinanceTransactions').length, 0);
@@ -141,4 +144,28 @@ test('el envío rechaza una ficha vencida o un pago ya completado', async () => 
 test('solicitudes simultáneas crean un solo cobro', async () => {
   const h = harness(); const results = await Promise.all([h.prepare(), h.prepare()]);
   assert.deepEqual(results.map(result => result.code).sort(), [200, 409]); assert.equal(h.creates.length, 1);
+});
+
+test('OXXO envía la ficha real como imagen con mensaje breve y sin enlace', async () => {
+  const images = [], renders = [];
+  const h = harness({ renderVoucher: async args => { renders.push(args); return 'https://storage.googleapis.com/private/voucher.png'; }, sendImage: async (...args) => images.push(args) });
+  const reference = (await h.prepare({ method: 'oxxo' })).body;
+  const result = await h.call('send', { leadId: 'a', requestId: reference.requestId });
+  assert.equal(result.code, 200); assert.equal(result.body.imageSent, true);
+  assert.equal(h.sends.length, 0); assert.equal(images.length, 1);
+  assert.equal(renders[0].paymentIntentId, 'pi_1'); assert.equal(renders[0].instructions.number, '123456789');
+  assert.equal(images[0][0], 'a'); assert.equal(images[0][1], 'https://storage.googleapis.com/private/voucher.png');
+  assert.match(images[0][2], /Referencia: 123456789/); assert.match(images[0][2], /Muestra esta ficha en caja/); assert.doesNotMatch(images[0][2], /https?:/);
+});
+
+test('no envía una imagen si no se pudo capturar o el pago se confirmó durante la captura', async () => {
+  let count = 0;
+  const h = harness({ renderVoucher: async () => { throw Error('No se pudo capturar la ficha'); }, sendImage: async () => { count++; } });
+  const reference = (await h.prepare({ method: 'oxxo' })).body;
+  assert.equal((await h.call('send', { leadId: 'a', requestId: reference.requestId })).code, 500);
+  assert.equal(count, 0); assert.equal(h.read('PlanDepositRequests/' + reference.requestId).sentAt, undefined);
+  const paid = harness({ renderVoucher: async () => { await paid.pay(); return 'https://storage.googleapis.com/private/voucher.png'; }, sendImage: async () => { count++; } });
+  const next = (await paid.prepare({ method: 'oxxo' })).body;
+  assert.equal((await paid.call('send', { leadId: 'a', requestId: next.requestId })).code, 409);
+  assert.equal(count, 0);
 });
