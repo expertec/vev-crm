@@ -449,3 +449,48 @@ test('reanudar mientras la generación sigue activa no encola ni paga una segund
   }, sendReady: async () => { sent++; } });
   assert.equal(sent, 1); assert.equal(h.read().aiSampleJob.state, 'sent');
 });
+
+test('si la IA omite el logo lo incorpora al encabezado sin repetir llamadas ni perder la URL firmada', async () => {
+  const logo = 'https://storage.googleapis.com/test/logo.webp?token=abc&signature=xyz';
+  const api = apiStub(design());
+  const schema = await generateAiSample({ ...business, logoURL: logo }, { request: api.request, imageStore: imageStore() });
+  assert.equal(api.calls.filter(call => call.resource === 'responses').length, 1);
+  assert.equal(api.calls.length, 2);
+  assert.equal(schema.brand.logo, logo);
+  assert.match(schema.aiPage.html, /<header[^>]*><div class="nw-brand"><img src="https:\/\/storage.googleapis.com\/test\/logo.webp\?token=abc&amp;signature=xyz"/);
+  assert.equal((schema.aiPage.html.match(/alt="Logo de Taller Norte"/g) || []).length, 1);
+});
+
+test('preserva el logo sin encabezado y conserva la limpieza de imágenes externas y texto', () => {
+  const input = normalizeAiSampleInput({ ...business, companyInfo: 'Taller <Norte> "Centro"', logoURL: 'https://storage.googleapis.com/test/logo.png' });
+  const base = design(0);
+  const page = { ...base, html: base.html.replace(/<header>[\s\S]*?<\/header>/, '') + '<img src="https://evil.example/logo.png" onerror="alert(1)">' };
+  const result = sanitizeSamplePage(page, { input });
+  assert.match(result.html, /^<header class="nw-digital-card"><div class="nw-brand"><img/);
+  assert.match(result.html, /Taller &lt;Norte&gt; &quot;Centro&quot;/);
+  assert.doesNotMatch(result.html, /evil.example|onerror/);
+  const again = sanitizeSamplePage(result, { input });
+  assert.equal(again.html, result.html);
+});
+
+test('si el diseño ya incluye el logo no añade otra copia', () => {
+  const input = normalizeAiSampleInput({ ...business, logoURL: 'https://storage.googleapis.com/test/logo.png' });
+  const base = design(0);
+  const result = sanitizeSamplePage({ ...base, html: base.html.replace('<header>', '<header><img src="{{LOGO}}" alt="Logo original">') }, { input });
+  assert.equal((result.html.match(/src="https:\/\/storage.googleapis.com\/test\/logo.png"/g) || []).length, 1);
+  assert.doesNotMatch(result.html, /alt="Logo de/);
+});
+
+test('reintentar conserva los datos, logo y revisión previa de la solicitud fallida', async () => {
+  const h = controlledJobDb();
+  await queueAiSampleJob(h.db, h.ref, { ...business, logoURL: 'https://storage.googleapis.com/test/logo.png', reviewBeforeSend: true });
+  await h.ref.update({ leadId: h.leadRef.id, 'aiSampleJob.state': 'failed', 'aiSampleJob.error': 'La muestra no conservó el logo proporcionado.' });
+  const savedInput = structuredClone(h.read().aiSampleJob.input);
+  await controlAiSampleJob({ db: h.db, negocioRef: h.ref, leadRef: h.leadRef, action: 'retry' });
+  await runAiSampleJob({ db: h.db, negocioRef: h.ref, bucket: {}, generate: async input => {
+    assert.deepEqual(input, savedInput); return { aiPage: { inputHash: aiSampleInputHash(input) } };
+  }, sendReady: async () => assert.fail('Debe esperar la aprobación') });
+  assert.equal(h.read().aiSampleJob.state, 'ready');
+  assert.equal(h.read().aiSampleJob.error, '');
+  await assert.rejects(controlAiSampleJob({ db: h.db, negocioRef: h.ref, leadRef: h.leadRef, action: 'retry' }), /solicitud fallida/);
+});

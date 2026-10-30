@@ -170,7 +170,7 @@ export async function resumeAiSampleJobs(options) {
 
 // Pausing keeps completed work; cancellation invalidates any in-flight generation.
 export async function controlAiSampleJob({ db, negocioRef, leadRef, action }) {
-  if (!['pause', 'cancel', 'resume', 'send'].includes(action)) throw Object.assign(Error('Acción de muestra no válida.'), { status: 400 });
+  if (!['pause', 'cancel', 'resume', 'send', 'retry'].includes(action)) throw Object.assign(Error('Acción de muestra no válida.'), { status: 400 });
   return db.runTransaction(async (tx) => {
     const lead = (await tx.get(leadRef)).data() || {};
     const business = (await tx.get(negocioRef)).data() || {};
@@ -178,9 +178,10 @@ export async function controlAiSampleJob({ db, negocioRef, leadRef, action }) {
     const job = business.aiSampleJob || {};
     if (job.state === 'sending') throw Object.assign(Error('El envío ya comenzó. Espera a que termine antes de modificar la muestra.'), { status: 409 });
     if (action === 'send' && (job.state !== 'ready' && job.state !== 'paused' || business.schema?.aiPage?.inputHash !== job.inputHash)) throw Object.assign(Error('La muestra todavía no está lista para enviar.'), { status: 409 });
+    if (action === 'retry' && (job.state !== 'failed' || !job.input || !job.inputHash)) throw Object.assign(Error('No hay una solicitud fallida para reintentar.'), { status: 409 });
     if (action === 'resume' && job.state !== 'paused') throw Object.assign(Error('La muestra no está pausada.'), { status: 409 });
     if (['pause', 'cancel'].includes(action) && !['queued', 'running', 'paused', 'ready', 'failed'].includes(job.state)) throw Object.assign(Error('No hay una muestra pendiente para pausar o cancelar.'), { status: 409 });
-    if (['resume', 'send'].includes(action) && (lead.stopSequences || lead.humanControl || lead.salesBrainHumanControl || lead.archived || lead.archivedAt || ['cliente', 'compro', 'no interesado'].includes(String(lead.estado || '').toLowerCase()))) throw Object.assign(Error('Este contacto no admite entrega automática.'), { status: 409 });
+    if (['resume', 'send', 'retry'].includes(action) && (lead.stopSequences || lead.humanControl || lead.salesBrainHumanControl || lead.archived || lead.archivedAt || ['cliente', 'compro', 'no interesado'].includes(String(lead.estado || '').toLowerCase()))) throw Object.assign(Error('Este contacto no admite entrega automática.'), { status: 409 });
     const paused = action === 'pause', cancelled = action === 'cancel';
     const lease = job.leaseUntil?.toMillis?.() || new Date(job.leaseUntil || 0).getTime();
     const stillGenerating = action === 'resume' && business.schema?.aiPage?.inputHash !== job.inputHash && lease > Date.now();

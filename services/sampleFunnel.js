@@ -352,7 +352,7 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
     const body = req.body || {};
     const { ref, lead } = await contact(clean(body.leadId, 200), user);
     let result;
-    if (['pause', 'cancel', 'resume', 'send'].includes(body.action)) {
+    if (['pause', 'cancel', 'resume', 'send', 'retry'].includes(body.action)) {
       if (!controlJob) throw fail('El control de muestras no está disponible.');
       result = await controlJob(ref.id, body.action, user);
       if (['pause', 'cancel'].includes(body.action)) await cancelSequences(ref.id);

@@ -130,7 +130,7 @@ export function sanitizeSamplePage(page, { input, assets = [] }) {
   let contactCount = 0;
   let logoCount = 0;
   const usedImages = new Set();
-  const html = sanitizeHtml(source, {
+  let html = sanitizeHtml(source, {
     allowedTags: ['header', 'nav', 'main', 'section', 'article', 'aside', 'footer', 'div', 'span', 'h1', 'h2', 'h3', 'h4', 'p', 'a', 'img', 'ul', 'ol', 'li', 'strong', 'em', 'small', 'br', 'hr', 'figure', 'figcaption', 'details', 'summary'],
     allowedAttributes: { '*': ['class', 'id', 'aria-label', 'aria-hidden'], a: ['href', 'target', 'rel'], img: ['src', 'alt', 'width', 'height', 'loading', 'decoding', 'fetchpriority'] },
     allowedSchemes: ['https', 'mailto', 'tel'], allowProtocolRelative: false,
@@ -154,7 +154,16 @@ export function sanitizeSamplePage(page, { input, assets = [] }) {
   if (!/<h1[\s>]/i.test(html) || !/<main[\s>]/i.test(html) || html.replace(/<[^>]*>/g, '').trim().length < 80) throw new Error('La muestra no contiene una página completa.');
   if (assets.length && !imageCount) throw new Error('La muestra no incorporó las imágenes disponibles.');
   if (assets.some((asset) => ['ai_generated', 'ai_edited'].includes(asset.origin) && !usedImages.has(asset.url))) throw new Error('El diseño omitió imágenes generadas para la muestra.');
-  if (input.logoURL && !logoCount) throw new Error('La muestra no conservó el logo proporcionado.');
+  if (input.logoURL && !logoCount) {
+    // Preserve the supplied brand even when the model omits its logo placeholder.
+    // Only insert the validated input URL; never restore a model-generated image URL.
+    const logoUrl = publicImageUrl(input.logoURL);
+    if (!logoUrl) throw new Error('El logo proporcionado no tiene una dirección válida.');
+    const brand = `<div class="nw-brand"><img src="${escapeHtml(logoUrl)}" alt="${escapeHtml(`Logo de ${input.companyInfo}`)}" width="160" height="160" decoding="async" /></div>`;
+    html = /<header\b/i.test(html)
+      ? html.replace(/(<header\b[^>]*>)/i, (_, opening) => `${opening}${brand}`)
+      : `<header class="nw-digital-card">${brand}</header>${html}`;
+  }
   if (digits && !contactCount) throw new Error('La muestra no contiene un contacto de WhatsApp válido.');
   return { title: clean(page.title || input.companyInfo, 150), description: clean(page.description, 250), html: renderSampleIcons(html), css };
 }
