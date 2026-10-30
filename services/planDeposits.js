@@ -95,7 +95,7 @@ export async function handlePlanDepositEvent(db, event) {
   return true;
 }
 
-export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess, loadPlans, resolveBusiness, send, paymentsReady = true, renderVoucher, sendImage }) {
+export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess, loadPlans, resolveBusiness, send, paymentsReady = true, renderVoucher, renderSpei, sendImage }) {
   const contact = async (req, id) => {
     const user = await readUser(req);
     if (!user) throw fail('Inicia sesión para solicitar anticipos.', 401);
@@ -206,10 +206,11 @@ export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess
       const intent = await stripe.paymentIntents.retrieve(record.paymentIntentId);
       if (intent.status !== 'requires_action') throw fail('El estado del cobro cambió. Genera o consulta la referencia nuevamente.', 409);
       const instructions = instructionsFor(intent, record);
-      const imageSent = record.method === 'oxxo' && Boolean(renderVoucher && sendImage);
+      const renderer = record.method === 'oxxo' ? renderVoucher : renderSpei;
+      const imageSent = Boolean(renderer && sendImage);
       const message = depositMessage(record, instructions, { voucherImage: imageSent });
       if (imageSent) {
-        const imageUrl = await renderVoucher({ requestId, paymentIntentId: intent.id, instructions });
+        const imageUrl = await renderer({ requestId, paymentIntentId: intent.id, record, instructions });
         // Recheck after rendering: the voucher may expire or be paid while Chrome is loading it.
         const latest = await stripe.paymentIntents.retrieve(intent.id);
         if (latest.status !== 'requires_action' || (instructions.expiresAt && millis(instructions.expiresAt) <= Date.now())) throw fail('La ficha ya no está disponible para pagar. Consulta la referencia nuevamente.', 409);

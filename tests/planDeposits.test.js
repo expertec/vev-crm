@@ -169,3 +169,15 @@ test('no envía una imagen si no se pudo capturar o el pago se confirmó durante
   assert.equal((await paid.call('send', { leadId: 'a', requestId: next.requestId })).code, 409);
   assert.equal(count, 0);
 });
+
+test('SPEI envía la plantilla con datos exactos y conserva la CLABE copiable en el texto', async () => {
+  const images = [], renders = [];
+  const h = harness({ renderSpei: async args => { renders.push(args); return 'https://storage.googleapis.com/private/spei.png'; }, sendImage: async (...args) => images.push(args) });
+  const reference = (await h.prepare()).body;
+  const result = await h.call('send', { leadId: 'a', requestId: reference.requestId });
+  assert.equal(result.code, 200); assert.equal(result.body.imageSent, true); assert.equal(h.sends.length, 0);
+  assert.equal(renders[0].record.planName, 'Plan Web'); assert.equal(renders[0].record.amountCents, 49500);
+  assert.equal(renders[0].instructions.clabe, '123456789012345678');
+  assert.equal(images[0][1], 'https://storage.googleapis.com/private/spei.png');
+  assert.match(images[0][2], /CLABE: 123456789012345678/); assert.doesNotMatch(images[0][2], /https?:/);
+});

@@ -85,6 +85,7 @@ import stripeOneTimeRoutes, { PLANES as STRIPE_ONE_TIME_PLANS } from './stripeOn
 import { stripe, STRIPE_CONFIG } from './stripeConfig.js';
 import { registerPlanDepositRoutes } from './services/planDeposits.js';
 import { createOxxoVoucherRenderer } from './services/oxxoVoucherImage.js';
+import { createSpeiPaymentRenderer } from './services/speiPaymentImage.js';
 
 // ================ Secuencias / Scheduler (web) ================
 import {
@@ -7466,6 +7467,7 @@ registerPlanDepositRoutes(app, {
   },
   send: sendMessageToLead, sendImage: sendImageToLead,
   renderVoucher: createOxxoVoucherRenderer({ bucket: admin.storage().bucket() }),
+  renderSpei: createSpeiPaymentRenderer({ bucket: admin.storage().bucket() }),
 });
 
 app.get('/api/whatsapp/payment-catalog', async (req, res) => {
