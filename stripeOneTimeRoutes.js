@@ -22,7 +22,7 @@ const getApiBaseUrl = (req) => {
 };
 
 // Planes disponibles para pago único
-const PLANES = {
+export const PLANES = {
   basico: {
     id: 'basico',
     nombre: 'Plan Básico',

@@ -81,7 +81,9 @@ import subscriptionRoutes, { subscriptionRedirectSuccess, subscriptionRedirectCa
 import mercadopagoRoutes from './mercadopagoRoutes.js';
 
 // ================ STRIPE PAGOS ÚNICOS ================
-import stripeOneTimeRoutes from './stripeOneTimeRoutes.js';
+import stripeOneTimeRoutes, { PLANES as STRIPE_ONE_TIME_PLANS } from './stripeOneTimeRoutes.js';
+import { stripe, STRIPE_CONFIG } from './stripeConfig.js';
+import { registerPlanDepositRoutes } from './services/planDeposits.js';
 
 // ================ Secuencias / Scheduler (web) ================
 import {
@@ -7439,6 +7441,30 @@ function normalizePaymentCatalogList(source, list = []) {
     .map((item, index) => normalizePaymentCatalogItem(source, item, String(index + 1)))
     .filter(Boolean);
 }
+
+registerPlanDepositRoutes(app, {
+  db, stripe, paymentsReady: Boolean(STRIPE_CONFIG.webhookSecret), readUser: req => readAiSampleUser(req, { admin, db }), canAccess: canGenerateAiSample,
+  loadPlans: async () => {
+    const [site, catalog] = await Promise.all([
+      db.collection('SiteConfig').doc('catalog').get(),
+      db.collection(FINANCE_CATALOG_COLLECTION).orderBy('updatedAt', 'desc').limit(300).get(),
+    ]);
+    const configured = site.data()?.plans || [];
+    const available = (Array.isArray(configured) ? configured : Object.entries(configured).map(([id, plan]) => ({ id, ...plan }))).filter(plan => plan.active !== false && plan.enabled !== false);
+    const items = [
+      ...normalizePaymentCatalogList('global_plan', available),
+      ...normalizePaymentCatalogList('finance_catalog', catalog.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter(item => item.active !== false)),
+    ].filter(item => item.currency === 'MXN');
+    if (!items.length) return Object.values(STRIPE_ONE_TIME_PLANS).map(plan => ({ id: plan.id, name: plan.nombre, totalCents: plan.precioCentavos }));
+    return items.map(item => ({ id: item.id, name: item.name, totalCents: Math.round(item.price * 100) }));
+  },
+  resolveBusiness: async (leadId, lead) => {
+    const context = await resolveNegocioByIdentity({ leadId, phoneDigits: normalizePhoneDigits(lead.telefono || '') });
+    if (context.negocioData?.leadId && context.negocioData.leadId !== leadId) throw Object.assign(Error('El negocio no corresponde al contacto.'), { status: 403 });
+    return context.negocioId || '';
+  },
+  send: sendMessageToLead,
+});
 
 app.get('/api/whatsapp/payment-catalog', async (req, res) => {
   const { leadId = '', phone = '', negocioId = '' } = req.query || {};

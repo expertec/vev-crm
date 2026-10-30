@@ -1,3 +1,4 @@
+import { handlePlanDepositEvent } from './services/planDeposits.js';
 // subscriptionRoutes.js - Sistema completo de suscripciones con Stripe
 import { db } from './firebaseAdmin.js';
 import { stripe, STRIPE_CONFIG, SUBSCRIPTION_STATUS } from './stripeConfig.js';
@@ -228,6 +229,7 @@ export function subscriptionRedirectCancel(req, res) {
 export async function stripeWebhook(req, res) {
   const sig = req.headers['stripe-signature'];
   let event;
+  let signatureVerified = false;
 
   try {
     // ✅ req.body aquí es un Buffer (raw body), no un objeto JSON
@@ -240,6 +242,7 @@ export async function stripeWebhook(req, res) {
         sig,
         STRIPE_CONFIG.webhookSecret
       );
+      signatureVerified = true;
     }
   } catch (err) {
     console.error('❌ Webhook signature verification failed:', err.message);
@@ -259,6 +262,11 @@ export async function stripeWebhook(req, res) {
   console.log(`📨 Webhook recibido: ${event.type}`);
 
   try {
+    if (event.data?.object?.metadata?.paymentType === 'plan_deposit') {
+      if (!signatureVerified) return res.status(400).send('El anticipo requiere una firma Stripe válida.');
+      await handlePlanDepositEvent(db, event);
+      return res.json({ received: true });
+    }
     switch (event.type) {
   case 'checkout.session.completed':
     const session = event.data.object;
