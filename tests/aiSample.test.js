@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateAiSample, normalizeAiSampleInput, sanitizeSamplePage, sanitizeSampleCss, samplePageDocument, aiSampleInputHash, publicImageUrl, requestSampleOpenAI } from '../services/aiSampleGenerator.js';
-import { queueAiSampleJob, runAiSampleJob } from '../services/aiSampleJobs.js';
+import { queueAiSampleJob, runAiSampleJob, controlAiSampleJob } from '../services/aiSampleJobs.js';
 import { canGenerateAiSample, isAiSampleAvailable } from '../services/aiSampleAccess.js';
 import { sampleHeroCss } from '../services/aiSampleVisuals.js';
 
@@ -354,4 +354,98 @@ test('si falla la generación o sus validaciones, la muestra no se envía', asyn
   assert.equal(read().aiSampleJob.state, 'failed');
   assert.match(read().aiSampleJob.error, /contacto de WhatsApp/);
   assert.equal(read().schema, undefined);
+});
+
+function controlledJobDb() {
+  const base = memoryDb();
+  let lead = { telefono: business.contactWhatsapp, sampleAgent: { negocioId: base.ref.id, status: 'generating', enabled: false } };
+  const leadRef = { id: 'lead-1', get: async () => ({ data: () => structuredClone(lead) }) };
+  const original = base.db.runTransaction;
+  base.db.runTransaction = (fn) => original((tx) => fn({ ...tx,
+    get: (ref) => ref === leadRef ? leadRef.get() : tx.get(ref),
+    update: (ref, patch) => {
+      if (ref !== leadRef) return tx.update(ref, patch);
+      for (const [key, value] of Object.entries(patch)) {
+        const parts = key.split('.'); let target = lead;
+        for (const part of parts.slice(0, -1)) target = target[part] ||= {};
+        target[parts.at(-1)] = structuredClone(value);
+      }
+    },
+  }));
+  base.db.collection = () => ({ doc: () => leadRef });
+  return { ...base, leadRef, lead: () => lead };
+}
+
+test('regenerar para revisión conserva la muestra y solo envía al aprobar, sin volver a generar', async () => {
+  const h = controlledJobDb();
+  await queueAiSampleJob(h.db, h.ref, { ...business, reviewBeforeSend: true });
+  await h.ref.update({ leadId: h.leadRef.id });
+  let generated = 0, sent = 0;
+  const options = { db: h.db, negocioRef: h.ref, bucket: {}, generate: async input => { generated++; return { aiPage: { inputHash: aiSampleInputHash(input) } }; }, sendReady: async () => { sent++; } };
+  await runAiSampleJob(options);
+  assert.equal(sent, 0); assert.equal(h.read().aiSampleJob.state, 'ready'); assert.equal(h.lead().sampleAgent.status, 'review');
+  await controlAiSampleJob({ db: h.db, negocioRef: h.ref, leadRef: h.leadRef, action: 'send' });
+  await runAiSampleJob(options);
+  assert.equal(sent, 1); assert.equal(generated, 1); assert.equal(h.read().aiSampleJob.state, 'sent');
+});
+
+test('pausar durante la generación conserva el resultado y no entrega hasta reanudar', async () => {
+  const h = controlledJobDb();
+  await queueAiSampleJob(h.db, h.ref, business); await h.ref.update({ leadId: h.leadRef.id });
+  let sent = 0, generated = 0;
+  const options = { db: h.db, negocioRef: h.ref, bucket: {}, generate: async input => {
+    generated++; await controlAiSampleJob({ db: h.db, negocioRef: h.ref, leadRef: h.leadRef, action: 'pause' });
+    return { aiPage: { inputHash: aiSampleInputHash(input) } };
+  }, sendReady: async () => { sent++; } };
+  await runAiSampleJob(options);
+  assert.equal(sent, 0); assert.equal(h.read().aiSampleJob.state, 'paused'); assert.ok(h.read().schema);
+  await controlAiSampleJob({ db: h.db, negocioRef: h.ref, leadRef: h.leadRef, action: 'resume' });
+  await runAiSampleJob(options);
+  assert.equal(sent, 1); assert.equal(generated, 1);
+});
+
+test('cancelar en plena generación descarta el resultado tardío sin marcarlo fallido ni enviarlo', async () => {
+  const h = controlledJobDb();
+  await queueAiSampleJob(h.db, h.ref, business); await h.ref.update({ leadId: h.leadRef.id });
+  await runAiSampleJob({ db: h.db, negocioRef: h.ref, bucket: {}, generate: async input => {
+    await controlAiSampleJob({ db: h.db, negocioRef: h.ref, leadRef: h.leadRef, action: 'cancel' });
+    return { aiPage: { inputHash: aiSampleInputHash(input) } };
+  }, sendReady: async () => assert.fail('No debe enviar') });
+  assert.equal(h.read().aiSampleJob.state, 'cancelled'); assert.equal(h.read().schema, undefined);
+  assert.equal(h.lead().sampleAgent.status, 'cancelled');
+});
+
+test('un error tardío no sobrescribe la cancelación ni una solicitud nueva', async () => {
+  const h = controlledJobDb();
+  await queueAiSampleJob(h.db, h.ref, business); await h.ref.update({ leadId: h.leadRef.id });
+  await runAiSampleJob({ db: h.db, negocioRef: h.ref, bucket: {}, logger: { warn() {} }, generate: async () => {
+    await controlAiSampleJob({ db: h.db, negocioRef: h.ref, leadRef: h.leadRef, action: 'cancel' });
+    await queueAiSampleJob(h.db, h.ref, { ...business, companyInfo: 'Nombre corregido', reviewBeforeSend: true });
+    throw Error('Error de la generación anterior');
+  }, sendReady: async () => assert.fail('No debe enviar') });
+  assert.equal(h.read().aiSampleJob.state, 'queued'); assert.equal(h.read().aiSampleJob.input.companyInfo, 'Nombre corregido');
+});
+
+test('no permite enviar muestras incompletas, modificar un envío iniciado ni controlar otro contacto', async () => {
+  const h = controlledJobDb();
+  await queueAiSampleJob(h.db, h.ref, business); await h.ref.update({ leadId: h.leadRef.id });
+  const control = action => controlAiSampleJob({ db: h.db, negocioRef: h.ref, leadRef: h.leadRef, action });
+  await assert.rejects(control('send'), /no está lista/);
+  await h.ref.update({ 'aiSampleJob.state': 'sending' });
+  await assert.rejects(control('pause'), /envío ya comenzó/);
+  await h.ref.update({ leadId: 'other', 'aiSampleJob.state': 'queued' });
+  await assert.rejects(control('cancel'), /no pertenece/);
+});
+
+test('reanudar mientras la generación sigue activa no encola ni paga una segunda generación', async () => {
+  const h = controlledJobDb();
+  await queueAiSampleJob(h.db, h.ref, business); await h.ref.update({ leadId: h.leadRef.id });
+  let sent = 0;
+  await runAiSampleJob({ db: h.db, negocioRef: h.ref, bucket: {}, generate: async input => {
+    await controlAiSampleJob({ db: h.db, negocioRef: h.ref, leadRef: h.leadRef, action: 'pause' });
+    const resumed = await controlAiSampleJob({ db: h.db, negocioRef: h.ref, leadRef: h.leadRef, action: 'resume' });
+    assert.equal(resumed.state, 'running');
+    return { aiPage: { inputHash: aiSampleInputHash(input) } };
+  }, sendReady: async () => { sent++; } });
+  assert.equal(sent, 1); assert.equal(h.read().aiSampleJob.state, 'sent');
 });

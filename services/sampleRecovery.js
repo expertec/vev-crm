@@ -67,6 +67,10 @@ export async function buildSampleRecoveryPreview({ lead, business, messages, tra
     preview = { brief, images, history: [], reply: '', failedAudios: 0, videoCount: 0 };
   }
   for (let index = 0; index < preview.images.length; index++) if (!preview.brief.images.some((image) => image.index === index)) preview.brief.images.push({ index, role: 'unclassified', description: 'Material recuperado pendiente de clasificar' });
+  // Explicit advisor corrections take precedence over extraction from older messages.
+  if (lead.sampleAgent?.manualContextUpdatedAt) {
+    preview.brief = normalizeConversationBrief({ ...preview.brief, ...lead.sampleAgent.brief }, preview.images);
+  }
   const missing = missingBriefQuestion(preview.brief);
   return { ...preview, status: missing ? 'collecting' : 'awaiting_confirmation', pending: missing || 'Confirmar la nueva muestra',
     summary: briefSummary(preview.brief), canGenerate: Boolean(preview.brief.companyName && preview.brief.activity), previous };
@@ -121,7 +125,7 @@ export function registerSampleRecoveryRoutes(app, { db, readUser, readBusiness, 
     const business = await readBusiness(ref.id, lead);
     const preview = await buildSampleRecoveryPreview({ lead, business, messages, transcribe, extract });
     if (mode === 'renew' && !preview.canGenerate) throw fail('Faltan nombre y actividad. Reactiva la conversación para completarlos.', 400);
-    const draft = { ...preview, mode, promotion: clean(body.promotion, 1200), designDirection: clean(body.designDirection, 2000) || DEFAULT_RENEWAL_DIRECTION, deliveryMessage: clean(body.deliveryMessage, 2800),
+    const draft = { ...preview, mode, reviewBeforeSend: mode === 'renew' && body.reviewBeforeSend !== false, promotion: clean(body.promotion, 1200), designDirection: clean(body.designDirection, 2000) || DEFAULT_RENEWAL_DIRECTION, deliveryMessage: clean(body.deliveryMessage, 2800),
       audioScript: audio?.script || '', audioVersion: audio?.storagePath || '', regenerationId: randomUUID(),
       source: reactivationSource(lead, messages), businessSource: hash(previousSampleFacts(lead, business)),
       createdBy: user.uid, createdAt: new Date(), expiresAt: new Date(Date.now() + 30 * 60_000), state: 'prepared' };
@@ -151,7 +155,7 @@ export function registerSampleRecoveryRoutes(app, { db, readUser, readBusiness, 
       for (const doc of pending.docs) if (millis(doc.data().receivedAt) <= millis(saved.createdAt)) tx.update(doc.ref, { state: 'done', recoveredBy: draftRef.id });
       tx.update(ref, { sampleAgent: { ...current.sampleAgent, enabled: false, status: saved.mode === 'renew' ? 'generating' : 'collecting',
         version: owner, brief: saved.brief, images: saved.images, history: saved.history, confirmationHash: '', deliveryPaused: false, error: '', pauseReason: '',
-        regenerationId: saved.regenerationId, regenerationRequestedAt: new Date(), designDirection: saved.designDirection, deliveryMessage: saved.deliveryMessage || '',
+        reviewBeforeSend: saved.reviewBeforeSend === true, regenerationId: saved.regenerationId, regenerationRequestedAt: new Date(), designDirection: saved.designDirection, deliveryMessage: saved.deliveryMessage || '',
         recoveryOffer: [saved.audioScript, saved.promotion].filter(Boolean).join('\n'), leaseOwner: owner, leaseUntil: new Date(Date.now() + 5 * 60_000), updatedAt: new Date() } });
       if (saved.mode === 'renew') tx.update(ref, { sampleProposalCycle: { id: saved.regenerationId, requestedAt: new Date(), sentAt: null, openedAt: null } });
       return saved;

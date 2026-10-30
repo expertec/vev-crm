@@ -121,3 +121,17 @@ test('rechaza vistas previas desactualizadas, otro usuario y cambios en el audio
   assert.equal(h.audios.length, 0);
   assert.equal(h.rows.get('leads/lead').sampleAgent.enabled, false);
 });
+
+test('regenerar respeta las correcciones manuales y el logo aunque el historial contenga datos anteriores', async () => {
+  const logo = 'https://storage.googleapis.com/own/new-logo.webp';
+  const brief = normalizeConversationBrief({ ...complete(), companyName: 'Nombre corregido', logoChoice: 'provided', images: [{ index: 0, role: 'logo', logoStatus: 'clean', description: 'Logo nuevo' }] }, [{ url: logo }]);
+  const preview = await buildSampleRecoveryPreview({
+    lead: { sampleAgent: { brief, images: [{ url: logo }], manualContextUpdatedAt: new Date() } },
+    business: { companyInfo: 'Nombre anterior', businessStory: 'Actividad anterior' }, messages: [],
+    extract: async () => ({ brief: complete(), action: 'confirm' }),
+  });
+  assert.equal(preview.brief.companyName, 'Nombre corregido');
+  assert.equal(preview.brief.logoChoice, 'provided');
+  assert.equal(preview.images[0].url, logo);
+  assert.equal(preview.brief.images.find(image => image.role === 'logo').index, 0);
+});

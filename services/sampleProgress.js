@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { agentCanReply, missingBriefQuestion, normalizeConversationBrief, sampleInputFromConversation } from './sampleConversationAgent.js';
 import { hasDeliveredSample } from './sampleAgentReactivation.js';
 
-const statuses = ['collecting', 'awaiting_confirmation', 'generating', 'paused', 'error'];
+const statuses = ['collecting', 'awaiting_confirmation', 'generating', 'paused', 'error', 'review', 'cancelled'];
 const millis = (value) => value?.toMillis?.() || (value ? new Date(value).getTime() : 0) || 0;
 
 export function manualSampleInput(lead) {

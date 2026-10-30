@@ -333,3 +333,32 @@ test('rechaza recortes inválidos y no sobrescribe cambios del cliente durante e
   assert.equal((await h.call('post', 'context', { ...payload, logoCrop: { imageIndex: 0, crop: [0, 0, 0.5, 0.5] } })).code, 409);
   assert.equal(h.rows.get('leads/crop').sampleAgent.images[0].url, original);
 });
+
+test('editar una muestra entregada permite corregir nombre y logo antes de regenerar', async () => {
+  const h = harness({ prepareLogo: async () => 'https://storage.googleapis.com/own/logo-new.webp' });
+  h.add('delivered-edit', { sampleLinkSentAt: new Date(), sampleAgent: { version: 'v1', status: 'completed', negocioId: 'business-edit', brief: complete, images: [{ url: 'https://storage.googleapis.com/own/logo-original.jpg' }] } });
+  h.rows.set('Negocios/business-edit', { leadId: 'delivered-edit', aiSampleJob: { id: 'old', state: 'sent' } });
+  const initial = await h.call('get', 'context', { leadId: 'delivered-edit' });
+  const saved = await h.call('post', 'context', { leadId: 'delivered-edit', revision: initial.body.revision,
+    fields: { ...complete, companyName: 'Nombre corregido', withoutLogo: false, logoImageIndex: '' },
+    logoCrop: { imageIndex: 0, crop: [0.1, 0.1, 0.7, 0.7] } });
+  assert.equal(saved.code, 200);
+  const agent = h.rows.get('leads/delivered-edit').sampleAgent;
+  assert.equal(agent.brief.companyName, 'Nombre corregido'); assert.equal(agent.brief.logoChoice, 'provided');
+  assert.equal(agent.images[0].url, 'https://storage.googleapis.com/own/logo-new.webp');
+  assert.equal(agent.deliveryPaused, true); assert.equal(agent.enabled, false);
+  const row = classifySampleFunnel('delivered-edit', h.rows.get('leads/delivered-edit'), [customer()]);
+  assert.equal(row.canRenew, true); assert.equal(row.stage, 'process');
+});
+
+test('guardar cambios de una muestra pausada invalida el trabajo anterior y permite regenerar', async () => {
+  const h = harness();
+  h.add('paused-edit', { sampleAgent: { version: 'v1', status: 'paused', negocioId: 'business-edit', brief: complete } });
+  h.rows.set('Negocios/business-edit', { leadId: 'paused-edit', aiSampleJob: { id: 'old', state: 'paused' } });
+  const initial = await h.call('get', 'context', { leadId: 'paused-edit' });
+  const result = await h.call('post', 'context', { leadId: 'paused-edit', revision: initial.body.revision, fields: { ...complete, withoutLogo: true, logoImageIndex: '' } });
+  assert.equal(result.code, 200);
+  assert.equal(h.rows.get('Negocios/business-edit').aiSampleJob.state, 'cancelled');
+  assert.notEqual(h.rows.get('Negocios/business-edit').aiSampleJob.id, 'old');
+  assert.equal(classifySampleFunnel('paused-edit', h.rows.get('leads/paused-edit'), [customer()]).canRenew, true);
+});

@@ -93,7 +93,7 @@ import {
 } from './scheduler.js';
 import { generateCompleteSchema } from './schemaGenerator.js';
 import { AI_SAMPLE_VERSION, samplePageDocument } from './services/aiSampleGenerator.js';
-import { queueAiSampleJob, runAiSampleJob, resumeAiSampleJobs, scheduleAiSampleFollowup } from './services/aiSampleJobs.js';
+import { queueAiSampleJob, runAiSampleJob, resumeAiSampleJobs, scheduleAiSampleFollowup, controlAiSampleJob } from './services/aiSampleJobs.js';
 import { canGenerateAiSample, readAiSampleUser, isAiSampleAvailable } from './services/aiSampleAccess.js';
 import { buildAiSamplePublicUrl } from './services/sampleUrls.js';
 import { createSampleConversationAgent, createSampleConversationContextLoader, agentCanReply, extractConversationBrief } from './services/sampleConversationAgent.js';
@@ -5419,6 +5419,8 @@ app.get('/api/web/ai-sample/:publicCode', async (req, res) => {
 });
 
 async function deliverAiSample(negocio) {
+  const currentJob = (await db.collection('Negocios').doc(negocio.id).get()).data()?.aiSampleJob;
+  if (currentJob?.id !== negocio.aiSampleJob?.id || currentJob?.state !== 'sending') throw new Error('La entrega de esta muestra no está autorizada.');
   const sampleUrl = buildAiSamplePublicUrl(resolveSiteSlug(negocio));
   if (!sampleUrl || !isAiSampleAvailable(negocio)) throw new Error('La muestra todavía no está lista.');
   const leadCtx = await resolveLeadByIdentity({ leadId: negocio.leadId, phone: negocio.leadPhone });
@@ -5468,6 +5470,7 @@ async function queueConversationSample({ leadRef, leadId, lead, input }) {
   const patch = {
     ...input, slug, leadId, leadPhone: phone, contactWhatsapp: phone,
     sampleGenerator: AI_SAMPLE_VERSION, designVersion: AI_SAMPLE_VERSION,
+    reviewBeforeSend: input.reviewBeforeSend === true || lead.sampleAgent?.reviewBeforeSend === true,
     businessObjective: input.businessObjective, sampleFlowType: 'funnel', suppressDefaultFollowups: true,
     source: 'whatsapp_sample_agent', sampleSubmittedAt: now, updatedAt: now, createdAt: current.createdAt || now,
     sampleDeliveryIntro: input.regenerationId ? String(lead.sampleAgent?.deliveryMessage || '').replace(/\{\{negocio\}\}/g, () => input.companyInfo).slice(0, 2800) : '',
@@ -5524,9 +5527,17 @@ registerSampleFunnelRoutes(app, {
     const preview = await sampleRecoveryService.preview({ leadId, mode: 'audio', promotion: settings.promotion, designDirection: settings.designDirection }, user);
     return sampleRecoveryService.execute({ leadId, draftId: preview.draftId }, user);
   },
+  controlJob: async (leadId, action, user) => {
+    const leadRef = db.collection('leads').doc(leadId);
+    const lead = (await leadRef.get()).data() || {};
+    if (!canGenerateAiSample(user, lead)) throw Object.assign(Error('No tienes acceso a este contacto.'), { status: 403 });
+    const context = await resolveNegocioByIdentity({ negocioId: lead.sampleAgent?.negocioId || '', leadId, phoneDigits: normalizePhoneDigits(lead.telefono || '') });
+    if (!context.negocioRef) throw Object.assign(Error('No hay una muestra pendiente.'), { status: 404 });
+    return controlAiSampleJob({ db, negocioRef: context.negocioRef, leadRef, action });
+  },
   renew: async (leadId, user, settings) => {
     const message = `${settings.renewalMessage}${settings.applyPromotionToRenewal && settings.promotion ? `\n\n${settings.promotion}` : ''}`;
-    const preview = await sampleRecoveryService.preview({ leadId, mode: 'renew', designDirection: settings.designDirection, deliveryMessage: message }, user);
+    const preview = await sampleRecoveryService.preview({ leadId, mode: 'renew', reviewBeforeSend: true, designDirection: settings.designDirection, deliveryMessage: message }, user);
     return sampleRecoveryService.execute({ leadId, draftId: preview.draftId }, user);
   },
 });
@@ -5608,7 +5619,7 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
     });
     const currentNegocio = negocioCtx.negocioData || {};
     if (useAiSample && currentNegocio.leadId && currentNegocio.leadId !== leadCtx.leadId) return res.status(403).json({ error: 'El negocio no corresponde a este contacto.' });
-    if (['queued', 'running'].includes(currentNegocio.aiSampleJob?.state)) {
+    if (['queued', 'running', 'sending'].includes(currentNegocio.aiSampleJob?.state)) {
       return res.status(202).json({ success: true, queued: true, negocioId: negocioCtx.negocioId, slug: currentNegocio.slug, negocio: serializeNegocio(negocioCtx.negocioId, currentNegocio) });
     }
     const now = new Date();
@@ -5730,6 +5741,7 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
       templateId: safeSummary.templateId,
       logoURL: safeSummary.logoURL,
       photoURLs: uploadedPhotos,
+      reviewBeforeSend: summary.reviewBeforeSend === true,
       reusableAiAssets: useAiSample ? (currentNegocio.schema?.aiPage?.assets || []).filter((asset) => asset.visualKey).map(({ url, visualKey }) => ({ url, visualKey })).slice(0, 3) : [],
       slug: finalSlug,
       status: useAiSample ? 'Muestra IA pendiente' : 'Sin procesar',
@@ -5824,7 +5836,10 @@ app.post('/api/crm/lead-business/create-sample', async (req, res) => {
 
     if (useAiSample) {
       const queued = await queueAiSampleJob(db, finalNegocioRef, negocioPatch);
-      if (queued.queued) void runAiSampleJob({ ...aiSampleJobOptions(), negocioRef: finalNegocioRef });
+      if (queued.queued) {
+        await leadCtx.leadRef.update({ 'sampleAgent.negocioId': finalNegocioId, 'sampleAgent.enabled': false, 'sampleAgent.status': 'generating', 'sampleAgent.deliveryPaused': false, 'sampleAgent.updatedAt': new Date() });
+        void runAiSampleJob({ ...aiSampleJobOptions(), negocioRef: finalNegocioRef });
+      }
       const latest = (await finalNegocioRef.get()).data() || {};
       return res.status(queued.queued ? 202 : 200).json({ success: true, ...queued, negocioId: finalNegocioId, slug: finalSlug, sampleUrl: trackedSampleUrl, negocio: serializeNegocio(finalNegocioId, latest) });
     }

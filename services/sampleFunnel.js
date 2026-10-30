@@ -4,7 +4,7 @@ import { syncAiSampleFailure } from './aiSampleFailure.js';
 import { canManageSampleAudios } from './sampleAgentAudioLibrary.js';
 import { hasDeliveredSample } from './sampleAgentReactivation.js';
 import { summarizeSampleProgress } from './sampleProgress.js';
-import { recoverySalesQualification, DEFAULT_RENEWAL_DIRECTION } from './sampleRecovery.js';
+import { recoverySalesQualification, previousSampleFacts, DEFAULT_RENEWAL_DIRECTION } from './sampleRecovery.js';
 import { isWebsiteCampaignIntro } from '../utils/websiteCampaignContext.js';
 import { manualSampleContext, cropManualSampleLogo } from './sampleManualContext.js';
 import { mergeSampleImages } from './sampleAgentContext.js';
@@ -117,7 +117,8 @@ export function classifySampleFunnel(id, lead, messages = [], now = Date.now()) 
   const sentAt = funnelMillis(cycle?.sentAt || lead.webSales?.sample?.sentAt || lead.siteSentAt || historicalDelivery?.at || (delivered ? lead.sampleLinkSentAt || lead.webLinkSentAt : null));
   const working = agent.status === 'generating';
   let stage;
-  if (working || (!delivered && agent.status === 'error' && agent.negocioId)) stage = 'process';
+  const held = ['review', 'cancelled'].includes(agent.status) || (agent.deliveryPaused && agent.negocioId);
+  if (working || held || (!delivered && agent.status === 'error' && agent.negocioId)) stage = 'process';
   else if (delivered) stage = 'proposals';
   else if (['collecting', 'awaiting_confirmation', 'paused', 'error'].includes(agent.status) && lastCustomerAt && now - lastCustomerAt < DAY) stage = 'process';
   else if (!evidence) return null;
@@ -133,15 +134,17 @@ export function classifySampleFunnel(id, lead, messages = [], now = Date.now()) 
     business: clean(agent.brief?.companyName || lead.briefWeb?.companyName || lead.briefWeb?.companyInfo, 120),
     lastCustomerAt, lastInboundAt, sentAt, openAt, delivered, evidence,
     qualification: recoverySalesQualification(lead), progress: progress?.progress || 0, readiness: progress?.readiness || null,
-    pending: working ? 'Generando muestra' : delivered ? outcome : progress?.pending || 'Recuperar contexto y completar datos',
-    status: human ? 'Atención humana' : agent.status === 'error' ? 'Requiere revisión' : agent.status === 'paused' ? 'Pausado' : working ? 'Generando' : delivered ? 'Muestra enviada' : 'Recopilando',
+    pending: agent.status === 'review' ? 'Muestra lista, pendiente de revisión y envío' : agent.status === 'cancelled' ? 'Muestra cancelada; puedes editar y regenerar' : agent.deliveryPaused ? 'Muestra pausada; puedes editar antes de enviarla' : working ? 'Generando muestra' : delivered ? outcome : progress?.pending || 'Recuperar contexto y completar datos',
+    status: human ? 'Atención humana' : agent.status === 'review' ? 'Pendiente de revisión' : agent.status === 'cancelled' ? 'Cancelada' : agent.status === 'error' ? 'Requiere revisión' : agent.status === 'paused' ? 'Pausado' : working ? 'Generando' : delivered ? 'Muestra enviada' : 'Recopilando',
+    canControlSample: Boolean(agent.negocioId && ['generating', 'paused', 'review', 'error'].includes(agent.status)),
+    canEdit: !working && funnelMillis(agent.leaseUntil) <= now,
     canGenerate: !delivered && !human && Boolean(progress?.canForce),
-    canResume: !working && !human && !delivered && funnelMillis(agent.leaseUntil) <= now,
-    canRenew: delivered && !working && !human,
+    canResume: !working && !human && !delivered && !['review', 'cancelled'].includes(agent.status) && !(agent.deliveryPaused && agent.negocioId) && funnelMillis(agent.leaseUntil) <= now,
+    canRenew: (delivered || agent.status === 'cancelled') && !working && !human,
     canRemind: !delivered && !working && !human && lastCustomerAt > 0 && now - lastCustomerAt >= 6 * 3600_000
       && funnelMillis(agent.leaseUntil) <= now && now - funnelMillis(lead.sampleReminder?.sentAt) >= DAY,
     lastReminderAt: funnelMillis(lead.sampleReminder?.sentAt),
-    sampleUrl: /^https:\/\/(?:app\.)?negociosweb\.mx\//.test(lead.sampleLinkSentUrl || '') && !/\/muestra\//.test(lead.sampleLinkSentUrl) ? lead.sampleLinkSentUrl : historicalDelivery?.url || '',
+    sampleUrl: (agent.status === 'review' && /^https:\/\/(?:app\.)?negociosweb\.mx\//.test(agent.previewUrl || '')) ? agent.previewUrl : /^https:\/\/(?:app\.)?negociosweb\.mx\//.test(lead.sampleLinkSentUrl || '') && !/\/muestra\//.test(lead.sampleLinkSentUrl) ? lead.sampleLinkSentUrl : historicalDelivery?.url || '',
     error: clean(agent.error, 300), lastReply: progress?.lastReply || '',
   };
 }
@@ -158,7 +161,7 @@ export function sortSampleFunnel(rows, order = 'priority') {
   });
 }
 
-export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, renew, send, cancelSequences = async () => {}, resolveLead, prepareLogo, bucket }) {
+export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, renew, send, cancelSequences = async () => {}, resolveLead, prepareLogo, bucket, controlJob }) {
   const historyCache = new Map(), listCache = new Map();
   const authorize = async (req) => { const user = await readUser(req); if (!user) throw fail('Inicia sesión para consultar el embudo.', 401); if (!canGenerateAiSample(user, { assignedTo: user.uid })) throw fail('No tienes acceso al embudo.', 403); return user; };
   const route = (method, name, handler) => app[method](`/api/crm/sample-funnel/${name}`, async (req, res) => {
@@ -184,14 +187,25 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
   const getSettings = async () => normalizeFunnelSettings((await db.collection('config').doc('sampleFunnelSettings').get()).data());
   const contextVersion = (lead) => sampleBriefHash({ brief: lead.sampleAgent?.brief || {}, images: lead.sampleAgent?.images || [], version: lead.sampleAgent?.version || '', inboxRevision: lead.sampleAgent?.inboxRevision || 0, lastInboundAt: funnelMillis(lead.lastInboundAt) });
   const recoverVisualContext = (lead, messages) => {
-    const recovered = mergeSampleImages(lead.sampleAgent?.brief || {}, lead.sampleAgent?.images || [], messages.filter((message) => message.sender === 'lead' && message.mediaType === 'image' && publicImageUrl(message.mediaUrl)).map((message) => ({ url: message.mediaUrl, caption: clean(message.content, 300) || 'Imagen recuperada del chat' })));
+    const facts = previousSampleFacts(lead);
+    const seed = { companyName: facts.companyInfo, activity: facts.businessStory, objective: facts.businessObjective, offerings: facts.keyItems, colorPreference: facts.colorPreference, ...lead.sampleAgent?.brief };
+    const savedImages = [...(lead.sampleAgent?.images || [])];
+    const roles = [...(seed.images || [])];
+    for (const [url, role] of [[facts.logoURL, 'logo'], ...facts.photoURLs.map((url) => [url, 'product'])]) {
+      if (!url || savedImages.some((image) => image.url === url) || savedImages.length >= 12) continue;
+      roles.push({ index: savedImages.length, role, description: 'Material guardado en la muestra anterior', ...(role === 'logo' ? { logoStatus: 'clean' } : {}) });
+      savedImages.push({ url });
+    }
+    seed.images = roles;
+    if (!seed.logoChoice && roles.some((image) => image.role === 'logo')) seed.logoChoice = 'provided';
+    const recovered = mergeSampleImages(seed, savedImages, messages.filter((message) => message.sender === 'lead' && message.mediaType === 'image' && publicImageUrl(message.mediaUrl)).map((message) => ({ url: message.mediaUrl, caption: clean(message.content, 300) || 'Imagen recuperada del chat' })));
     return { ...lead, sampleAgent: { ...lead.sampleAgent, ...recovered } };
   };
   app.post('/api/crm/sample-funnel/logo-upload', createManualLogoUploadHandler({ bucket, authorize: async (req) => {
     const user = await authorize(req);
     const { ref, lead } = await contact(clean(req.query.leadId, 200), user);
-    if (!lead.sampleAgent || hasDeliveredSample(lead) || !agentCanReply({ ...lead, sampleAgent: { ...lead.sampleAgent, enabled: true } })
-      || lead.sampleAgent.status === 'generating' || funnelMillis(lead.sampleAgent.leaseUntil) > Date.now()) throw fail('Este contacto no admite cambios de logo en este momento.');
+    if (!agentCanReply({ ...lead, sampleAgent: { ...lead.sampleAgent, enabled: true } })
+      || lead.sampleAgent?.status === 'generating' || funnelMillis(lead.sampleAgent?.leaseUntil) > Date.now()) throw fail('Este contacto no admite cambios de logo en este momento.');
     return { leadId: ref.id, user };
   } }));
   const assertReminder = (id, lead, messages) => {
@@ -256,8 +270,8 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
     const { ref, lead: initial } = await contact(String(req.body.leadId || ''), user);
     const assertEditable = (lead) => {
       if (!canGenerateAiSample(user, lead)) throw fail('No tienes acceso a este contacto.', 403);
-      if (!lead.sampleAgent || hasDeliveredSample(lead) || !agentCanReply({ ...lead, sampleAgent: { ...lead.sampleAgent, enabled: true } })) throw fail('Este contacto no admite cambios de datos para la muestra.');
-      if (lead.sampleAgent.status === 'generating' || funnelMillis(lead.sampleAgent.leaseUntil) > Date.now()) throw fail('Espera a que termine el proceso actual antes de editar.');
+      if (!agentCanReply({ ...lead, sampleAgent: { ...lead.sampleAgent, enabled: true } })) throw fail('Este contacto no admite cambios de datos para la muestra.');
+      if (lead.sampleAgent?.status === 'generating' || funnelMillis(lead.sampleAgent?.leaseUntil) > Date.now()) throw fail('Espera a que termine el proceso actual antes de editar.');
       if (req.body.revision !== contextVersion(lead)) throw fail('El contexto cambió. Cierra y vuelve a abrir los datos para conservar la información reciente.');
     };
     assertEditable(initial);
@@ -282,9 +296,15 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
     await db.runTransaction(async (tx) => {
       const lead = (await tx.get(ref)).data() || {};
       assertEditable(lead);
+      const businessRef = lead.sampleAgent?.negocioId ? db.collection('Negocios').doc(lead.sampleAgent.negocioId) : null;
+      const business = businessRef ? (await tx.get(businessRef)).data() || {} : {};
+      if (business.aiSampleJob?.state === 'sending') throw fail('El envío ya comenzó; espera a que termine.');
+      if (businessRef && business.leadId === ref.id && ['queued', 'running', 'paused', 'ready', 'failed'].includes(business.aiSampleJob?.state)) {
+        tx.update(businessRef, { 'aiSampleJob.state': 'cancelled', 'aiSampleJob.id': randomUUID(), status: 'Muestra cancelada para editar' });
+      }
       const visualLead = cropped || recoverVisualContext(lead, messages);
       const brief = manualSampleContext(visualLead, req.body.fields || {});
-      tx.update(ref, { 'sampleAgent.brief': brief, 'sampleAgent.images': visualLead.sampleAgent.images, 'sampleAgent.version': randomUUID(), 'sampleAgent.enabled': false, 'sampleAgent.status': 'paused', 'sampleAgent.confirmationHash': '', 'sampleAgent.error': '', 'sampleAgent.updatedAt': new Date(), 'sampleAgent.manualContextUpdatedAt': new Date(), 'sampleAgent.manualContextUpdatedBy': user.uid });
+      tx.update(ref, { 'sampleAgent.brief': brief, 'sampleAgent.images': visualLead.sampleAgent.images, 'sampleAgent.version': randomUUID(), 'sampleAgent.enabled': false, 'sampleAgent.status': (lead.sampleAgent?.negocioId || hasDeliveredSample(lead)) ? 'cancelled' : 'paused', 'sampleAgent.deliveryPaused': true, 'sampleAgent.confirmationHash': '', 'sampleAgent.error': '', 'sampleAgent.updatedAt': new Date(), 'sampleAgent.manualContextUpdatedAt': new Date(), 'sampleAgent.manualContextUpdatedBy': user.uid });
     });
     await cancelSequences(ref.id);
     listCache.clear();
@@ -332,7 +352,11 @@ export function registerSampleFunnelRoutes(app, { db, readUser, reactivate, rene
     const body = req.body || {};
     const { ref, lead } = await contact(clean(body.leadId, 200), user);
     let result;
-    if (body.action === 'takeover') {
+    if (['pause', 'cancel', 'resume', 'send'].includes(body.action)) {
+      if (!controlJob) throw fail('El control de muestras no está disponible.');
+      result = await controlJob(ref.id, body.action, user);
+      if (['pause', 'cancel'].includes(body.action)) await cancelSequences(ref.id);
+    } else if (body.action === 'takeover') {
       if (lead.stopSequences || ['compro', 'cliente', 'no interesado'].includes(normalize(lead.estado)) || ['won', 'deposit_paid'].includes(lead.webSales?.stage) || lead.webSales?.closing?.paidAt || lead.webSales?.closing?.depositPaidAt) throw fail('Este contacto no admite seguimiento desde el embudo.');
       await ref.update({ 'sampleAgent.enabled': false, 'sampleAgent.version': randomUUID(), 'sampleAgent.status': 'paused', 'sampleAgent.deliveryPaused': true, 'sampleAgent.pauseReason': 'manual_conversation', 'sampleAgent.leaseOwner': '', 'sampleAgent.leaseUntil': new Date(0), salesBrainMode: 'copilot' });
       await cancelSequences(ref.id);
