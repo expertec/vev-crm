@@ -1,19 +1,12 @@
 import { SALES_BRAIN_MODES } from './catalog.js';
 
+// Retired: keep existing lead data while disabling all Sales Brain entry points.
 export function isSalesBrainEnabled() {
-  return !['off', 'false', '0'].includes(String(process.env.SALES_BRAIN_ENABLED || '').trim().toLowerCase());
-}
-
-function normalizeDefaultMode(value = '') {
-  const safe = String(value || '').trim().toLowerCase();
-  if (safe === SALES_BRAIN_MODES.OFF) return SALES_BRAIN_MODES.OFF;
-  if (safe === SALES_BRAIN_MODES.COPILOT) return SALES_BRAIN_MODES.COPILOT;
-  return SALES_BRAIN_MODES.COPILOT;
+  return false;
 }
 
 export function getDefaultSalesBrainMode() {
-  if (!isSalesBrainEnabled()) return SALES_BRAIN_MODES.OFF;
-  return normalizeDefaultMode(process.env.SALES_BRAIN_DEFAULT_MODE || SALES_BRAIN_MODES.COPILOT);
+  return SALES_BRAIN_MODES.OFF;
 }
 
 export function buildNewInboundLeadSalesBrainDefaults() {

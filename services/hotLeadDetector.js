@@ -592,7 +592,9 @@ export async function handleInboundLeadReply({
       return { ok: false, reason: 'no_text' };
     }
     const ref = leadRef || db.collection('leads').doc(String(leadId));
-    const recentMessages = await loadRecentMessages(ref, 12);
+    const recentMessages = HOT_LEAD_AI_ENABLED && isSalesBrainEnabled()
+      ? await loadRecentMessages(ref, 12)
+      : [];
     const classification = await classifyLeadReply({ lead: leadData, recentMessages, latestText: text });
     const salesBrainMode = resolveSalesBrainMode(leadData);
 

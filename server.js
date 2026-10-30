@@ -177,6 +177,7 @@ import {
   updateLeadReactivationSettings,
 } from './services/leadReactivationService.js';
 import { classifyLeadReply } from './services/hotLeadDetector.js';
+import { isSalesBrainEnabled } from './services/salesBrain/defaultMode.js';
 import {
   expireCurrentSuggestion,
   recordSellerFeedback,
@@ -4285,6 +4286,7 @@ app.post('/api/admin/hot-lead/classify', async (req, res) => {
 });
 
 app.post('/api/admin/sales-brain/feedback', async (req, res) => {
+  if (!isSalesBrainEnabled()) return res.status(410).json({ error: 'Sales Brain está desactivado.' });
   const {
     leadId = '',
     eventId = '',
@@ -4310,6 +4312,7 @@ app.post('/api/admin/sales-brain/feedback', async (req, res) => {
 });
 
 app.post('/api/admin/sales-brain/reanalyze', async (req, res) => {
+  if (!isSalesBrainEnabled()) return res.status(410).json({ error: 'Sales Brain está desactivado.' });
   const { leadId = '' } = req.body || {};
   const safeLeadId = String(leadId || '').trim();
 

@@ -7,13 +7,13 @@ import {
   isSalesBrainEnabled,
 } from '../services/salesBrain/defaultMode.js';
 
-test('leads entrantes nuevos activan Sales Brain copilot por defecto', () => {
+test('leads entrantes nuevos mantienen Sales Brain apagado', () => {
   const previous = process.env.SALES_BRAIN_DEFAULT_MODE;
   delete process.env.SALES_BRAIN_DEFAULT_MODE;
   try {
     const defaults = buildNewInboundLeadSalesBrainDefaults();
-    assert.equal(getDefaultSalesBrainMode(), 'copilot');
-    assert.equal(defaults.salesBrainMode, 'copilot');
+    assert.equal(getDefaultSalesBrainMode(), 'off');
+    assert.equal(defaults.salesBrainMode, 'off');
     assert.equal(defaults.queue.status, 'automation');
     assert.equal(defaults.queue.priority, 0);
     assert.equal(defaults.salesContext.businessType, null);
@@ -44,5 +44,21 @@ test('SALES_BRAIN_DEFAULT_MODE=off desactiva Sales Brain en leads entrantes nuev
   } finally {
     if (previous === undefined) delete process.env.SALES_BRAIN_DEFAULT_MODE;
     else process.env.SALES_BRAIN_DEFAULT_MODE = previous;
+  }
+});
+
+test('Sales Brain permanece apagado incluso con la configuración antigua de producción', () => {
+  const previousEnabled = process.env.SALES_BRAIN_ENABLED;
+  const previousMode = process.env.SALES_BRAIN_DEFAULT_MODE;
+  process.env.SALES_BRAIN_ENABLED = 'true';
+  process.env.SALES_BRAIN_DEFAULT_MODE = 'copilot';
+  try {
+    assert.equal(isSalesBrainEnabled(), false);
+    assert.equal(buildNewInboundLeadSalesBrainDefaults().salesBrainMode, 'off');
+  } finally {
+    if (previousEnabled === undefined) delete process.env.SALES_BRAIN_ENABLED;
+    else process.env.SALES_BRAIN_ENABLED = previousEnabled;
+    if (previousMode === undefined) delete process.env.SALES_BRAIN_DEFAULT_MODE;
+    else process.env.SALES_BRAIN_DEFAULT_MODE = previousMode;
   }
 });

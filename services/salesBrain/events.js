@@ -1,3 +1,4 @@
+import { isSalesBrainEnabled } from './defaultMode.js';
 import { admin, db as defaultDb } from '../../firebaseAdmin.js';
 import { eventIdForInputMessage, normalizeInputMessageId } from './catalog.js';
 import { buildSalesBrainEventPayload } from './eventPayload.js';
@@ -30,6 +31,7 @@ export async function expireCurrentSuggestion({
   reason = 'context_changed',
   exceptEventId = '',
 } = {}) {
+  if (!isSalesBrainEnabled()) return { expired: false, reason: 'disabled' };
   const ref = leadRef || (leadId ? db.collection('leads').doc(String(leadId)) : null);
   if (!ref) return { expired: false, reason: 'missing_lead' };
 
@@ -103,6 +105,7 @@ export async function recordSellerFeedback({
   suggestedReply = '',
   actor = '',
 } = {}) {
+  if (!isSalesBrainEnabled()) return { skipped: true, reason: 'disabled' };
   const safeLeadId = cleanText(leadId, 220);
   const safeEventId = cleanText(eventId, 220);
   const safeDecision = cleanText(decision, 40);
