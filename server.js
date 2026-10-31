@@ -83,6 +83,7 @@ import mercadopagoRoutes from './mercadopagoRoutes.js';
 // ================ STRIPE PAGOS ÚNICOS ================
 import stripeOneTimeRoutes, { PLANES as STRIPE_ONE_TIME_PLANS } from './stripeOneTimeRoutes.js';
 import { stripe, STRIPE_CONFIG } from './stripeConfig.js';
+import { createSampleWelcomeRecovery } from './services/sampleWelcomeRecovery.js';
 import { createClosingConfigStore, offerAvailable, offerPlanId } from './services/closingConfig.js';
 import { createClosingAgent } from './services/closingAgent.js';
 import { registerClosingRoutes } from './services/closingRoutes.js';
@@ -5503,15 +5504,18 @@ const prepareSampleLogo = createSampleLogoPreparer({ bucket: admin.storage().buc
 const extractSampleBrief = (params) => extractConversationBrief({ ...params, prepareLogo: prepareSampleLogo });
 registerSamplePackageRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }), invalidate: () => loadSampleSalesKnowledge.invalidate() });
 const closingStore = createClosingConfigStore(db);
+const welcomeRecovery = createSampleWelcomeRecovery({ db, store: closingStore, send: sendMessageToLead });
+const pauseSalesAutomation = ref => Promise.all([closingAgent.pause(ref), welcomeRecovery.cancel(ref)]);
 const closingAgent = createClosingAgent({ db, store: closingStore, bucket: admin.storage().bucket(), send: sendMessageToLead, sendImage: sendImageToLead, sendAudio: sendAudioUrlToLead,
   preparePayment: (leadId, body) => planDepositService.prepare(leadId, body), sendPayment: (leadId, id) => planDepositService.send(leadId, id),
   cancelSequences: leadId => cancelAllSequences(leadId), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }) });
 const closingFulfillment = createClosingFulfillment({ db, store: closingStore, bucket: admin.storage().bucket(), send: sendMessageToLead, sendImage: sendImageToLead, cancelSequences: leadId => cancelAllSequences(leadId) });
 configurePlanDepositFulfillment(closingFulfillment.enqueue);
-registerClosingRoutes(app, { db, bucket: admin.storage().bucket(), store: closingStore, agent: closingAgent, readUser: req => readAiSampleUser(req, { admin, db }) });
-setClosingConversationHandler(closingAgent);
+registerClosingRoutes(app, { db, bucket: admin.storage().bucket(), store: closingStore, agent: closingAgent, welcomeRecovery, readUser: req => readAiSampleUser(req, { admin, db }) });
+setClosingConversationHandler({ ...closingAgent, pause: pauseSalesAutomation, isSending: id => closingAgent.isSending(id) || welcomeRecovery.isSending(id) });
 
 const sampleConversationAgent = createSampleConversationAgent({
+  onWelcomeSent: welcomeRecovery.enroll, onInbound: welcomeRecovery.cancelInTransaction,
   extract: extractSampleBrief,
   loadConversationContext: createSampleConversationContextLoader({ transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }) }),
   sendPackage: createSamplePackageSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead, sendImage: sendImageToLead, sendText: sendMessageToLead }),
@@ -5520,7 +5524,7 @@ const sampleConversationAgent = createSampleConversationAgent({
   sendFlowAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }),
   loadAudioOptions: () => loadSampleFlowAudioOptions(db),
 });
-const sampleReactivation = registerSampleReactivationRoutes(app, { db, extract: extractSampleBrief, generate: queueConversationSample, loadAudioOptions: () => loadSampleFlowAudioOptions(db), sendFlowAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }), readUser: (req) => readAiSampleUser(req, { admin, db }), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }), send: sendMessageToLead, cancelSequences: (leadId) => cancelAllSequences(leadId) });
+const sampleReactivation = registerSampleReactivationRoutes(app, { db, onWelcomeSent: welcomeRecovery.enroll, extract: extractSampleBrief, generate: queueConversationSample, loadAudioOptions: () => loadSampleFlowAudioOptions(db), sendFlowAudio: createSampleFlowAudioSender({ db, bucket: admin.storage().bucket(), sendAudio: sendAudioUrlToLead }), readUser: (req) => readAiSampleUser(req, { admin, db }), transcribe: createSampleAudioTranscriber({ bucket: admin.storage().bucket() }), send: sendMessageToLead, cancelSequences: (leadId) => cancelAllSequences(leadId) });
 setSampleConversationHandler(sampleConversationAgent.receive, { activate: (leadId) => sampleReactivation.activate(leadId, { uid: 'website-inquiry-automation', role: 'admin' }) });
 registerSampleAgentAudioRoutes(app, { db, bucket: admin.storage().bucket(), readUser: (req) => readAiSampleUser(req, { admin, db }) });
 const sampleRecoveryService = registerSampleRecoveryRoutes(app, {
@@ -7190,7 +7194,7 @@ app.post('/api/whatsapp/send-message', async (req, res) => {
         return res.status(409).json({ error: unsafeIdentifierError });
       }
     }
-    await closingAgent.pause(db.collection('leads').doc(String(leadId)));
+    await pauseSalesAutomation(db.collection('leads').doc(String(leadId)));
     const result = await sendMessageToLead(leadId, message, {
       replyToWaMessageId,
       replyPreview,
@@ -7653,7 +7657,7 @@ app.post('/api/whatsapp/followup-actions/send', async (req, res) => {
       }
     }
 
-    await closingAgent.pause(db.collection('leads').doc(safeLeadId));
+    await pauseSalesAutomation(db.collection('leads').doc(safeLeadId));
     const result = await sendMessageToLead(safeLeadId, message, {});
 
     // Deja rastro del seguimiento manual en el lead (para metricas/visibilidad).
@@ -7700,7 +7704,7 @@ app.post('/api/whatsapp/send-image', async (req, res) => {
       }
     }
 
-    await closingAgent.pause(db.collection('leads').doc(String(leadId)));
+    await pauseSalesAutomation(db.collection('leads').doc(String(leadId)));
     const result = await sendImageToLead(String(leadId), String(imageUrl), String(caption || ''));
     return res.json(result);
   } catch (error) {
@@ -7749,7 +7753,7 @@ app.post('/api/whatsapp/send-media-url', async (req, res) => {
       }
     }
 
-    await closingAgent.pause(db.collection('leads').doc(safeLeadId));
+    await pauseSalesAutomation(db.collection('leads').doc(safeLeadId));
     const result = await sendMediaUrlToLead(safeLeadId, {
       mediaType: safeMediaType,
       mediaUrl: safeMediaUrl,
@@ -7799,7 +7803,7 @@ app.post('/api/whatsapp/send-audio-url', async (req, res) => {
       }
     }
 
-    await closingAgent.pause(db.collection('leads').doc(String(leadId)));
+    await pauseSalesAutomation(db.collection('leads').doc(String(leadId)));
     const boolFromRequest = (value, fallback = false) => {
       if (typeof value === 'boolean') return value;
       if (typeof value === 'number') return value !== 0;
@@ -7989,7 +7993,7 @@ app.post(
       return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
     };
 
-    if (leadId) await closingAgent.pause(db.collection('leads').doc(String(leadId)));
+    if (leadId) await pauseSalesAutomation(db.collection('leads').doc(String(leadId)));
     let target = phone;
     const isPttExplicit = ptt !== undefined && ptt !== null && ptt !== '';
     const shouldPtt = parseBool(ptt, true);
@@ -10410,6 +10414,7 @@ cron.schedule('*/30 * * * * *', () => {
 });
 
 cron.schedule('* * * * *', () => {
+  welcomeRecovery.tick().catch(err => console.warn('[welcome-recovery]', err.message));
   closingAgent.tick().catch(err => console.warn('[closing-agent]', err.message));
   closingFulfillment.tick().catch(err => console.warn('[closing-fulfillment]', err.message));
   sampleConversationAgent.resume().catch((err) => console.warn('[sample-agent] recuperación:', err?.message || err));

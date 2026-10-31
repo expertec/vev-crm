@@ -839,3 +839,18 @@ test('reutiliza el análisis visual si llega otra foto antes de terminar la resp
   assert.equal(s.replies.length, 1); assert.equal(s.jobs.length, 0);
   assert.equal((await s.leadRef.get()).data().sampleAgent.brief.images.length, 2);
 });
+
+
+test('bienvenida notifica al recuperador una sola vez y cada entrada ofrece cancelación transaccional', async () => {
+ const welcomes = [], inbound = [];
+ const s = setup(async () => ({ brief: normalizeConversationBrief({}), action: 'ask', reply: '¿Cómo se llama tu negocio?', audioMoment: 'welcome' }), undefined, {
+   loadAudioOptions: async () => [{ moment:'welcome', script:'Hola, dime cómo se llama tu negocio y a qué te dedicas.' }],
+   sendFlowAudio: async () => true,
+   onWelcomeSent: async info => welcomes.push(info),
+   onInbound: async (ref, current, tx) => inbound.push({ id:ref.id, current, hasTransaction:typeof tx.update === 'function' }),
+ });
+ await s.receive('Hola, tengo un negocio y quiero información sobre la página web de $990 al año.', 'welcome-recovery');
+ assert.equal(welcomes.length,1); assert.equal(welcomes[0].version,'v1'); assert.equal(welcomes[0].revision,1); assert.equal(welcomes[0].textAlreadySent,false);
+ assert.equal(inbound.length,1); assert.equal(inbound[0].hasTransaction,true);
+ await s.agent.resume(); assert.equal(welcomes.length,1);
+});

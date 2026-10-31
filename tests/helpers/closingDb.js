@@ -10,7 +10,7 @@ export function closingDb(seed = {}) {
   const doc = path => ({ id: path.split('/').at(-1), path, get: async () => snap(rows, path), update: async data => patch(rows, path, data), set: async (data, opts) => opts?.merge ? patch(rows, path, data) : rows.set(path, structuredClone(data)), delete: async () => rows.delete(path) });
   const collection = (name, constraints = [], max = Infinity, order) => {
     const q = { doc: id => doc(`${name}/${id}`), where: (field, op, target) => collection(name, [...constraints, [field, op, target]], max, order), orderBy: field => collection(name, constraints, max, field), limit: limit => collection(name, constraints, limit, order), get: async () => {
-      let result = [...rows].filter(([path]) => path.startsWith(`${name}/`) && path.split('/').length === 2).filter(([,row]) => constraints.every(([f,op,target]) => op === '<=' ? value(row,f) <= target : value(row,f) === target));
+      let result = [...rows].filter(([path]) => path.startsWith(`${name}/`) && path.split('/').length === 2).filter(([,row]) => constraints.every(([f,op,target]) => op === '<=' ? value(row,f) <= target : op === '>=' ? value(row,f) >= target : value(row,f) === target));
       if (order) result.sort((a,b) => value(a[1],order)-value(b[1],order));
       return { docs: result.slice(0,max).map(([path])=>snap(rows,path)) };
     } }; return q;

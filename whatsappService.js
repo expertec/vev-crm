@@ -1903,7 +1903,7 @@ export async function connectToWhatsApp() {
 
           // Mensajes propios (fromMe)
           if (sender === 'business') {
-            if (closingConversationHandler && existingLeadData?.closing?.state === 'active') {
+            if (closingConversationHandler && (existingLeadData?.closing?.state === 'active' || existingLeadData?.welcomeRecovery?.state === 'active')) {
               const id = messageDocIdFromWaId(msg?.key?.id);
               const known = id ? (await leadRef.collection('messages').doc(id).get()).exists : false;
               if (!known && !closingConversationHandler.isSending?.(leadRef.id)) await closingConversationHandler.pause(leadRef);

@@ -6,7 +6,7 @@ import { closingDb } from './helpers/closingDb.js';
 function setup() {
  const h=closingDb({'leads/a':{nombre:'Ana'}}), routes=new Map();
  const app=Object.fromEntries(['get','post'].map(method=>[method,(path,...handlers)=>routes.set(`${method} ${path}`,handlers)]));
- registerClosingRoutes(app,{db:h.db,bucket:{},store:createClosingConfigStore(h.db),agent:{pause:async()=>{},resume:async()=>{}},readUser:async req=>req.user});
+ registerClosingRoutes(app,{db:h.db,bucket:{},store:createClosingConfigStore(h.db),welcomeRecovery:{recoverRecent:async()=>({scheduled:1,checked:2})},agent:{pause:async()=>{},resume:async()=>{}},readUser:async req=>req.user});
  return {call:async(method,path,user,body={},params={})=>{
   const handlers=routes.get(`${method} ${path}`),req={user,body,params},res={code:200,status(code){this.code=code;return this;},json(body){this.body=body;return this;}};
   let pending;await handlers[0](req,res,()=>{pending=handlers[1](req,res);});await pending;return res;
@@ -20,4 +20,11 @@ test('configuración y controles requieren administrador autenticado',async()=>{
  assert.equal((await h.call('post','/api/crm/closing/config',admin,{enabled:true})).code,400);
  const saved=await h.call('post','/api/crm/closing/config',admin,{enabled:false});assert.equal(saved.code,200);assert.equal(saved.body.config.ownerUid,'owner');
  assert.equal((await h.call('post','/api/crm/closing/contacts/:leadId',admin,{action:'pause'},{leadId:'a/b'})).code,400);
+});
+
+test('programar recuperación de bienvenidas exige permiso de administrador',async()=>{
+ const h=setup(),path='/api/crm/closing/welcome-recovery/recent';
+ assert.equal((await h.call('post',path,null)).code,401);
+ assert.equal((await h.call('post',path,{role:'salesAgent'})).code,403);
+ const result=await h.call('post',path,{role:'admin',uid:'owner'});assert.equal(result.code,200);assert.equal(result.body.scheduled,1);
 });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitizeClosingConfig, nextClosingTime, offerPlanId } from '../services/closingConfig.js';
-import { createClosingAgent, closingReply } from '../services/closingAgent.js';
+import { createClosingAgent, closingReply, closingOfferDeadline, conversationalClosingReply, interpretClosing } from '../services/closingAgent.js';
 import { createClosingFulfillment, addPlanYears } from '../services/closingFulfillment.js';
 import { closingDb } from './helpers/closingDb.js';
 const offer = { id: 'year', enabled: true, name: 'Emprendedor', totalCents: 99000, depositCents: 49500, plan: 'basic', years: 1, terms: 'Página y WhatsApp', domain: '.com', renewal: '$990 anuales', delivery: '24 horas desde el anticipo', balanceDue: 'a la entrega' };
@@ -10,7 +10,7 @@ function fixture(overrides = {}) {
   const h=closingDb({ 'leads/a': { nombre:'Ana Lopez', telefono:'528112345678', sampleAgent: { enabled:true }, email:'ana@example.com' } });
   let clock=Date.parse('2026-10-31T16:00:00Z'), cfg=config();
   const sends=[],payments=[],assets=[];
-  const agent=createClosingAgent({ db:h.db, store:{ get:async()=>cfg }, bucket:{file:path=>({getSignedUrl:async()=>['https://storage.example/'+path]})}, send:async(...args)=>sends.push(args), sendImage:async(...args)=>assets.push(args), sendAudio:async(...args)=>assets.push(args), cancelSequences:async()=>{}, preparePayment:async(id,body)=>{payments.push(body);return {requestId:'pay'};}, sendPayment:async(...args)=>sends.push(args), now:()=>clock, interpret:async()=>({action:'payment',method:'card',email:'',customerName:'',resumeAt:''}), ...overrides });
+  const agent=createClosingAgent({ db:h.db, store:{ get:async()=>cfg }, bucket:{file:path=>({getSignedUrl:async()=>['https://storage.example/'+path]})}, send:async(...args)=>sends.push(args), sendImage:async(...args)=>assets.push(args), sendAudio:async(...args)=>assets.push(args), cancelSequences:async()=>{}, preparePayment:async(id,body)=>{payments.push(body);return {requestId:'pay'};}, sendPayment:async(...args)=>sends.push(args), now:()=>clock, loadRecent:async()=>[], interpret:async()=>({action:'payment',method:'card',email:'',customerName:'',resumeAt:''}), ...overrides });
   return {...h,agent,sends,payments,assets,ref:h.db.collection('leads').doc('a'),advance:ms=>{clock+=ms;},setConfig:c=>{cfg=c;}};
 }
 test('ofertas validan anticipo, vigencia, archivos y configuración incompleta',()=>{
@@ -73,4 +73,75 @@ test('la intervención durante la interpretación impide enviar una respuesta ob
  let resolve;const interpreted=new Promise(r=>{resolve=r;});
  const h=fixture({interpret:()=>interpreted});await h.agent.start(h.ref);await h.agent.receive({leadRef:h.ref,message:{content:'Quiero pagar'},messageId:'m3'});h.advance(9000);
  const ticking=h.agent.tick();await new Promise(r=>setTimeout(r,10));await h.agent.pause(h.ref);resolve({action:'payment',method:'card',email:'',customerName:'',resumeAt:''});await ticking;assert.equal(h.sends.length,0);assert.equal(h.payments.length,0);
+});
+
+
+test('activación manual retoma la última pregunta sin requerir otra apertura y conserva la oferta al reanudar', async()=>{
+ const h=fixture({loadRecent:async()=>[{id:'old',sender:'business',content:'Te envié la muestra'}, {id:'new',sender:'lead',content:'Quiero pagar con tarjeta'}]});
+ assert.equal(await h.agent.start(h.ref,{manual:true,offerId:'year'}),true);
+ assert.equal(h.read('leads/a').closing.inbox[0].id,'new');
+ assert.equal(h.read('leads/a').closing.history[0].text,'Te envié la muestra');
+ h.advance(61000);await h.agent.tick();assert.equal(h.payments.length,1);
+ await h.agent.pause(h.ref);const revision=h.read('leads/a').closing.offer.revision;await h.agent.resume(h.ref);
+ assert.equal(h.read('leads/a').closing.offer.revision,revision);
+ assert.equal(h.read('leads/a').closing.inbox.length,0);
+});
+test('activación manual rechaza módulo apagado, promociones inválidas, compradores y contactos detenidos',async()=>{
+ const h=fixture();h.setConfig({...config(),enabled:false});await assert.rejects(h.agent.start(h.ref,{manual:true}),/Activa/);
+ h.setConfig(config());await assert.rejects(h.agent.start(h.ref,{manual:true,offerId:'fake'}),/promoción/);
+ await h.ref.update({estado:'compro'});await assert.rejects(h.agent.start(h.ref,{manual:true}),/ya tiene cierre|comprador/);
+ await h.ref.update({estado:'nuevo',stopSequences:true});await assert.rejects(h.agent.start(h.ref,{manual:true}),/detenidos/);assert.equal(h.sends.length,0);
+});
+
+
+test('responde al cliente ocupado y recuerda una sola vez el vencimiento real de mañana', async()=>{
+ const h=fixture({loadRecent:async()=>[{id:'busy',sender:'lead',content:'Estoy trabajando ahorita. Ya la revisé, te aviso cuando la cheque bien'}],interpret:async()=>({action:'wait',method:'',customerName:'',email:'',resumeAt:''})});
+ h.setConfig(sanitizeClosingConfig({enabled:true,defaultOfferId:'year',startHour:0,endHour:24,offers:[{...offer,endsAt:'2026-11-02T05:59:00Z'}]}));
+ await h.agent.start(h.ref);h.advance(9000);await h.agent.tick();
+ assert.equal(h.sends.length,1);assert.match(h.sends[0][1],/revísala con calma/);assert.match(h.sends[0][1],/vence mañana/);assert.doesNotMatch(h.sends[0][1],/Cómo viste|Prefieres|Qué día/);
+ await h.agent.receive({leadRef:h.ref,message:{content:'ahorita no puedo'},messageId:'busy2'});h.advance(9000);await h.agent.tick();
+ assert.equal(h.sends.length,2);assert.doesNotMatch(h.sends[1][1],/vence mañana/);assert.equal(h.payments.length,0);
+});
+test('no inventa vigencia ni utiliza mañana para promociones lejanas',()=>{
+ const at=Date.parse('2026-10-31T21:00:00Z');
+ assert.equal(closingOfferDeadline(offer,'America/Monterrey',at),'');
+ assert.equal(closingOfferDeadline({...offer,endsAt:'2026-11-20T05:59:00Z'},'America/Monterrey',at),'');
+ assert.match(closingOfferDeadline({...offer,endsAt:'2026-11-02T05:59:00Z'},'America/Monterrey',at),/vence mañana/);
+});
+
+
+test('respuesta conversacional atiende la objeción y usa importes oficiales mediante marcadores',()=>{
+ const reply=conversationalClosingReply({action:'other',reply:'Para tu taller, puedes compartir tus trabajos con quienes te pidan cotización. Comenzamos con {{anticipo}} y quedan {{saldo}} {{saldoCuando}}. ¿Te gustaría continuar?'},offer,['card']);
+ assert.match(reply,/Para tu taller/);assert.match(reply,/495/);assert.doesNotMatch(reply,/Cómo viste|{{/);
+ assert.match(conversationalClosingReply({action:'other',reply:'Te lo dejo a $100'},offer,['card']),/Cómo viste/);
+ assert.match(conversationalClosingReply({action:'discount',reply:'Te hago un descuento'},offer,['card']),/promoción vigente/);
+ assert.match(conversationalClosingReply({action:'changes',reply:'Ya cambié tu muestra'},offer,['card']),/una vez confirmado/);
+});
+test('el contrato conversacional recibe negocio, historial y audios para redactar una respuesta',async()=>{
+ let body;
+ const turn=await interpretClosing({messages:[{role:'customer',text:'Quiero que me lleguen cotizaciones'}],offer,state:'',business:{activity:'Herrería'},methods:['card'],audioOptions:[{moment:'offer',script:'Explicación aprobada'}],request:async(resource,payload)=>{body=payload;return {output_text:JSON.stringify({action:'other',reply:'Podemos presentar tus trabajos para compartirlos con tus prospectos. ¿Cómo les muestras tus servicios hoy?',audioMoment:'none',method:'',customerName:'',email:'',resumeAt:''})};}});
+ assert.equal(turn.audioMoment,'none');assert.match(turn.reply,/prospectos/);
+ const input=JSON.parse(body.input);assert.equal(input.business.activity,'Herrería');assert.deepEqual(input.methods,['card']);assert.equal(input.audioOptions[0].moment,'offer');assert.ok(body.text.format.schema.required.includes('reply'));
+});
+test('seguimiento usa la última duda y nunca genera cobros por mensajes históricos',async()=>{
+ const h=fixture({interpret:async()=>({action:'payment',reply:'Retomo tu duda sobre cómo compartir tus trabajos con empresas. ¿Qué necesitas aclarar antes de continuar?',audioMoment:'none',method:'card',email:'',customerName:'',resumeAt:''})});
+ await h.agent.start(h.ref);h.advance(16*60000);await h.agent.tick();assert.equal(h.payments.length,0);assert.equal(h.sends.length,1);assert.match(h.sends[0][1],/compartir tus trabajos/);assert.doesNotMatch(h.sends[0][1],/Cómo viste/);
+});
+
+
+test('promesas quedan separadas de compras y el segundo aplazamiento llega con contexto al agente',async()=>{
+ const seen=[];
+ const h=fixture({interpret:async input=>{seen.push(input);return {action:'promise',reply:'De acuerdo, para comenzar el anticipo es {{anticipo}}. ¿En qué horario te queda bien?',audioMoment:'none',method:'',customerName:'',email:'',resumeAt:'',objection:'unknown'};}});
+ await h.agent.start(h.ref);
+ await h.agent.receive({leadRef:h.ref,message:{content:'mañana deposito'},messageId:'p1'});h.advance(9000);await h.agent.tick();
+ assert.equal(h.read('leads/a').closing.stage,'payment_promised');assert.equal(h.read('leads/a').closing.promiseCount,1);assert.equal(h.read('leads/a').closing.state,'active');assert.equal(h.payments.length,0);
+ await h.agent.receive({leadRef:h.ref,message:{content:'no pude, mañana sin falta'},messageId:'p2'});h.advance(9000);await h.agent.tick();
+ assert.equal(seen[1].state.promiseCount,1);assert.equal(h.read('leads/a').closing.promiseCount,2);assert.equal(h.read('leads/a').closing.lastObjection,'unknown');assert.equal(h.read('PlanDepositRequests/a'),undefined);
+});
+test('si el cliente ya compró por otro flujo, el cierre se detiene antes de enviar más mensajes',async()=>{
+ const h=fixture();await h.agent.start(h.ref);await h.ref.update({estado:'compro'});h.advance(16*60000);await h.agent.tick();assert.equal(h.sends.length,0);assert.equal(h.read('leads/a').closing.state,'paid');assert.equal(h.read('ClosingJobs/a'),undefined);
+});
+test('conserva método elegido después de enviar una referencia y evita regenerarla ante otra aprobación',async()=>{
+ const h=fixture({interpret:async()=>({action:'approve',reply:'Perfecto, queda pendiente el anticipo de {{anticipo}}.',method:'',audioMoment:'none',customerName:'',email:'',resumeAt:''})});await h.agent.start(h.ref);await h.ref.update({'closing.stage':'awaiting_payment','closing.method':'oxxo'});
+ await h.agent.receive({leadRef:h.ref,message:{content:'sí me interesa'},messageId:'approved'});h.advance(9000);await h.agent.tick();assert.equal(h.payments.length,0);assert.equal(h.read('leads/a').closing.method,'oxxo');
 });

@@ -202,7 +202,7 @@ export function createSampleConversationContextLoader({ transcribe }) {
 }
 
 // Durable inbox + lease. Persist first, then answer one quiet batch rather than each fragment.
-export function createSampleConversationAgent({ db, send, generate, extract = extractConversationBrief, interpretApproval = interpretSampleApproval, transcribe, sendFlowAudio, sendPackage, loadAudioOptions = async () => [], loadConversationContext = async () => [], loadSalesKnowledge = async () => SAMPLE_CAMPAIGN_OFFER, debounceMs = 4000, imageDebounceMs = debounceMs ? Math.max(debounceMs, 8000) : 0, now = Date.now, logger = console }) {
+export function createSampleConversationAgent({ db, send, generate, extract = extractConversationBrief, interpretApproval = interpretSampleApproval, transcribe, sendFlowAudio, sendPackage, onWelcomeSent = async () => {}, onInbound = async () => {}, loadAudioOptions = async () => [], loadConversationContext = async () => [], loadSalesKnowledge = async () => SAMPLE_CAMPAIGN_OFFER, debounceMs = 4000, imageDebounceMs = debounceMs ? Math.max(debounceMs, 8000) : 0, now = Date.now, logger = console }) {
   const timers = new Map();
   const millis = (value) => value?.toMillis?.() || (value ? new Date(value).getTime() : 0) || 0;
   const revision = (lead) => Number(lead.sampleAgent?.inboxRevision || 0);
@@ -453,6 +453,9 @@ export function createSampleConversationAgent({ db, send, generate, extract = ex
         for (const doc of docs) tx.update(doc.ref, { state: 'done' });
         if (revision(current) !== expectedRevision) rerun = true;
       });
+      if ((sentAudioMoment === 'welcome' || !agent.history?.length) && deliver && turn.action !== 'handoff') {
+        await onWelcomeSent({ leadRef, version: agent.version || '', revision: expectedRevision, textAlreadySent: !sentAudioMoment || Boolean(turn.audioIntro && turn.reply) }).catch(error => logger.warn('[sample-welcome-recovery]', error.message));
+      }
     } catch (error) {
       logger.warn('[sample-agent]', error.message);
       await leadRef.update({ 'sampleAgent.error': clean(error.message, 300), ...(error.code === 'insufficient_quota' ? { 'sampleAgent.enabled': false, 'sampleAgent.status': 'error' } : {}) });
@@ -474,6 +477,7 @@ export function createSampleConversationAgent({ db, send, generate, extract = ex
         const existing = await tx.get(ref);
         if (existing.exists) return false;
         const current = (await tx.get(leadRef)).data() || {};
+        await onInbound(leadRef, current, tx);
         tx.set(ref, { content: clean(message.content, 4000), mediaType: clean(message.mediaType, 20), mediaUrl: publicImageUrl(message.mediaUrl), receivedAt: new Date(now()), sequence: revision(current) + 1, state: 'pending' });
         tx.update(leadRef, { 'sampleAgent.inboxRevision': revision(current) + 1, 'sampleAgent.lastInboundAt': new Date(now()), 'sampleAgent.lastInboundMediaType': message.mediaType || 'text' });
         return true;

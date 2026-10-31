@@ -79,7 +79,7 @@ export async function buildReactivationPreview({ lead, messages, transcribe, ext
   return { brief, images, history: history.slice(-24), reply, status: missing ? 'collecting' : 'awaiting_confirmation', failedAudios, videoCount: Math.min(2, messages.filter((m) => m.sender === 'lead' && m.mediaType === 'video').length) };
 }
 
-export function registerSampleReactivationRoutes(app, { db, readUser, transcribe, send, cancelSequences = async () => {}, extract, generate, loadAudioOptions = async () => [], sendFlowAudio }) {
+export function registerSampleReactivationRoutes(app, { db, readUser, transcribe, send, cancelSequences = async () => {}, extract, generate, loadAudioOptions = async () => [], sendFlowAudio, onWelcomeSent = async () => {} }) {
   const route = (path, handler) => app.post(path, async (req, res) => {
     try {
       const user = await readUser(req);
@@ -180,6 +180,7 @@ export function registerSampleReactivationRoutes(app, { db, readUser, transcribe
         tx.update(draftRef, { state: 'sent', sentAt: new Date() });
         if (current.sampleAgent?.version === owner) tx.update(ref, { 'sampleAgent.history': [...preview.history, { role: 'assistant', text: reply }].slice(-24), ...(generation ? { 'sampleAgent.status': generation.ready ? 'completed' : 'generating', 'sampleAgent.enabled': !generation.ready, 'sampleAgent.confirmationHash': '', 'sampleAgent.negocioId': generation.negocioId } : {}), ...(welcomeAudio ? { 'sampleAgent.audioMomentsSent': [...new Set([...(current.sampleAgent.audioMomentsSent || []), 'welcome'])] } : {}), 'sampleAgent.updatedAt': new Date(), 'sampleAgent.leaseOwner': '', 'sampleAgent.leaseUntil': new Date(0), 'sampleAgent.reactivationId': draftRef.id });
       });
+      if (welcomeAudio) await onWelcomeSent({ leadRef: ref, version: owner, revision: lead.sampleAgent?.inboxRevision || 0, textAlreadySent: false }).catch(e => console.warn('[welcome-recovery]', e.message));
       return { success: true, welcomeAudio, generated: Boolean(generation), sampleAgent: (await ref.get()).data()?.sampleAgent };
     } catch (err) {
       await db.runTransaction(async (tx) => {
