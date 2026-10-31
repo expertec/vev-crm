@@ -61,6 +61,8 @@ let manualLogoutRequested = false;
 let manualLogoutSuppressReconnectUntil = 0;
 let whatsappLeadConversionTracker = null;
 let sampleConversationHandler = null;
+let closingConversationHandler = null;
+export function setClosingConversationHandler(handler) { closingConversationHandler = handler; }
 let sampleCampaignActivator = null;
 
 export function setSampleConversationHandler(handler, { activate } = {}) {
@@ -1901,6 +1903,11 @@ export async function connectToWhatsApp() {
 
           // Mensajes propios (fromMe)
           if (sender === 'business') {
+            if (closingConversationHandler && existingLeadData?.closing?.state === 'active') {
+              const id = messageDocIdFromWaId(msg?.key?.id);
+              const known = id ? (await leadRef.collection('messages').doc(id).get()).exists : false;
+              if (!known && !closingConversationHandler.isSending?.(leadRef.id)) await closingConversationHandler.pause(leadRef);
+            }
             const tsNow = now();
             const msgData = {
               ...parsedMsgData,
@@ -2091,6 +2098,14 @@ export async function connectToWhatsApp() {
             continue;
           }
 
+          // Closing owns post-sample conversations, including paused/paid contacts.
+          if (closingConversationHandler && existingLeadData?.closing) {
+            const msgData = { ...parsedMsgData, sender, timestamp: now() };
+            const messageId = await persistLeadMessage(leadRef, msgData, msg?.key?.id || null);
+            await leadRef.update(buildLeadLastMessagePatch(msgData, { incrementUnread: true }));
+            await closingConversationHandler.receive({ leadRef, message: msgData, messageId });
+            continue;
+          }
           // Mensajes de leads
           if (sampleConversationHandler && existingLeadData?.sampleAgent?.enabled === true) {
             const msgData = { ...parsedMsgData, sender, timestamp: now() };

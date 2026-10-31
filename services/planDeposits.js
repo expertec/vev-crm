@@ -5,6 +5,9 @@ const text = (value, max = 200) => String(value || '').trim().slice(0, max);
 const millis = value => value?.toMillis?.() || new Date(value || 0).getTime();
 const key = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const money = cents => (cents / 100).toLocaleString('es-MX', { style: 'currency', currency: 'MXN' });
+let paidHandler = null;
+export function configurePlanDepositFulfillment(handler) { paidHandler = handler; }
+
 const refFor = (db, id) => db.collection('PlanDepositRequests').doc(id);
 
 export function depositAmountCents(value, totalCents, method) {
@@ -34,7 +37,9 @@ export function depositMessage(record, instructions, { voucherImage = false } = 
   const lines = [`Hola ${firstName} 👋`, `Te comparto los datos para iniciar tu *${record.planName}* ✨`, '',
     `💰 ${amountLabel}: ${money(instructions.remainingCents ?? record.amountCents)} MXN`,
     `📌 Saldo después del anticipo: ${money(record.totalCents - record.amountCents)} MXN`, ''];
-  if (record.method === 'oxxo') {
+  if (record.method === 'card') {
+    lines.push('💳 Pago con tarjeta de crédito o débito', instructions.url, '', 'Stripe procesa tu pago. Te avisamos cuando se confirme.');
+  } else if (record.method === 'oxxo') {
     lines.push('🏪 Pago en OXXO', `Referencia: ${instructions.number}`);
     if (instructions.expiresAt) lines.push(`⏳ Vence: ${new Date(instructions.expiresAt).toLocaleString('es-MX', { timeZone: 'America/Mexico_City' })}`);
     lines.push(voucherImage ? '🎟️ Muestra esta ficha en caja para pagar.' : `🎟️ Ficha y código de barras: ${instructions.url}`, '', '✅ Te avisamos cuando se confirme el pago; en OXXO puede tardar hasta el siguiente día hábil.');
@@ -85,43 +90,48 @@ export async function handlePlanDepositEvent(db, event) {
       status: pendingAmount > 0 ? 'en_proceso' : 'pagado', lastPaymentAt: now, createdAt: service?.createdAt || now, updatedAt: now, createdBy: record.createdBy,
     });
     tx.set(incomeRef, { type: 'income', category: 'anticipo', amount: received, currency: 'MXN',
-      paymentMethod: record.method === 'oxxo' ? 'stripe_oxxo' : 'stripe_spei', reference: intent.id,
+      paymentMethod: record.method === 'card' ? 'stripe_card' : record.method === 'oxxo' ? 'stripe_oxxo' : 'stripe_spei', reference: intent.id,
       serviceId: serviceRef.id, serviceName: record.planName, clientName: record.customerName, leadId: record.leadId,
       leadPhone: record.phone, negocioId: record.negocioId || '', isAdvance: true, occurredAt: now, createdAt: now, updatedAt: now, createdBy: record.createdBy });
     tx.update(ref, { status: 'paid', paymentIntentId: intent.id, amountReceivedCents: intent.amount_received, paidAt: now, updatedAt: now });
     if (lead) tx.update(leadRef, { planDeposit: { requestId: id, serviceId: serviceRef.id, planId: record.planId, planName: record.planName, paidAmount, pendingAmount, status: 'paid', updatedAt: now } });
-    // Subscription/plan activation is intentionally separate from an advance payment.
+    // Paid closing offers are fulfilled separately through the durable delivery queue.
   });
+  if (status === 'paid' && paidHandler) {
+    const record = (await refFor(db, id).get()).data();
+    if (record?.status === 'paid' && record.closingOffer) await paidHandler(id, record);
+  }
   return true;
 }
 
 export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess, loadPlans, resolveBusiness, send, paymentsReady = true, renderVoucher, renderSpei, sendImage }) {
+  const handlers = new Map(), internalRequests = new WeakSet();
   const contact = async (req, id) => {
-    const user = await readUser(req);
+    const user = internalRequests.has(req) ? { uid: 'closing-agent', role: 'admin' } : await readUser(req);
     if (!user) throw fail('Inicia sesión para solicitar anticipos.', 401);
     if (typeof id !== 'string' || !id || id.includes('/') || id.length > 200) throw fail('Selecciona un contacto válido.');
     const ref = db.collection('leads').doc(id), snapshot = await ref.get();
     if (!snapshot.exists) throw fail('Contacto no encontrado.', 404);
     const lead = snapshot.data();
-    if (!canAccess(user, lead)) throw fail('No tienes acceso a este contacto.', 403);
+    if (!internalRequests.has(req) && !canAccess(user, lead)) throw fail('No tienes acceso a este contacto.', 403);
     return { user, ref, lead };
   };
-  const route = (method, path, handler) => app[method](`/api/crm/plan-deposits/${path}`, async (req, res) => {
+  const route = (method, path, handler) => { handlers.set(path, handler); app[method](`/api/crm/plan-deposits/${path}`, async (req, res) => {
     res.set?.('Cache-Control', 'no-store');
     try { return res.json(await handler(req)); }
     catch (error) { return res.status(error.status || (error.type?.startsWith('Stripe') ? 502 : 500)).json({ error: error.message || 'No se pudo procesar el anticipo.' }); }
-  });
+  }); };
   route('get', 'plans', async req => {
     const { lead } = await contact(req, req.query?.leadId);
-    return { plans: await loadPlans(), customerName: lead.nombre || '', email: lead.email || lead.contactEmail || '' };
+    return { plans: await loadPlans(lead), customerName: lead.nombre || '', email: lead.email || lead.contactEmail || '' };
   });
   route('post', 'prepare', async req => {
     const body = req.body || {}, { user, ref: leadRef, lead } = await contact(req, body.leadId);
     if (!paymentsReady) throw fail('Configura STRIPE_WEBHOOK_SECRET antes de solicitar anticipos.', 503);
-    const plan = (await loadPlans()).find(item => item.id === body.planId);
+    const plan = (await loadPlans(lead)).find(item => item.id === body.planId);
     if (!plan || !Number.isSafeInteger(plan.totalCents) || plan.totalCents <= 0) throw fail('Selecciona un plan vigente del catálogo.');
     const method = body.method;
-    if (!['spei', 'oxxo'].includes(method)) throw fail('Selecciona SPEI u OXXO.');
+    if (!['spei', 'oxxo', 'card'].includes(method)) throw fail('Selecciona tarjeta, SPEI u OXXO.');
     const amountCents = depositAmountCents(body.amount, plan.totalCents, method);
     const customerName = text(body.customerName || lead.nombre, 160), email = text(body.email || lead.email || lead.contactEmail, 200).toLowerCase();
     if (!customerName) throw fail('Escribe el nombre del cliente.');
@@ -136,12 +146,40 @@ export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess
       if (millis(existing?.lockUntil) > Date.now()) throw fail('La referencia se está generando. Espera unos segundos y vuelve a intentar.', 409);
       const next = { ...existing, leadId: leadRef.id, negocioId, phone: String(lead.telefono || '').replace(/\D/g, ''),
         planId: plan.id, planName: plan.name, totalCents: plan.totalCents, amountCents, method, customerName, email,
+        ...(plan.closingOffer ? { closingOffer: plan.closingOffer } : {}),
         serviceId: `stripe_plan_${key([leadRef.id, plan.id, plan.totalCents])}`, createdBy: existing?.createdBy || user.uid,
         attempt: existing?.attempt || 1, status: existing?.status || 'creating', createdAt: existing?.createdAt || new Date(),
         owner, lockUntil: new Date(Date.now() + 60000), updatedAt: new Date() };
       tx.set(ref, next); return next;
     });
     try {
+      if (method === 'card') {
+        let session = record.checkoutSessionId ? await stripe.checkout.sessions.retrieve(record.checkoutSessionId) : null;
+        if (session?.payment_intent) {
+          const intent = await stripe.paymentIntents.retrieve(typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent.id);
+          if (intent.status === 'succeeded') { await handlePlanDepositEvent(db, { type: 'payment_intent.succeeded', data: { object: intent } }); throw fail('Este anticipo ya está pagado.', 409); }
+        }
+        if (session?.status === 'complete') throw fail('El cobro ya fue enviado a Stripe. Espera la confirmación.', 409);
+        if (session && (session.status === 'expired' || session.expires_at * 1000 <= Date.now())) {
+          record.attempt += 1;
+          await ref.update({ attempt: record.attempt, checkoutSessionId: '', paymentIntentId: '' });
+          session = null;
+        }
+        if (!session) {
+          const metadata = { paymentType: 'plan_deposit', depositId: id, leadId: leadRef.id, planId: plan.id, attempt: String(record.attempt) };
+          const site = (process.env.CLIENT_URL || 'https://negociosweb.mx').replace(/\/+$/, '');
+          session = await stripe.checkout.sessions.create({ mode: 'payment', payment_method_types: ['card'],
+            ...(email ? { customer_email: email } : {}), client_reference_id: id,
+            line_items: [{ price_data: { currency: 'mxn', unit_amount: amountCents, product_data: { name: `Anticipo de ${plan.name}`.slice(0, 250) } }, quantity: 1 }],
+            metadata, payment_intent_data: { metadata }, success_url: `${site}/cliente-login`, cancel_url: `${site}/precios`,
+          }, { idempotencyKey: `deposit-card-${id}-${record.attempt}` });
+          await ref.update({ checkoutSessionId: session.id });
+        }
+        if (!session.url) throw fail('Stripe no devolvió el enlace de pago.', 502);
+        const instructions = { url: session.url, expiresAt: new Date(session.expires_at * 1000).toISOString() }, message = depositMessage(record, instructions);
+        await db.runTransaction(async tx => { const current = (await tx.get(ref)).data(); if (current.owner !== owner) throw fail('La solicitud cambió.', 409); tx.update(ref, { instructions, message, status: current.status === 'paid' ? 'paid' : 'pending', updatedAt: new Date() }); });
+        return { requestId: id, message, instructions, planName: plan.name, amount: amountCents / 100, total: plan.totalCents / 100, remaining: (plan.totalCents - amountCents) / 100 };
+      }
       let intent = record.paymentIntentId ? await stripe.paymentIntents.retrieve(record.paymentIntentId) : null;
       if (intent?.status === 'succeeded') {
         await handlePlanDepositEvent(db, { type: 'payment_intent.succeeded', data: { object: intent } });
@@ -203,6 +241,13 @@ export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess
     });
     if (!record) return { success: true, duplicate: true };
     try {
+      if (record.method === 'card') {
+        const session = await stripe.checkout.sessions.retrieve(record.checkoutSessionId);
+        if (session.status !== 'open' || session.payment_status === 'paid' || session.expires_at * 1000 <= Date.now() || !session.url) throw fail('El enlace ya no está disponible. Consulta el cobro.', 409);
+        await send(leadId, depositMessage(record, { url: session.url }));
+        await ref.update({ sentAt: new Date(), imageSent: false });
+        return { success: true, imageSent: false };
+      }
       const intent = await stripe.paymentIntents.retrieve(record.paymentIntentId);
       if (intent.status !== 'requires_action') throw fail('El estado del cobro cambió. Genera o consulta la referencia nuevamente.', 409);
       const instructions = instructionsFor(intent, record);
@@ -222,4 +267,7 @@ export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess
       await db.runTransaction(async tx => { const current = (await tx.get(ref)).data(); if (current?.sendOwner === owner) tx.update(ref, { sendLockUntil: new Date(0) }); });
     }
   });
+  const internal = async (path, body) => { const req = { body }; internalRequests.add(req); return handlers.get(path)(req); };
+  return { prepare: (leadId, body) => internal('prepare', { ...body, leadId }), send: (leadId, requestId) => internal('send', { leadId, requestId }) };
+
 }

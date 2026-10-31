@@ -8,6 +8,7 @@ function harness(extra = {}) {
     ['leads/b', { nombre: 'Otro Cliente', assignedTo: 'other' }],
     ['Negocios/shop', { leadId: 'a', plan: 'sin_plan' }],
   ]);
+  const sessions = new Map();
   const routes = new Map(), intents = new Map(), customers = new Map(), sends = [], creates = [], cancels = [];
   const apply = (map, path, patch) => { map.set(path, { ...map.get(path), ...structuredClone(patch) }); };
   const snapshot = (map, path) => ({ exists: map.has(path), data: () => structuredClone(map.get(path)) });
@@ -21,6 +22,15 @@ function harness(extra = {}) {
     }); chain = next.catch(() => {}); return next;
   } };
   const stripe = {
+    checkout: { sessions: {
+      retrieve: async id => structuredClone(sessions.get(id)),
+      create: async (data, options) => {
+        const previous = [...sessions.values()].find(s => s.key === options.idempotencyKey);
+        if (previous) return structuredClone(previous);
+        const session = { ...data, id: `cs_${sessions.size + 1}`, key: options.idempotencyKey, status: 'open', payment_status: 'unpaid', url: 'https://checkout.stripe.com/card', expires_at: Math.floor(Date.now() / 1000) + 86400 };
+        sessions.set(session.id, session); return structuredClone(session);
+      },
+    } },
     customers: { create: async (data, options) => { if (!customers.has(options.idempotencyKey)) customers.set(options.idempotencyKey, { id: `cus_${customers.size + 1}`, ...data }); return customers.get(options.idempotencyKey); } },
     paymentIntents: {
       retrieve: async id => structuredClone(intents.get(id)),
@@ -48,7 +58,7 @@ function harness(extra = {}) {
   };
   const prepare = (extra = {}) => call('prepare', { leadId: 'a', planId: 'basic', method: 'spei', amount: '495.00', ...extra });
   const pay = async (id = 'pi_1') => { const intent = intents.get(id); intent.status = 'succeeded'; intent.amount_received = intent.amount; return handlePlanDepositEvent(db, { type: 'payment_intent.succeeded', data: { object: structuredClone(intent) } }); };
-  return { db, stripe, intents, creates, customers, sends, cancels, call, prepare, pay, read: path => rows.get(path), list: name => [...rows.entries()].filter(([path]) => path.startsWith(`${name}/`)) };
+  return { db, stripe, sessions, intents, creates, customers, sends, cancels, call, prepare, pay, read: path => rows.get(path), list: name => [...rows.entries()].filter(([path]) => path.startsWith(`${name}/`)) };
 }
 
 test('SPEI genera CLABE por el anticipo, reutiliza el cobro y no envía ni registra ingresos al preparar', async () => {
@@ -77,7 +87,7 @@ test('OXXO genera ficha y referencia con importe, vencimiento y datos reales del
 
 test('validación del anticipo, método, plan y permisos antes de llamar a Stripe', async () => {
   const h = harness();
-  for (const body of [{ amount: '-1' }, { amount: '990.01' }, { amount: '3' }, { amount: '4oops' }, { amount: '10.999' }, { amount: 'Infinity' }, { method: 'card' }, { planId: 'fake' }]) assert.equal((await h.prepare(body)).code, 400);
+  for (const body of [{ amount: '-1' }, { amount: '990.01' }, { amount: '3' }, { amount: '4oops' }, { amount: '10.999' }, { amount: 'Infinity' }, { method: 'unsupported' }, { planId: 'fake' }]) assert.equal((await h.prepare(body)).code, 400);
   assert.throws(() => depositAmountCents('10000.01', 2000000, 'oxxo'), /10,000/);
   assert.equal((await h.call('prepare', { leadId: 'a' }, null)).code, 401);
   assert.equal((await h.call('plans', { leadId: 'b' })).code, 403);
@@ -180,4 +190,32 @@ test('SPEI envía la plantilla con datos exactos y conserva la CLABE copiable en
   assert.equal(renders[0].instructions.clabe, '123456789012345678');
   assert.equal(images[0][1], 'https://storage.googleapis.com/private/spei.png');
   assert.match(images[0][2], /CLABE: 123456789012345678/); assert.doesNotMatch(images[0][2], /https?:/);
+});
+
+
+test('tarjeta reutiliza Checkout, envía un enlace y registra el anticipo solo al confirmarlo Stripe', async () => {
+  const h = harness(), first = (await h.prepare({ method: 'card' })).body;
+  assert.match(first.message, /Pago con tarjeta/); assert.equal(h.sessions.size, 1);
+  assert.equal((await h.prepare({ method: 'card' })).body.requestId, first.requestId); assert.equal(h.sessions.size, 1);
+  const session = h.sessions.get('cs_1');
+  assert.equal(session.line_items[0].price_data.unit_amount, 49500);
+  assert.deepEqual(session.payment_method_types, ['card']);
+  assert.equal((await h.call('send', { leadId: 'a', requestId: first.requestId })).code, 200);
+  assert.match(h.sends[0][1], /https:\/\/checkout.stripe.com/);
+  assert.equal(h.list('CrmFinanceTransactions').length, 0);
+  const intent = { id: 'pi_card', currency: 'mxn', amount: 49500, amount_received: 49500, status: 'succeeded', metadata: session.payment_intent_data.metadata };
+  h.intents.set(intent.id, intent); session.payment_intent = intent.id; session.status = 'complete'; session.payment_status = 'paid';
+  await handlePlanDepositEvent(h.db, { type: 'payment_intent.succeeded', data: { object: intent } });
+  await handlePlanDepositEvent(h.db, { type: 'payment_intent.succeeded', data: { object: intent } });
+  assert.equal(h.list('CrmFinanceTransactions').length, 1); assert.equal(h.list('CrmFinanceTransactions')[0][1].paymentMethod, 'stripe_card');
+  assert.equal(h.list('CrmFinanceServices')[0][1].pendingAmount, 495);
+  assert.equal((await h.prepare({ method: 'card' })).code, 409);
+});
+
+test('tarjeta vencida renueva el enlace; sesiones completadas no se vuelven a enviar', async () => {
+  const h = harness(), first = (await h.prepare({ method: 'card' })).body;
+  h.sessions.get('cs_1').status = 'expired';
+  await h.prepare({ method: 'card' }); assert.equal(h.sessions.size, 2);
+  h.sessions.get('cs_2').status = 'complete';
+  assert.equal((await h.call('send', { leadId: 'a', requestId: first.requestId })).code, 409); assert.equal(h.sends.length, 0);
 });
