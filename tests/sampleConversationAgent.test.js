@@ -755,3 +755,87 @@ test('un logo nuevo utilizable reemplaza al anterior sin forzar el uso del nombr
   assert.equal((await s.leadRef.get()).data().sampleAgent.brief.logoChoice, 'provided');
   assert.match(s.replies[0], /con tu logo y sus colores/);
 });
+
+
+test('guarda fotos extras sin IA, confirma todos los datos y genera con las tres originales', async () => {
+  let calls = 0;
+  const images = Array.from({ length: 3 }, (_, i) => ({ url: `https://storage.googleapis.com/test/product${i}.jpg`, visionReviewedUrl: `https://storage.googleapis.com/test/product${i}.jpg` }));
+  const brief = normalizeConversationBrief({ ...complete(), photosChoice: 'provided', images: images.map((_, index) => ({ index, role: 'product', description: 'Bocina disponible' })) }, images);
+  const s = setup(async () => { calls++; throw Error('No debe necesitar IA'); });
+  await s.leadRef.update({ 'sampleAgent.brief': brief, 'sampleAgent.images': images });
+  await s.receive('', 'extra-1', { mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/extra1.jpg' });
+  assert.match(s.replies[0], /Makiatto/);
+  assert.match(s.replies[0], /¿Confirmas/);
+  assert.equal(s.jobs.length, 0);
+  await s.receive('', 'extra-2', { mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/extra2.jpg' });
+  assert.match(s.replies.at(-1), /Ya tengo las tres fotos/);
+  const count = s.replies.length;
+  await s.receive('', 'extra-3', { mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/extra3.jpg' });
+  assert.equal(s.replies.length, count);
+  await s.receive('sí', 'approve-extras');
+  assert.equal(calls, 0);
+  assert.equal(s.jobs.length, 1);
+  assert.deepEqual(s.jobs[0].input.photoURLs, images.map(item => item.url));
+  assert.deepEqual(s.jobs[0].input.referenceImageURLs, []);
+  assert.equal(s.jobs[0].input.imageContext.length, 3);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.images.length, 6);
+});
+
+test('no vuelve a exigir un logo inexistente después de acordar usar el nombre del negocio', async () => {
+  const images = [{ url: 'https://storage.googleapis.com/test/blurry-logo.jpg' }];
+  const brief = normalizeConversationBrief({ ...complete(), logoChoice: 'provided', palette: ['#112233', '#ABCDEF', '#FFFFFF'], images: [{ index: 0, role: 'reference', description: 'Logo borroso y cortado; usar el nombre bien diseñado' }] }, images);
+  const s = setup(async ({ brief: current }) => {
+    assert.equal(current.logoChoice, 'none');
+    return { brief: { ...current, logoChoice: 'provided' }, action: 'ask', reply: '¿Puedes enviar el logo original?' };
+  });
+  await s.leadRef.update({ 'sampleAgent.brief': brief, 'sampleAgent.images': images, 'sampleAgent.history': [{ role: 'assistant', text: 'Seguiremos con el nombre de tu negocio y los colores de la marca.' }] });
+  await s.receive('Adelante con la muestra', 'fallback');
+  assert.equal((await s.leadRef.get()).data().sampleAgent.brief.logoChoice, 'none');
+  assert.doesNotMatch(s.replies.at(-1), /enviar el logo original/);
+  assert.match(s.replies.at(-1), /¿Confirmas/);
+  assert.equal(s.jobs.length, 0);
+});
+
+
+test('agrupa fotos consecutivas durante ocho segundos sin llamar IA por cada llegada', async () => {
+  let time = 1_792_690_000_000; let calls = 0;
+  const s = setup(async ({ images }) => {
+    calls++; assert.equal(images.length, 2);
+    return { brief: normalizeConversationBrief({ ...complete(), photosChoice: 'provided', images: images.map((_, index) => ({ index, role: 'work', description: 'Trabajo del negocio' })) }, images), action: 'confirm', reply: '' };
+  }, undefined, { debounceMs: 4000, now: () => time });
+  await s.receive('', 'batch-photo-1', { mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/work1.jpg' });
+  time += 4000; await s.agent.resume(); assert.equal(calls, 0);
+  await s.receive('', 'batch-photo-2', { mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/work2.jpg' });
+  time += 7999; await s.agent.resume(); assert.equal(calls, 0);
+  time += 1; await s.agent.resume();
+  assert.equal(calls, 1); assert.equal(s.replies.length, 1); assert.equal(s.jobs.length, 0);
+});
+
+test('reutiliza el análisis visual si llega otra foto antes de terminar la respuesta', async () => {
+  let time = 1_792_690_000_000; let release; let started; let calls = 0;
+  const waiting = new Promise(resolve => { started = resolve; });
+  const counts = [];
+  const s = setup(async args => extractConversationBrief(args, async (_resource, body) => {
+    counts.push(body.input[0].content.filter(item => item.type === 'input_image').length);
+    if (calls === 1) {
+      const notes = JSON.parse(body.input[0].content[0].text).message.previousVisualFacts;
+      assert.equal(notes.companyName, 'Makiatto');
+      assert.deepEqual(notes.offerings, complete().offerings);
+      assert.equal(notes.images, undefined);
+    }
+    if (++calls === 1) { started(); await new Promise(resolve => { release = resolve; }); }
+    const brief = normalizeConversationBrief({ ...complete(), photosChoice: 'provided', images: args.images.map((_, index) => ({ index, role: 'work', description: 'Trabajo del negocio' })) }, args.images);
+    return { status: 'completed', output_text: JSON.stringify({ brief, action: 'confirm', reply: '' }) };
+  }), undefined, { debounceMs: 4000, now: () => time });
+  await s.receive('', 'interrupted-photo-1', { mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/work1.jpg' });
+  time += 8000;
+  const processing = s.agent.resume(); await waiting;
+  time += 100;
+  await s.receive('', 'interrupted-photo-2', { mediaType: 'image', mediaUrl: 'https://storage.googleapis.com/test/work2.jpg' });
+  release(); await processing;
+  assert.equal(s.replies.length, 0);
+  time += 8000; await s.agent.resume();
+  assert.deepEqual(counts, [1, 1]);
+  assert.equal(s.replies.length, 1); assert.equal(s.jobs.length, 0);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.brief.images.length, 2);
+});

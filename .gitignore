@@ -14,3 +14,6 @@ serviceAccountKey*.json
 *serviceAccount*.json
 *-adminsdk-*.json
 bi-report.md
+
+# Browser downloaded during deployment
+/.cache/puppeteer/
