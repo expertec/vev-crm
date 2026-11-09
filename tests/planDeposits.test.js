@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import Stripe from 'stripe';
 import { registerPlanDepositRoutes, handlePlanDepositEvent, depositAmountCents } from '../services/planDeposits.js';
 
 function harness(extra = {}) {
@@ -9,7 +10,7 @@ function harness(extra = {}) {
     ['Negocios/shop', { leadId: 'a', plan: 'sin_plan' }],
   ]);
   const sessions = new Map();
-  const routes = new Map(), intents = new Map(), customers = new Map(), sends = [], creates = [], cancels = [];
+  const routes = new Map(), intents = new Map(), customers = new Map(), sends = [], creates = [], cancels = [], errors = [];
   const apply = (map, path, patch) => { map.set(path, { ...map.get(path), ...structuredClone(patch) }); };
   const snapshot = (map, path) => ({ exists: map.has(path), data: () => structuredClone(map.get(path)) });
   const doc = path => ({ id: path.split('/').at(-1), path, get: async () => snapshot(rows, path), update: async patch => apply(rows, path, patch), set: async data => rows.set(path, structuredClone(data)) });
@@ -49,7 +50,7 @@ function harness(extra = {}) {
   };
   registerPlanDepositRoutes({ get: (url, fn) => routes.set(`GET ${url.split('/').at(-1)}`, fn), post: (url, fn) => routes.set(`POST ${url.split('/').at(-1)}`, fn) }, {
     db, stripe, readUser: async req => req.user, canAccess: (user, lead) => user.role === 'admin' || lead.assignedTo === user.uid,
-    loadPlans: async () => [{ id: 'basic', name: 'Plan Web', totalCents: 99000 }], resolveBusiness: async () => 'shop', send: async (...args) => sends.push(args), ...extra,
+    loadPlans: async () => [{ id: 'basic', name: 'Plan Web', totalCents: 99000 }], resolveBusiness: async () => 'shop', send: async (...args) => sends.push(args), logger: { error: (...args) => errors.push(args) }, ...extra,
   });
   const user = { uid: 'seller', role: 'salesAgent' };
   const call = async (path, body = {}, as = user) => {
@@ -58,8 +59,41 @@ function harness(extra = {}) {
   };
   const prepare = (extra = {}) => call('prepare', { leadId: 'a', planId: 'basic', method: 'spei', amount: '495.00', ...extra });
   const pay = async (id = 'pi_1') => { const intent = intents.get(id); intent.status = 'succeeded'; intent.amount_received = intent.amount; return handlePlanDepositEvent(db, { type: 'payment_intent.succeeded', data: { object: structuredClone(intent) } }); };
-  return { db, stripe, sessions, intents, creates, customers, sends, cancels, call, prepare, pay, read: path => rows.get(path), list: name => [...rows.entries()].filter(([path]) => path.startsWith(`${name}/`)) };
+  return { db, stripe, sessions, intents, creates, customers, sends, cancels, errors, call, prepare, pay, read: path => rows.get(path), list: name => [...rows.entries()].filter(([path]) => path.startsWith(`${name}/`)) };
 }
+
+test('rechazos de Stripe conservan diagnóstico y liberan el bloqueo para volver a intentar OXXO', async () => {
+  const h = harness();
+  const create = h.stripe.paymentIntents.create;
+  const error = new Stripe.errors.StripeInvalidRequestError({ message: 'Invalid billing name',
+    code: 'parameter_invalid', param: 'payment_method_data[billing_details][name]', requestId: 'req_oxxo', statusCode: 400,
+    payment_intent: { client_secret: 'private_secret' }, headers: { authorization: 'private_key' } });
+  h.stripe.paymentIntents.create = async () => { throw error; };
+  const response = await h.prepare({ method: 'oxxo' });
+  assert.equal(response.code, 400);
+  assert.equal(response.body.error, 'Invalid billing name');
+  assert.deepEqual(response.body.details, { provider: 'stripe', type: 'StripeInvalidRequestError', code: 'parameter_invalid',
+    param: 'payment_method_data[billing_details][name]', requestId: 'req_oxxo', statusCode: 400 });
+  assert.equal(h.errors[0][0], '[plan-deposits/prepare]');
+  assert.equal(h.errors[0][1].requestId, 'req_oxxo');
+  assert.doesNotMatch(JSON.stringify([response.body, h.errors]), /private_secret|private_key/);
+  assert.equal(h.list('CrmFinanceTransactions').length, 0);
+  h.stripe.paymentIntents.create = create;
+  assert.equal((await h.prepare({ method: 'oxxo' })).code, 200);
+});
+
+test('fallas de conexión, configuración y servicio de Stripe tienen estados diferenciados', async () => {
+  for (const [type, expected] of [['StripeConnectionError', 503], ['StripeAuthenticationError', 503],
+    ['StripePermissionError', 503], ['StripeRateLimitError', 429], ['StripeAPIError', 502]]) {
+    const h = harness();
+    h.stripe.customers.create = async () => { throw new Stripe.errors[type]({ message: 'Stripe unavailable', requestId: 'req_failure' }); };
+    const response = await h.prepare({ method: 'oxxo' });
+    assert.equal(response.code, expected, type);
+    assert.equal(response.body.details.type, type);
+    assert.equal(h.errors.length, 1);
+    assert.equal(h.intents.size, 0);
+  }
+});
 
 test('SPEI genera CLABE por el anticipo, reutiliza el cobro y no envía ni registra ingresos al preparar', async () => {
   const h = harness();

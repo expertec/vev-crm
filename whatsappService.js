@@ -18,6 +18,7 @@ import admin from 'firebase-admin';
 import { randomUUID } from 'node:crypto';
 import { isWebsiteCampaignTrigger } from './utils/websiteCampaignContext.js';
 import { canAutoStartSampleAgent, isWebsiteInquiry } from './services/sampleCampaignAgent.js';
+import { isLeadArchived, restoreArchivedLeadOnInbound } from './services/leadArchive.js';
 import { db } from './firebaseAdmin.js';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
@@ -379,6 +380,7 @@ function buildLeadLastMessagePatch(msgData = {}, { incrementUnread = false } = {
     lastMessageMediaType: mediaType,
   };
   if (incrementUnread) patch.unreadCount = FieldValue.increment(1);
+  if (msgData.sender === 'lead') patch.lastInboundAt = msgData.timestamp || now();
   return patch;
 }
 
@@ -1537,8 +1539,8 @@ export async function connectToWhatsApp() {
           }
 
           const leadRef = leadResolution?.leadRef || db.collection('leads').doc(leadId);
-          const leadSnap = leadResolution?.leadSnap || await leadRef.get();
-          const existingLeadData = leadSnap.exists ? (leadSnap.data() || {}) : null;
+          let leadSnap = leadResolution?.leadSnap || await leadRef.get();
+          let existingLeadData = leadSnap.exists ? (leadSnap.data() || {}) : null;
           const aliasLeads = Array.isArray(leadResolution?.aliasLeads) ? leadResolution.aliasLeads : [];
           const allowUnsafeFromAliases = aliasLeads.some(
             (item) => item?.data?.allowUnsafeTarget === true
@@ -1567,6 +1569,15 @@ export async function connectToWhatsApp() {
                 error?.message || error
               );
             }
+          }
+
+          // Only a new customer message can return an archived contact to manual attention.
+          if (sender === 'lead' && isLeadArchived(existingLeadData)) {
+            const seconds = Number(msg.messageTimestamp?.toNumber?.() ?? msg.messageTimestamp);
+            const restored = await restoreArchivedLeadOnInbound({ db, leadRef,
+              messageId: messageDocIdFromWaId(msg?.key?.id),
+              receivedAt: Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null });
+            if (restored) { leadSnap = await leadRef.get(); existingLeadData = leadSnap.data() || {}; }
           }
 
           if (!leadSnap.exists) {

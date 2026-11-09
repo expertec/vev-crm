@@ -53,7 +53,7 @@ function transcodeAudioToMp3(inputPath, outputPath) {
 }
 
 // ================ Firebase / WhatsApp ================
-import { admin, db } from './firebaseAdmin.js';
+import { admin, db, getLeadArchivePreviewSecret } from './firebaseAdmin.js';
 import {
   connectToWhatsApp,
   getLatestQR,
@@ -174,6 +174,7 @@ import { createProcessInformationRouter } from './routes/processInformationRoute
 import { createCorporateEmailRouter } from './routes/corporateEmailRoutes.js';
 import { createProspectingRouter } from './routes/prospectingRoutes.js';
 import { createAgentQueueRouter } from './routes/agentQueueRoutes.js';
+import { createLeadArchiveService, registerLeadArchiveRoutes } from './services/leadArchive.js';
 // ⚠️ TEMPORAL: validación de Cloudflare Email Sending (quitar tras la prueba).
 import { createCloudflareEmailTestRouter } from './routes/cloudflareEmailTestRoutes.js';
 import { createMailboxRouter } from './routes/mailboxRoutes.js';
@@ -3898,6 +3899,10 @@ app.use('/api/test', createCloudflareEmailTestRouter());
 app.use('/api', createProspectingRouter());
 // Cola comercial para modo ventas por agente.
 app.use('/api', createAgentQueueRouter());
+registerLeadArchiveRoutes(app, {
+  service: createLeadArchiveService({ db, FieldValue: admin.firestore.FieldValue, secret: getLeadArchivePreviewSecret() }),
+  readUser: req => readAiSampleUser(req, { admin, db }),
+});
 // Mini-mail (buzones de agentes): ingesta, login, bandeja, envío.
 app.use('/api', createMailboxRouter());
 

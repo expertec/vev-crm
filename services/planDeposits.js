@@ -104,7 +104,7 @@ export async function handlePlanDepositEvent(db, event) {
   return true;
 }
 
-export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess, loadPlans, resolveBusiness, send, paymentsReady = true, renderVoucher, renderSpei, sendImage }) {
+export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess, loadPlans, resolveBusiness, send, paymentsReady = true, renderVoucher, renderSpei, sendImage, logger = console }) {
   const handlers = new Map(), internalRequests = new WeakSet();
   const contact = async (req, id) => {
     const user = internalRequests.has(req) ? { uid: 'closing-agent', role: 'admin' } : await readUser(req);
@@ -119,7 +119,17 @@ export function registerPlanDepositRoutes(app, { db, stripe, readUser, canAccess
   const route = (method, path, handler) => { handlers.set(path, handler); app[method](`/api/crm/plan-deposits/${path}`, async (req, res) => {
     res.set?.('Cache-Control', 'no-store');
     try { return res.json(await handler(req)); }
-    catch (error) { return res.status(error.status || (error.type?.startsWith('Stripe') ? 502 : 500)).json({ error: error.message || 'No se pudo procesar el anticipo.' }); }
+    catch (error) {
+      const isStripe = error.type?.startsWith('Stripe');
+      const stripeStatus = ({ StripeInvalidRequestError: 400, StripeCardError: 402, StripeRateLimitError: 429,
+        StripeAuthenticationError: 503, StripePermissionError: 503, StripeConnectionError: 503 })[error.type] || 502;
+      const status = error.status || (isStripe ? stripeStatus : 500);
+      // Keep provider diagnostics without exposing raw Stripe objects, keys or client secrets.
+      const details = isStripe ? { provider: 'stripe', type: error.type, code: error.code || '',
+        param: error.param || '', requestId: error.requestId || '', statusCode: error.statusCode || null } : undefined;
+      if (isStripe || status >= 500) logger.error(`[plan-deposits/${path}]`, { status, message: error.message, ...details });
+      return res.status(status).json({ error: error.message || 'No se pudo procesar el anticipo.', ...(details ? { details } : {}) });
+    }
   }); };
   route('get', 'plans', async req => {
     const { lead } = await contact(req, req.query?.leadId);

@@ -1088,6 +1088,12 @@ export async function processQueue({ batchSize = 100, shard = null } = {}) {
         continue;
       }
 
+      // Archived contacts never execute queued jobs, including old reminders.
+      if (lead.archived || lead.isArchived || lead.archivedAt) {
+        await job.ref.update({ status: 'canceled', processedAt: FieldValue.serverTimestamp(), error: 'Lead archivado' });
+        continue;
+      }
+
       // ¿pausado o parado?
       let stopState = stopCache.get(job.leadId);
       if (!stopState) {
@@ -1227,7 +1233,8 @@ function shouldHardStopAutomation(lead = {}) {
   const queueStatus = String(lead?.queue?.status || '').trim();
   const status = String(lead?.estado || '').trim().toLowerCase();
   const tags = Array.isArray(lead?.etiquetas) ? lead.etiquetas.map((tag) => String(tag || '').trim().toLowerCase()) : [];
-  return queueStatus === 'claimed'
+  return lead.archived === true || lead.isArchived === true || Boolean(lead.archivedAt)
+    || queueStatus === 'claimed'
     || lead?.sampleAgent?.enabled === true
     || status === 'compro'
     || status === 'cliente'
@@ -1319,6 +1326,7 @@ export async function processLeadSequences(leadId) {
     if (!snap.exists) return { processed: 0, reason: 'missing' };
 
     const data = { id: snap.id, ...(snap.data() || {}) };
+    if (data.archived || data.isArchived || data.archivedAt) return { processed: 0, reason: 'archived' };
     let secuencias = normalizeSecuencias(data.secuenciasActivas);
     let sentSteps = { ...(data.sequenceSentSteps || {}) };
     let deliveredHistory = Array.isArray(data.sequenceDeliveredTriggers)

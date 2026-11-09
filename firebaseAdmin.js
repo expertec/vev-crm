@@ -2,6 +2,7 @@
 import admin from 'firebase-admin';
 import fs from 'fs';
 import path from 'path';
+import { createHmac } from 'node:crypto';
 
 
 // Define la ruta del archivo secreto montado por Render
@@ -31,5 +32,11 @@ admin.initializeApp({
 
 // Obtén la instancia de Firestore
 const db = admin.firestore();
+
+// Stable across replicas without publishing a signing secret to browser config.
+export function getLeadArchivePreviewSecret() {
+  return process.env.LEAD_ARCHIVE_PREVIEW_SECRET
+    || createHmac('sha256', serviceAccount.private_key).update('crm-lead-archive-preview-v1').digest('hex');
+}
 
 export { admin, db };
