@@ -1,6 +1,8 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
 const DAY = 86400000;
+const PREVIEW_PAGE_SIZE = 20;
+const PREVIEW_CONCURRENCY = 4;
 const clean = value => String(value || '').trim().toLowerCase();
 const closed = value => ['done', 'completed', 'completado', 'completada', 'cancelled', 'canceled', 'cancelado', 'cancelada', 'closed', 'finished', 'sent', 'enviado'].includes(clean(value));
 export const isLeadArchived = lead => Boolean(lead?.archived || lead?.isArchived || lead?.archivedAt);
@@ -71,31 +73,34 @@ export function createLeadArchiveService({ db, FieldValue, now = Date.now,
     const data = Buffer.from(JSON.stringify({ id, days, at, expires: now() + 30 * 60000 })).toString('base64url');
     return `${data}.${sign(data)}`;
   };
-  function verify(token) {
+  function verify(token, { allowExpired = false } = {}) {
     if (typeof token !== 'string' || token.length > 2048) throw fail('Vista previa inválida.');
     const [data, signature, extra] = token.split('.');
     const expected = Buffer.from(sign(data || '')), actual = Buffer.from(signature || '');
     if (extra || expected.length !== actual.length || !timingSafeEqual(expected, actual)) throw fail('Actualiza la vista previa.', 409);
     let decoded; try { decoded = JSON.parse(Buffer.from(data, 'base64url').toString()); } catch { throw fail('Vista previa inválida.'); }
-    if (decoded.expires < now() || decoded.days !== 30 || typeof decoded.id !== 'string' || !decoded.id || decoded.id.includes('/')) throw fail('Actualiza la vista previa.', 409);
+    if ((!allowExpired && decoded.expires < now()) || decoded.days !== 30 || typeof decoded.id !== 'string' || !decoded.id || decoded.id.includes('/')) throw fail('Actualiza la vista previa.', 409);
     return decoded;
   }
   const query = (name, field, value) => db.collection(name).where(field, '==', value).limit(101);
   async function contextFor(reader, ref, lead) {
     const read = source => reader.get(source);
-    const messages = await read(ref.collection('messages').orderBy('timestamp', 'desc').limit(80));
-    const inbox = await read(ref.collection('sampleAgentInbox').where('state', '==', 'pending').limit(101));
-    const tasks = await read(query('tasks', 'leadId', ref.id));
-    const deposits = await read(query('PlanDepositRequests', 'leadId', ref.id));
-    const businesses = await read(query('Negocios', 'leadId', ref.id));
-    const jobs = await read(query('sequenceQueue', 'leadId', ref.id));
     const businessId = lead.sampleAgent?.negocioId || lead.negocioId;
-    const direct = businessId && !String(businessId).includes('/') ? await read(db.collection('Negocios').doc(String(businessId))) : null;
     // Older tasks and businesses sometimes use the phone instead of a leadId.
     const phone = String(lead.telefono || '').replace(/\D/g, '');
-    const phoneTasks = phone ? await read(query('tasks', 'leadPhone', phone)) : { docs: [] };
-    const phoneBusinesses = phone ? await read(query('Negocios', 'leadPhone', phone)) : { docs: [] };
-    const phoneJobs = phone ? await read(query('sequenceQueue', 'phone', phone)) : { docs: [] };
+    const empty = { docs: [] };
+    const [messages, inbox, tasks, deposits, businesses, jobs, direct, phoneTasks, phoneBusinesses, phoneJobs] = await Promise.all([
+      read(ref.collection('messages').orderBy('timestamp', 'desc').limit(80)),
+      read(ref.collection('sampleAgentInbox').where('state', '==', 'pending').limit(101)),
+      read(query('tasks', 'leadId', ref.id)),
+      read(query('PlanDepositRequests', 'leadId', ref.id)),
+      read(query('Negocios', 'leadId', ref.id)),
+      read(query('sequenceQueue', 'leadId', ref.id)),
+      businessId && !String(businessId).includes('/') ? read(db.collection('Negocios').doc(String(businessId))) : null,
+      phone ? read(query('tasks', 'leadPhone', phone)) : empty,
+      phone ? read(query('Negocios', 'leadPhone', phone)) : empty,
+      phone ? read(query('sequenceQueue', 'phone', phone)) : empty,
+    ]);
     const snapshots = [tasks, deposits, businesses, jobs, phoneTasks, phoneBusinesses, phoneJobs, inbox];
     const dedupe = items => [...new Map(items.map(d => [d.ref.path, d])).values()];
     return {
@@ -115,24 +120,32 @@ export function createLeadArchiveService({ db, FieldValue, now = Date.now,
     if (typeof cursor !== 'string' || cursor.includes('/') || cursor.length > 200) throw fail('Página inválida.');
     let source = db.collection('leads').orderBy('__name__');
     if (cursor) source = source.startAfter(cursor);
-    const snapshot = await source.limit(100).get();
+    const snapshot = await source.limit(PREVIEW_PAGE_SIZE).get();
+    // Bound database load while avoiding a full page of serial network round trips.
+    const reviewed = [];
+    for (let offset = 0; offset < snapshot.docs.length; offset += PREVIEW_CONCURRENCY) {
+      reviewed.push(...await Promise.all(snapshot.docs.slice(offset, offset + PREVIEW_CONCURRENCY).map(async doc => {
+        const lead = doc.data();
+        let reason = inactivityArchiveReason(lead, { now: now(), lastInboundAt: lead.lastInboundAt });
+        if (reason && reason !== 'Sin fecha de respuesta confiable') return { reason };
+        // Failure to verify a related record excludes the contact; it never authorizes archiving.
+        try {
+          const context = await contextFor(plainReader, doc.ref, lead);
+          const at = Math.max(archiveMillis(lead.lastInboundAt), context.lastInboundAt);
+          reason = inactivityArchiveReason(lead, { now: now(), lastInboundAt: at }) || protectedRelated(context, now());
+          if (!reason) return { candidate: { id: doc.id, name: lead.nombre || lead.businessName || lead.telefono || doc.id,
+            phone: lead.telefono || '', lastInboundAt: at, reason: '30 días sin respuesta del cliente', token: tokenFor(doc.id, 30, at) } };
+        } catch { reason = 'No se pudo verificar: revisar individualmente'; }
+        return { reason };
+      })));
+    }
     const candidates = [], excluded = {};
-    for (const doc of snapshot.docs) {
-      const lead = doc.data();
-      let reason = inactivityArchiveReason(lead, { now: now(), lastInboundAt: lead.lastInboundAt });
-      if (reason && reason !== 'Sin fecha de respuesta confiable') { excluded[reason] = (excluded[reason] || 0) + 1; continue; }
-      // Failure to verify a related record excludes the contact; it never authorizes archiving.
-      try {
-        const context = await contextFor(plainReader, doc.ref, lead);
-        const at = Math.max(archiveMillis(lead.lastInboundAt), context.lastInboundAt);
-        reason = inactivityArchiveReason(lead, { now: now(), lastInboundAt: at }) || protectedRelated(context, now());
-        if (!reason) candidates.push({ id: doc.id, name: lead.nombre || lead.businessName || lead.telefono || doc.id,
-          phone: lead.telefono || '', lastInboundAt: at, reason: '30 días sin respuesta del cliente', token: tokenFor(doc.id, 30, at) });
-      } catch { reason = 'No se pudo verificar: revisar individualmente'; }
+    for (const { candidate, reason } of reviewed) {
+      if (candidate) candidates.push(candidate);
       if (reason) excluded[reason] = (excluded[reason] || 0) + 1;
     }
     return { candidates, excluded, scanned: snapshot.size ?? snapshot.docs.length,
-      nextCursor: snapshot.docs.length === 100 ? snapshot.docs.at(-1).id : null };
+      nextCursor: snapshot.docs.length === PREVIEW_PAGE_SIZE ? snapshot.docs.at(-1).id : null };
   }
   async function archiveOne(id, user, { manual = false, expectedAt } = {}) {
     if (typeof id !== 'string' || !id || id.includes('/') || id.length > 200) throw fail('Contacto inválido.');
@@ -181,11 +194,24 @@ export function createLeadArchiveService({ db, FieldValue, now = Date.now,
     if (!Array.isArray(tokens) || !tokens.length || tokens.length > 25) throw fail('Selecciona entre 1 y 25 contactos por lote.');
     const verified = tokens.map(verify);
     const results = [];
-    for (const item of new Map(verified.map(v => [v.id, v])).values()) {
-      try { results.push(await archiveOne(item.id, user, { expectedAt: item.at })); }
-      catch (error) { results.push({ id: item.id, archived: false, reason: error.status === 403 ? error.message : 'No se pudo verificar o archivar; vuelve a revisar' }); }
+    const unique = [...new Map(verified.map(v => [v.id, v])).values()];
+    for (let offset = 0; offset < unique.length; offset += 4) {
+      results.push(...await Promise.all(unique.slice(offset, offset + 4).map(async item => {
+        try { return await archiveOne(item.id, user, { expectedAt: item.at }); }
+        catch (error) { return { id: item.id, archived: false, reason: error.status === 403 ? error.message : 'No se pudo verificar o archivar; vuelve a revisar' }; }
+      })));
     }
     return { results };
+  }
+  // Long analyses can outlive preview tokens. Renew only their signed original
+  // interaction date; commit still checks all current protections transactionally.
+  async function refresh({ tokens } = {}, user) {
+    if (!canManageLeadArchive(user)) throw fail('Solo administradores pueden archivar por lotes.', user ? 403 : 401);
+    if (!Array.isArray(tokens) || !tokens.length || tokens.length > 25) throw fail('Selecciona entre 1 y 25 contactos por lote.');
+    return { tokens: tokens.map(token => {
+      const item = verify(token, { allowExpired: true });
+      return tokenFor(item.id, item.days, item.at);
+    }) };
   }
   async function restore(id, user) {
     if (typeof id !== 'string' || !id || id.includes('/') || id.length > 200) throw fail('Contacto inválido.');
@@ -199,7 +225,7 @@ export function createLeadArchiveService({ db, FieldValue, now = Date.now,
       return { id, restored: true };
     });
   }
-  return { preview, commit, archiveOne, restore };
+  return { preview, commit, refresh, archiveOne, restore };
 }
 
 export function leadRestorePatch(lead, date, by) {
@@ -230,6 +256,7 @@ export function registerLeadArchiveRoutes(app, { service, readUser }) {
     } catch (error) { res.status(error.status || 500).json({ error: error.status ? error.message : 'No se pudo completar el archivado. Intenta de nuevo.' }); }
   });
   route('preview', (body, user) => service.preview(body, user));
+  route('refresh', (body, user) => service.refresh(body, user));
   route('commit', (body, user) => service.commit(body, user));
   route('archive', (body, user) => service.archiveOne(body.leadId, user, { manual: true }));
   route('restore', (body, user) => service.restore(body.leadId, user));

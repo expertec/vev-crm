@@ -115,11 +115,22 @@ test('solo administradores activos pueden ejecutar lotes; manual respeta al prop
   for (const user of [null, { uid: 'seller', role: 'salesAgent' }, { ...admin, active: false }]) await assert.rejects(h.service.preview({}, user));
   await assert.rejects(h.service.archiveOne('old', { uid: 'other', role: 'salesAgent' }, { manual: true })); assert.equal(h.writes(), 0);
 });
-test('paginación recorre todos los contactos sin repetir los primeros 100', async () => {
+test('paginación en lotes pequeños recorre todos los contactos sin repetir ni omitir', async () => {
   const seed = Object.fromEntries(Array.from({ length: 103 }, (_, n) => [`leads/id${String(n).padStart(3, '0')}`, oldLead()]));
-  const h = setup(seed); const page1 = await h.service.preview({}, admin), page2 = await h.service.preview({ cursor: page1.nextCursor }, admin);
-  assert.equal(page1.candidates.length, 100); assert.equal(page2.candidates.length, 3); assert.equal(page2.nextCursor, null);
-  assert.equal(new Set([...page1.candidates, ...page2.candidates].map(r => r.id)).size, 103);
+  const h = setup(seed), ids = [];
+  let cursor = '', scanned = 0;
+  do {
+    const page = await h.service.preview({ cursor }, admin);
+    assert.ok(page.scanned <= 20);
+    assert.equal(page.scanned, page.candidates.length);
+    ids.push(...page.candidates.map(row => row.id));
+    scanned += page.scanned;
+    cursor = page.nextCursor;
+  } while (cursor);
+  assert.equal(scanned, 103);
+  assert.deepEqual(ids, Object.keys(seed).map(path => path.split('/')[1]));
+  assert.equal(new Set(ids).size, 103);
+  assert.equal(h.writes(), 0);
 });
 test('desarchivar nunca revive secuencias ni agente y conserva paros manuales previos', async () => {
   const h = setup({ 'leads/old': oldLead({ stopSequences: true }) });
@@ -162,4 +173,28 @@ test('limita el tamaño del lote y las selecciones duplicadas son idempotentes',
   const result = await h.service.commit({ tokens: [candidates[0].token, candidates[0].token] }, admin);
   assert.equal(result.results.length, 1); assert.equal(result.results[0].archived, true);
   const repeat = await h.service.commit({ tokens: [candidates[0].token] }, admin); assert.equal(repeat.results[0].reason, 'Ya archivado');
+});
+
+test('renueva tokens para análisis largos sin omitir la revalidación del contacto', async () => {
+  const h = setup({ 'leads/old': oldLead() });
+  const { candidates } = await h.service.preview({}, admin);
+  const tokens = candidates.map(row => row.token);
+  h.advance(31 * 60000);
+  await assert.rejects(h.service.commit({ tokens }, admin));
+  await assert.rejects(h.service.refresh({ tokens }, { uid: 'seller', role: 'salesAgent' }));
+  await assert.rejects(h.service.refresh({ tokens: [tokens[0] + 'x'] }, admin));
+  const renewed = await h.service.refresh({ tokens }, admin);
+  assert.equal(h.writes(), 0);
+  h.put('tasks/new', { leadId: 'old', status: 'pending' });
+  const result = await h.service.commit(renewed, admin);
+  assert.equal(result.results[0].archived, false);
+  assert.equal(h.get('leads/old').archived, undefined);
+});
+
+test('archiva con tokens renovados si el contacto sigue cumpliendo los criterios', async () => {
+  const h = setup({ 'leads/old': oldLead() });
+  const { candidates } = await h.service.preview({}, admin);
+  h.advance(31 * 60000);
+  const renewed = await h.service.refresh({ tokens: candidates.map(row => row.token) }, admin);
+  assert.equal((await h.service.commit(renewed, admin)).results[0].archived, true);
 });
