@@ -6532,6 +6532,24 @@ app.get('/api/crm/finance/overview', async (req, res) => {
   }
 });
 
+app.get('/api/crm/finance/pending-balances', async (req, res) => {
+  try {
+    // Include older sales without updatedAt or a stored pendingAmount, too.
+    const snap = await db.collection(FINANCE_SERVICES_COLLECTION)
+      .select('leadId', 'leadPhone', 'currency', 'status', 'totalAmount', 'paidAmount', 'pendingAmount')
+      .get();
+    const items = snap.docs
+      .map((snapshot) => serializeFinanceService(snapshot.id, snapshot.data()))
+      .filter((item) => item.pendingAmount > 0 && item.status !== 'cancelado')
+      .map(({ id, leadId, leadPhone, currency, pendingAmount }) => ({ id, leadId, leadPhone, currency, pendingAmount }));
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, items });
+  } catch (error) {
+    console.error('[crm/finance/pending-balances] Error:', error);
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 app.get('/api/crm/finance/services', async (req, res) => {
   try {
     const page = Math.max(1, Number(req.query?.page || 1));
