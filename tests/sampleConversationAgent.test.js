@@ -10,6 +10,7 @@ function database() {
   const rows = new Map();
   const snapshot = (ref) => ({ id: ref.id, ref, exists: rows.has(ref.path), data: () => structuredClone(rows.get(ref.path)) });
   const update = (ref, patch) => {
+    stats.writes++;
     const row = structuredClone(rows.get(ref.path) || {});
     for (const [key, value] of Object.entries(patch)) {
       const keys = key.split('.'); let current = row;
@@ -18,16 +19,29 @@ function database() {
     }
     rows.set(ref.path, row);
   };
-  const collection = (path) => {
-    const get = async (field, expected) => ({ docs: [...rows.keys()].filter((key) => key.startsWith(`${path}/`) && key.split('/').length === path.split('/').length + 1).map((key) => snapshot(document(key))).filter((snap) => !field || field.split('.').reduce((v, k) => v?.[k], snap.data()) === expected) });
-    return { doc: (id) => document(`${path}/${id}`), get: () => get(), where: (field, _op, value) => ({ get: () => get(field, value), limit: () => ({ get: () => get(field, value) }) }) };
+  const stats = { writes: 0, queries: [] };
+  const collection = (path, constraints = [], max = Infinity, cursor = null) => {
+    const get = async () => {
+      stats.queries.push({ path, constraints, max });
+      const docs = [...rows.keys()].filter(key => key.startsWith(`${path}/`) && key.split('/').length === path.split('/').length + 1)
+        .sort().map(key => snapshot(document(key)))
+        .filter(snap => !cursor || snap.id > cursor.id)
+        .filter(snap => constraints.every(([field, expected]) => field.split('.').reduce((v, k) => v?.[k], snap.data()) === expected))
+        .slice(0, max);
+      return { docs, size: docs.length, empty: !docs.length };
+    };
+    return { doc: id => document(`${path}/${id}`), get,
+      where: (field, _op, value) => collection(path, [...constraints, [field, value]], max, cursor),
+      limit: value => collection(path, constraints, value, cursor),
+      orderBy: () => collection(path, constraints, max, cursor), select: () => collection(path, constraints, max, cursor),
+      startAfter: value => collection(path, constraints, max, value) };
   };
   const document = (path) => ({ path, id: path.split('/').at(-1), get: async () => snapshot(document(path)), update: async (patch) => update(document(path), patch), collection: (name) => collection(`${path}/${name}`) });
   let chain = Promise.resolve();
   return {
-    rows, collection,
+    rows, collection, stats,
     runTransaction(fn) {
-      const work = chain.then(() => fn({ get: async (ref) => snapshot(ref), update, set: (ref, data) => rows.set(ref.path, structuredClone(data)) }));
+      const work = chain.then(() => fn({ get: async (ref) => ref.get(), update, set: (ref, data) => { stats.writes++; rows.set(ref.path, structuredClone(data)); } }));
       chain = work.catch(() => {}); return work;
     },
   };
@@ -42,6 +56,53 @@ function setup(extract, transcribe, options = {}) {
   const receive = (text, id, extra = {}) => agent.receive({ leadRef, messageId: id, message: { content: text, mediaType: 'text', ...extra } });
   return { db, leadRef, agent, replies, jobs, errors, receive };
 }
+
+test('recuperación inactiva no escribe bloqueos ni repite el barrido después del arranque', async () => {
+  const s = setup(async () => { throw Error('No debe llamar IA'); });
+  const before = s.db.stats.writes;
+  await s.agent.resume();
+  const afterBootstrap = s.db.stats.queries.length;
+  await s.agent.resume(); await s.agent.resume();
+  assert.equal(s.db.stats.writes, before);
+  const recurring = s.db.stats.queries.slice(afterBootstrap);
+  assert.equal(recurring.length, 2);
+  assert.ok(recurring.every(q => q.path === 'leads' && q.constraints[0][0] === 'sampleAgent.hasPendingWork'));
+});
+test('el barrido de compatibilidad recupera mensajes antiguos más allá de los primeros 50', async () => {
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }));
+  s.db.rows.clear();
+  for (let n = 0; n < 121; n++) s.db.rows.set(`leads/id${String(n).padStart(3, '0')}`, { sampleAgent: { enabled: true, version: 'old' } });
+  s.db.rows.set('leads/id120/sampleAgentInbox/legacy', { state: 'pending', content: 'Mis datos', mediaType: 'text', sequence: 0, receivedAt: new Date() });
+  await s.agent.resume(); await s.agent.resume(); assert.equal(s.replies.length, 0);
+  await s.agent.resume(); assert.equal(s.replies.length, 1);
+  assert.equal(s.db.rows.get('leads/id120/sampleAgentInbox/legacy').state, 'done');
+  const before = s.db.stats.writes; await s.agent.resume(); assert.equal(s.db.stats.writes, before);
+});
+test('la marca persistente recupera mensajes tras reinicio y se elimina al procesarlos', async () => {
+  let time = Date.now();
+  const s = setup(async () => ({ brief: complete(), action: 'confirm', reply: '' }), undefined, { debounceMs: 4000, now: () => time });
+  await s.receive('Hola', 'restart'); assert.equal((await s.leadRef.get()).data().sampleAgent.hasPendingWork, true);
+  const resumed = createSampleConversationAgent({ db: s.db, debounceMs: 0, now: () => time,
+    extract: async () => ({ brief: complete(), action: 'confirm', reply: '' }), send: async (_id, text) => s.replies.push(text), generate: async () => ({}) });
+  time += 4000; await resumed.resume(); assert.equal(s.replies.length, 1);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.hasPendingWork, false);
+  const before = s.db.stats.writes; await resumed.resume(); assert.equal(s.db.stats.writes, before);
+});
+test('limpia una marca pendiente sin mensajes una sola vez, sin adquirir lease', async () => {
+  const s = setup(async () => { throw Error('No debe llamar IA'); });
+  await s.leadRef.update({ 'sampleAgent.hasPendingWork': true });
+  const before = s.db.stats.writes; await s.agent.resume();
+  assert.equal(s.db.stats.writes - before, 1);
+  assert.equal((await s.leadRef.get()).data().sampleAgent.leaseOwner, undefined);
+  const after = s.db.stats.writes; await s.agent.resume(); assert.equal(s.db.stats.writes, after);
+});
+test('los contactos archivados salen de la cola pendiente sin activar IA', async () => {
+  const s = setup(async () => { throw Error('No debe llamar IA'); });
+  await s.leadRef.update({ archived: true, 'sampleAgent.hasPendingWork': true });
+  await s.agent.resume(); assert.equal((await s.leadRef.get()).data().sampleAgent.hasPendingWork, false);
+  assert.equal(s.replies.length, 0); const before = s.db.stats.writes;
+  await s.agent.resume(); assert.equal(s.db.stats.writes, before);
+});
 
 test('recopila por chat, confirma y genera una sola vez sin otra llamada de IA', async () => {
   let calls = 0;

@@ -5,6 +5,7 @@ import { db } from './firebaseAdmin.js';
 import { getWhatsAppSock } from './whatsappService.js';
 import { Timestamp } from 'firebase-admin/firestore';
 import * as Q from './queue.js';
+import { createSequenceProcessor } from './services/sequenceMaintenance.js';
 import puppeteer from 'puppeteer';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -1150,44 +1151,5 @@ export async function archivarNegociosAntiguos() {
 
 // =============== SECUENCIAS ===============
 
-export async function processSequences() {
-  let totalProcessed = 0;
-
-  if (typeof Q.hydrateNextSequenceRun === 'function') {
-    await Q.hydrateNextSequenceRun({ limit: 50 });
-  }
-
-  if (typeof Q.pauseLegacyRecoveredMissingDestinationSequences === 'function') {
-    await Q.pauseLegacyRecoveredMissingDestinationSequences({ limit: 100 });
-  }
-
-  if (typeof Q.recoverMissingDestinationSequences === 'function') {
-    await Q.recoverMissingDestinationSequences({ limit: 5 });
-  }
-
-  if (typeof Q.resumeSalesQueuePausedSequences === 'function') {
-    await Q.resumeSalesQueuePausedSequences({ limit: 5 });
-  }
-
-  if (typeof Q.processSequenceLeadsBatch === 'function') {
-    totalProcessed += await Q.processSequenceLeadsBatch({ limit: 25 });
-  } else if (typeof Q.processDueSequenceJobs === 'function') {
-    totalProcessed += await Q.processDueSequenceJobs({ limit: 25 });
-  }
-
-  if (typeof Q.processQueue === 'function') {
-    totalProcessed += await Q.processQueue({ batchSize: 200 });
-  }
-
-  if (totalProcessed === 0) {
-    if (
-      typeof Q.processSequenceLeadsBatch !== 'function'
-      && typeof Q.processDueSequenceJobs !== 'function'
-      && typeof Q.processQueue !== 'function'
-    ) {
-      console.warn('⚠️ No hay función de proceso de cola exportada.');
-    }
-  }
-
-  return totalProcessed;
-}
+// Delivery retains its 30-second cron. Historical repairs run at most once per five minutes.
+export const processSequences = createSequenceProcessor(Q);

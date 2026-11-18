@@ -204,6 +204,9 @@ export function createSampleConversationContextLoader({ transcribe }) {
 // Durable inbox + lease. Persist first, then answer one quiet batch rather than each fragment.
 export function createSampleConversationAgent({ db, send, generate, extract = extractConversationBrief, interpretApproval = interpretSampleApproval, transcribe, sendFlowAudio, sendPackage, onWelcomeSent = async () => {}, onInbound = async () => {}, loadAudioOptions = async () => [], loadConversationContext = async () => [], loadSalesKnowledge = async () => SAMPLE_CAMPAIGN_OFFER, debounceMs = 4000, imageDebounceMs = debounceMs ? Math.max(debounceMs, 8000) : 0, now = Date.now, logger = console }) {
   const timers = new Map();
+  let resuming = false;
+  let legacyCursor = null;
+  let legacyScanComplete = false;
   const millis = (value) => value?.toMillis?.() || (value ? new Date(value).getTime() : 0) || 0;
   const revision = (lead) => Number(lead.sampleAgent?.inboxRevision || 0);
   const schedule = (leadRef, delay = debounceMs) => {
@@ -216,6 +219,19 @@ export function createSampleConversationAgent({ db, send, generate, extract = ex
     timers.set(leadRef.id, timer);
   };
   const drain = async (leadRef) => {
+    // Checking an empty inbox must never create and release a lease.
+    // receive() persists the work flag atomically, so a racing new message is recovered.
+    const pending = await leadRef.collection('sampleAgentInbox').where('state', '==', 'pending').limit(1).get();
+    if (!pending.docs.length) {
+      // A stale work flag is cleaned once; idle contacts do not get periodic writes.
+      await db.runTransaction(async tx => {
+        const current = (await tx.get(leadRef)).data() || {};
+        if (current.sampleAgent?.hasPendingWork !== true) return;
+        const remaining = await tx.get(leadRef.collection('sampleAgentInbox').where('state', '==', 'pending').limit(1));
+        if (!remaining.docs.length) tx.update(leadRef, { 'sampleAgent.hasPendingWork': false });
+      });
+      return;
+    }
     const owner = randomUUID();
     const acquired = await db.runTransaction(async (tx) => {
       const lead = (await tx.get(leadRef)).data() || {};
@@ -445,6 +461,7 @@ export function createSampleConversationAgent({ db, send, generate, extract = ex
           'sampleAgent.brief': turn.brief, 'sampleAgent.images': turn.images, 'sampleAgent.history': history,
           'sampleAgent.confirmationHash': ['confirm', 'respond'].includes(turn.action) ? turn.hash : '',
           'sampleAgent.enabled': enabled, 'sampleAgent.status': status, 'sampleAgent.deliveryPaused': ['pause', 'handoff'].includes(turn.action),
+          'sampleAgent.hasPendingWork': enabled && revision(current) !== expectedRevision,
           'sampleAgent.updatedAt': new Date(now()), 'sampleAgent.error': '',
           'sampleAgent.pauseReason': turn.action === 'handoff' ? 'other_service_or_human_conversation' : '',
           'sampleAgent.audioMomentsSent': [...new Set([...(agent.audioMomentsSent || []), ...(sentAudioMoment ? [sentAudioMoment] : [])])],
@@ -463,7 +480,8 @@ export function createSampleConversationAgent({ db, send, generate, extract = ex
       await db.runTransaction(async (tx) => {
         const current = (await tx.get(leadRef)).data() || {};
         if (current.sampleAgent?.leaseOwner !== owner) return;
-        tx.update(leadRef, { 'sampleAgent.leaseUntil': new Date(0), 'sampleAgent.leaseOwner': '' });
+        tx.update(leadRef, { 'sampleAgent.leaseUntil': new Date(0), 'sampleAgent.leaseOwner': '',
+          ...(!agentCanReply(current) ? { 'sampleAgent.hasPendingWork': false } : {}) });
         if (agentCanReply(current) && revision(current) !== expectedRevision) rerun = true;
       });
       if (rerun) schedule(leadRef);
@@ -479,7 +497,7 @@ export function createSampleConversationAgent({ db, send, generate, extract = ex
         const current = (await tx.get(leadRef)).data() || {};
         await onInbound(leadRef, current, tx);
         tx.set(ref, { content: clean(message.content, 4000), mediaType: clean(message.mediaType, 20), mediaUrl: publicImageUrl(message.mediaUrl), receivedAt: new Date(now()), sequence: revision(current) + 1, state: 'pending' });
-        tx.update(leadRef, { 'sampleAgent.inboxRevision': revision(current) + 1, 'sampleAgent.lastInboundAt': new Date(now()), 'sampleAgent.lastInboundMediaType': message.mediaType || 'text' });
+        tx.update(leadRef, { 'sampleAgent.inboxRevision': revision(current) + 1, 'sampleAgent.hasPendingWork': true, 'sampleAgent.lastInboundAt': new Date(now()), 'sampleAgent.lastInboundMediaType': message.mediaType || 'text' });
         return true;
       });
       if (!added) return;
@@ -487,8 +505,46 @@ export function createSampleConversationAgent({ db, send, generate, extract = ex
       else schedule(leadRef, message.mediaType === 'image' ? imageDebounceMs : debounceMs);
     },
     async resume() {
-      const leads = await db.collection('leads').where('sampleAgent.enabled', '==', true).limit(50).get();
-      for (const lead of leads.docs) await drain(lead.ref);
+      if (resuming) return;
+      resuming = true;
+      try {
+        // Read only actual work in the recurring recovery loop. Disabled/archived
+        // contacts have their flag cleared without taking a lease or calling AI.
+        const work = await db.collection('leads').where('sampleAgent.hasPendingWork', '==', true)
+          .select('sampleAgent', 'archived', 'archivedAt', 'isArchived', 'humanControl', 'salesBrainHumanControl', 'stopSequences', 'estado')
+          .limit(50).get();
+        const seen = new Set();
+        for (const lead of work.docs) {
+          seen.add(lead.id);
+          if (agentCanReply(lead.data())) await drain(lead.ref);
+          else await db.runTransaction(async tx => {
+            const current = (await tx.get(lead.ref)).data() || {};
+            if (!agentCanReply(current) && current.sampleAgent?.hasPendingWork === true) tx.update(lead.ref, { 'sampleAgent.hasPendingWork': false });
+          });
+        }
+        // One bounded, paginated compatibility pass per process startup recovers
+        // messages persisted by the previous deployment before the flag existed.
+        if (!legacyScanComplete) {
+          let source = db.collection('leads').where('sampleAgent.enabled', '==', true).orderBy('__name__')
+            .select('sampleAgent', 'archived', 'archivedAt', 'isArchived', 'humanControl', 'salesBrainHumanControl', 'stopSequences', 'estado');
+          if (legacyCursor) source = source.startAfter(legacyCursor);
+          const page = await source.limit(50).get();
+          for (const lead of page.docs) {
+            if (seen.has(lead.id) || !agentCanReply(lead.data())) continue;
+            const shouldDrain = await db.runTransaction(async tx => {
+              const current = (await tx.get(lead.ref)).data() || {};
+              if (!agentCanReply(current)) return false;
+              const pending = await tx.get(lead.ref.collection('sampleAgentInbox').where('state', '==', 'pending').limit(1));
+              if (!pending.docs.length) return false;
+              if (pending.docs.length && current.sampleAgent.hasPendingWork !== true) tx.update(lead.ref, { 'sampleAgent.hasPendingWork': true });
+              return true;
+            });
+            if (shouldDrain) await drain(lead.ref);
+          }
+          legacyCursor = page.docs.at(-1) || null;
+          legacyScanComplete = page.docs.length < 50;
+        }
+      } finally { resuming = false; }
     },
   };
 }

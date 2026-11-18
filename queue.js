@@ -11,6 +11,7 @@ import {
 import { getBuiltinSequenceDefinition } from './services/salesQueue/welcomeSequence.js';
 import { recordWebSalesEvent, WEB_SALES_EVENTS } from './services/webSales/index.js';
 import { shouldBlockSequenceByLeadContext } from './utils/sequenceTriggerGuards.js';
+import { createLegacySequenceScanner } from './services/sequenceMaintenance.js';
 
 const { FieldValue } = admin.firestore;
 const { Timestamp } = admin.firestore;
@@ -1546,16 +1547,16 @@ export async function processSequenceLeadsBatch({ limit = MAX_SEQUENCE_BATCH } =
   return total;
 }
 
+const scanLegacySequenceLeads = createLegacySequenceScanner(db);
+
 export async function hydrateNextSequenceRun({ limit = 50 } = {}) {
-  const snap = await db.collection('leads')
-    .where('secuenciasActivas', '!=', null)
-    .limit(limit)
-    .get();
+  const snap = await scanLegacySequenceLeads(limit);
 
   if (snap.empty) return 0;
   let updated = 0;
   for (const doc of snap.docs) {
     const data = doc.data() || {};
+    if (data.archived || data.isArchived || data.archivedAt) continue;
     const secuencias = normalizeSecuencias(data.secuenciasActivas);
     if (!secuencias.length) continue;
     for (const seq of secuencias) {
