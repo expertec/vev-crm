@@ -4,6 +4,7 @@
 // Negocios/{empresaId}/corporateEmails/{correoId} y le añade la subcolección `inbox`.
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import crypto from 'node:crypto';
+import { prepareMailboxPhoto } from '../utils/mailboxProfileImage.js';
 import { admin, db } from '../firebaseAdmin.js';
 import {
   buildCorporateEmailRecordId,
@@ -155,6 +156,18 @@ export class FirestoreMailboxRepository {
       { merge: true }
     );
     return this.getCorporateEmailById(empresaId, correoId);
+  }
+
+  async saveMailboxPhoto({ empresaId, correoId, buffer }) {
+    const image = await prepareMailboxPhoto(buffer);
+    const bucket = this.getStorageBucket();
+    const storagePath = `mailbox-profiles/${cleanStorageSegment(empresaId)}/${cleanStorageSegment(correoId)}/${crypto.randomUUID()}.webp`;
+    const downloadToken = crypto.randomUUID();
+    await bucket.file(storagePath).save(image, {
+      resumable: false,
+      metadata: { contentType: 'image/webp', metadata: { firebaseStorageDownloadTokens: downloadToken } },
+    });
+    return `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(bucket.name)}/o/${encodeURIComponent(storagePath)}?alt=media&token=${downloadToken}`;
   }
 
   buildInboxMessageId(providerMessageId) {

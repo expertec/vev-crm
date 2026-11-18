@@ -92,6 +92,7 @@ export class CloudflareEmailSendingClient {
 
   async sendEmail({
     from,
+    fromName = '',
     to = [],
     cc = [],
     bcc = [],
@@ -122,7 +123,8 @@ export class CloudflareEmailSendingClient {
       });
     }
 
-    const payload = { from: safeFrom, to: toList, subject: cleanString(subject, 998) };
+    const safeFromName = cleanString(fromName, 120).replace(/[\r\n\x00-\x1f\x7f]/g, ' ');
+    const payload = { from: safeFromName ? { address: safeFrom, name: safeFromName } : safeFrom, to: toList, subject: cleanString(subject, 998) };
     if (html) payload.html = String(html);
     if (text) payload.text = String(text);
     if (ccList.length) payload.cc = ccList;

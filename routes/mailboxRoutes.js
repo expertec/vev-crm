@@ -73,6 +73,7 @@ export function createMailboxRouter({ logger = console } = {}) {
   const controller = createMailboxController({ service, logger });
 
   const router = express.Router();
+  const profileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 512 * 1024, files: 1, fields: 2 } });
   const importUpload = multer({
     storage: multer.memoryStorage(),
     limits: {
@@ -91,6 +92,8 @@ export function createMailboxRouter({ logger = console } = {}) {
   router.post('/mailbox/setup', controller.setup);
   router.post('/mailbox/login', controller.login);
   router.post('/mailbox/refresh', controller.refresh);
+  router.get('/mailbox/profile', controller.requireAuth, controller.profile);
+  router.put('/mailbox/profile', controller.requireAuth, runUpload(profileUpload.single('photo')), controller.updateProfile);
   router.put('/mailbox/password', controller.requireAuth, controller.changePassword);
   router.get('/mailbox/inbox', controller.requireAuth, controller.inbox);
   router.get('/mailbox/sent', controller.requireAuth, controller.sent);

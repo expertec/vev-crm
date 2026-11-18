@@ -1460,6 +1460,8 @@ test('envia con fromAlias validado (Cloudflare) y guarda el mensaje en el histor
     subject: 'Hola',
     html: '<p>Mensaje</p>',
     text: 'Mensaje',
+    fromName: 'Sergio Ventas',
+    senderPhotoUrl: 'https://example.com/profile.webp',
   });
 
   assert.equal(sent.provider, 'cloudflare_email_sending');
@@ -1468,11 +1470,14 @@ test('envia con fromAlias validado (Cloudflare) y guarda el mensaje en el histor
   assert.equal(sent.message.providerMessageId, 'cf-msg-1');
   assert.equal(emailSendingClient.sent.length, 1);
   assert.equal(emailSendingClient.sent[0].from, 'ventas@cliente.com');
+  assert.equal(emailSendingClient.sent[0].fromName, 'Sergio Ventas');
   assert.deepEqual(emailSendingClient.sent[0].to, ['destino@gmail.com']);
 
   const history = await service.listCorporateEmailMessages({ empresaId: 'msg1' });
   assert.equal(history.length, 1);
   assert.equal(history[0].fromAlias, 'ventas@cliente.com');
+  assert.equal(history[0].fromName, 'Sergio Ventas');
+  assert.equal(history[0].senderPhotoUrl, 'https://example.com/profile.webp');
   assert.equal(history[0].status, 'sent');
   assert.equal(history[0].provider, 'cloudflare_email_sending');
   assert.deepEqual(history[0].to, ['destino@gmail.com']);

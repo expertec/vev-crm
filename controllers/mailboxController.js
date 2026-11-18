@@ -74,6 +74,30 @@ export function createMailboxController({ service, logger = console }) {
   return {
     requireAuth,
 
+    profile: async (req, res) => {
+      try {
+        const mailbox = await service.getProfile({ ...req.mailbox, mailboxEmail: req.mailbox.email });
+        return res.json({ success: true, mailbox });
+      } catch (error) {
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
+    updateProfile: async (req, res) => {
+      try {
+        const mailbox = await service.updateProfile({
+          ...req.mailbox,
+          mailboxEmail: req.mailbox.email,
+          displayName: req.body?.displayName,
+          photo: req.file,
+          removePhoto: req.body?.removePhoto === true || req.body?.removePhoto === 'true',
+        });
+        return res.json({ success: true, mailbox });
+      } catch (error) {
+        return res.status(resolveErrorStatus(error)).json(buildErrorResponse(error));
+      }
+    },
+
     ingest: async (req, res) => {
       try {
         const out = await service.ingest({

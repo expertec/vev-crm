@@ -332,6 +332,8 @@ export class CorporateEmailService {
       id: cleanString(record.id || '', 180),
       empresaId: cleanString(record.empresaId || '', 140),
       fromAlias: normalizeEmailAddress(record.fromAlias || record.from || ''),
+      fromName: cleanString(record.fromName || '', 120),
+      senderPhotoUrl: cleanString(record.senderPhotoUrl || '', 2000),
       to: uniqueStrings(record.to || [], 320),
       cc: uniqueStrings(record.cc || [], 320),
       bcc: uniqueStrings(record.bcc || [], 320),
@@ -2314,6 +2316,8 @@ export class CorporateEmailService {
     mailboxEmail = '',
     domain,
     fromAlias,
+    fromName = '',
+    senderPhotoUrl = '',
     fromEmail,
     replyToEmail,
     to,
@@ -2383,6 +2387,8 @@ export class CorporateEmailService {
       const baseMessagePayload = {
         companyId: safeEmpresaId,
         fromAlias: resolvedFromEmail,
+        fromName: cleanString(fromName, 120),
+        senderPhotoUrl: cleanString(senderPhotoUrl, 2000),
         from: resolvedFromEmail,
         to: toEmails,
         cc: ccEmails,
@@ -2400,6 +2406,7 @@ export class CorporateEmailService {
       try {
         result = await this.emailSendingClient.sendEmail({
           from: resolvedFromEmail,
+          fromName: cleanString(fromName, 120),
           to: toEmails,
           cc: ccEmails,
           bcc: bccEmails,

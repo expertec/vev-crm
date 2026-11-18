@@ -10,6 +10,7 @@ import {
   verifyMailboxToken,
 } from '../utils/mailboxAuth.js';
 import { parseMailboxImport } from './mailboxImportParser.js';
+import { cleanDisplayName, MAX_PROFILE_PHOTO_BYTES, withMailboxPhoto } from '../utils/mailboxProfile.js';
 
 function cleanString(value = '', maxLength = 300) {
   return String(value ?? '').trim().slice(0, maxLength);
@@ -582,7 +583,8 @@ export class MailboxService {
       refreshToken,
       mailbox: {
         email: address,
-        displayName: cleanString(data.displayName, 120),
+        displayName: cleanDisplayName(data.displayName),
+        photoUrl: cleanString(data.photoUrl, 2000),
         domain: cleanString(data.domain, 200),
       },
     };
@@ -649,10 +651,40 @@ export class MailboxService {
       ...tokens,
       mailbox: {
         email,
-        displayName: cleanString(data.displayName, 120),
+        displayName: cleanDisplayName(data.displayName),
+        photoUrl: cleanString(data.photoUrl, 2000),
         domain: cleanString(data.domain, 200),
       },
     };
+  }
+
+  async getProfile({ empresaId, correoId, mailboxEmail }) {
+    const data = await this.repo.getCorporateEmailById(empresaId, correoId);
+    if (!data || data.mailboxEnabled !== true || normalizeEmail(data.email || data.address) !== normalizeEmail(mailboxEmail)) {
+      throw new MailboxServiceError('Buzón no encontrado o desactivado.', { statusCode: 403, code: 'MAILBOX_PROFILE_NOT_ALLOWED' });
+    }
+    return { email: normalizeEmail(mailboxEmail), displayName: cleanDisplayName(data.displayName), photoUrl: cleanString(data.photoUrl, 2000), domain: cleanString(data.domain, 200) };
+  }
+
+  async updateProfile({ empresaId, correoId, mailboxEmail, displayName, photo, removePhoto = false }) {
+    await this.getProfile({ empresaId, correoId, mailboxEmail });
+    const patch = {};
+    if (displayName !== undefined) {
+      if (String(displayName).trim().length > 120 || /[\r\n\x00-\x1f\x7f]/.test(String(displayName))) {
+        throw new MailboxServiceError('El nombre debe tener hasta 120 caracteres y no incluir saltos de línea.', { statusCode: 400, code: 'MAILBOX_DISPLAY_NAME_INVALID' });
+      }
+      patch.displayName = cleanDisplayName(displayName);
+    }
+    if (photo) {
+      if (!Buffer.isBuffer(photo.buffer) || !photo.buffer.length || photo.buffer.length > MAX_PROFILE_PHOTO_BYTES) {
+        throw new MailboxServiceError('La foto debe pesar hasta 512 KB.', { statusCode: 400, code: 'MAILBOX_PHOTO_SIZE_INVALID' });
+      }
+      patch.photoUrl = await this.repo.saveMailboxPhoto({ empresaId, correoId, buffer: photo.buffer });
+    } else if (removePhoto) {
+      patch.photoUrl = '';
+    }
+    await this.repo.setMailboxConfig({ empresaId, correoId, patch });
+    return this.getProfile({ empresaId, correoId, mailboxEmail });
   }
 
   async changePassword({ empresaId, correoId, mailboxEmail, currentPassword, newPassword }) {
@@ -750,17 +782,22 @@ export class MailboxService {
       );
     }
 
-    // El remitente se fuerza al correo del buzón autenticado (no arbitrario).
+    const profile = correoId
+      ? await this.getProfile({ empresaId, correoId, mailboxEmail })
+      : { email: mailboxEmail, displayName: '', photoUrl: '' };
+    // El remitente y su nombre provienen del buzón autenticado.
     const result = await this.corporate.sendCorporateEmail({
       empresaId,
       mailboxEmail,
       fromAlias: mailboxEmail,
+      fromName: profile.displayName,
+      senderPhotoUrl: profile.photoUrl,
       to,
       cc,
       bcc,
       subject,
       text,
-      html,
+      html: withMailboxPhoto({ html, text, profile }),
       attachments,
       createdBy: mailboxEmail,
     });
