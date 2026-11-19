@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import { MailboxService } from '../services/mailboxService.js';
 import { CloudflareEmailSendingClient } from '../services/cloudflareEmailSendingClient.js';
-import { withMailboxPhoto } from '../utils/mailboxProfile.js';
 import { prepareMailboxPhoto } from '../utils/mailboxProfileImage.js';
 import { createMailboxController } from '../controllers/mailboxController.js';
 
@@ -23,7 +22,7 @@ function setup() {
   return { service, record, sent, uploads: () => uploads };
 }
 
-test('guarda nombre y foto en el buzón y los usa en los próximos envíos', async () => {
+test('guarda nombre y foto como perfil sin insertarlos en mensajes de texto', async () => {
   const { service, sent } = setup();
   const profile = await service.updateProfile({ ...context, displayName: 'Sergio & Ventas', photo: { buffer: Buffer.from('photo') } });
   assert.equal(profile.displayName, 'Sergio & Ventas');
@@ -31,9 +30,9 @@ test('guarda nombre y foto en el buzón y los usa en los próximos envíos', asy
   await service.send({ ...context, to: ['to@example.com'], subject: 'Hola', text: 'Mensaje <seguro>' });
   assert.equal(sent[0].fromName, profile.displayName);
   assert.equal(sent[0].fromAlias, context.mailboxEmail);
-  assert.match(sent[0].html, /Mensaje &lt;seguro&gt;/);
-  assert.match(sent[0].html, /Sergio &amp; Ventas/);
-  assert.match(sent[0].html, /<img src="https:\/\/images.example.com\/profile.webp"/);
+  assert.equal(sent[0].text, 'Mensaje <seguro>');
+  assert.equal(sent[0].html, undefined);
+  assert.equal(sent[0].senderPhotoUrl, profile.photoUrl);
 });
 
 test('quitar foto conserva nombre y deja de incluirla en futuros correos', async () => {
@@ -53,11 +52,14 @@ test('rechaza otro buzón, nombres con cabeceras y archivos demasiado grandes an
   assert.equal(uploads(), 0);
 });
 
-test('la firma queda dentro del body y escapa atributos del perfil', () => {
-  const result = withMailboxPhoto({ html: '<html><body><p>Hola</p></body></html>', profile: { photoUrl: 'https://example.com/a?x="', displayName: '<script>x</script>', email: context.mailboxEmail } });
-  assert.ok(result.indexOf('data-mailbox-profile') < result.indexOf('</body>'));
-  assert.match(result, /&lt;script&gt;x&lt;\/script&gt;/);
-  assert.match(result, /&quot;/);
+test('una foto de perfil no modifica el HTML ni la firma elegida por el usuario', async () => {
+  const { service, record, sent } = setup();
+  record.photoUrl = 'https://images.example.com/profile.webp';
+  const html = '<html><body><p>Hola</p><div>Mi firma elegida</div></body></html>';
+  await service.send({ ...context, to: ['to@example.com'], subject: 'Hola', text: 'Hola\nMi firma elegida', html });
+  assert.equal(sent[0].html, html);
+  assert.equal(sent[0].text, 'Hola\nMi firma elegida');
+  assert.equal(sent[0].senderPhotoUrl, record.photoUrl);
 });
 
 test('procesa una imagen real a WebP cuadrada y rechaza SVG y archivos falsos', async () => {
