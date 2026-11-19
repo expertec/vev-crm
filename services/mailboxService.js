@@ -10,7 +10,7 @@ import {
   verifyMailboxToken,
 } from '../utils/mailboxAuth.js';
 import { parseMailboxImport } from './mailboxImportParser.js';
-import { cleanDisplayName, MAX_PROFILE_PHOTO_BYTES } from '../utils/mailboxProfile.js';
+import { cleanDisplayName, MAX_PROFILE_PHOTO_BYTES, withMailboxPhoto } from '../utils/mailboxProfile.js';
 
 function cleanString(value = '', maxLength = 300) {
   return String(value ?? '').trim().slice(0, maxLength);
@@ -797,7 +797,7 @@ export class MailboxService {
       bcc,
       subject,
       text,
-      html,
+      html: withMailboxPhoto({ html, text, profile }),
       attachments,
       createdBy: mailboxEmail,
     });

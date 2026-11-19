@@ -22,7 +22,7 @@ function setup() {
   return { service, record, sent, uploads: () => uploads };
 }
 
-test('guarda nombre y foto como perfil sin insertarlos en mensajes de texto', async () => {
+test('guarda nombre y foto e incluye la foto como firma en nuevos correos', async () => {
   const { service, sent } = setup();
   const profile = await service.updateProfile({ ...context, displayName: 'Sergio & Ventas', photo: { buffer: Buffer.from('photo') } });
   assert.equal(profile.displayName, 'Sergio & Ventas');
@@ -31,7 +31,9 @@ test('guarda nombre y foto como perfil sin insertarlos en mensajes de texto', as
   assert.equal(sent[0].fromName, profile.displayName);
   assert.equal(sent[0].fromAlias, context.mailboxEmail);
   assert.equal(sent[0].text, 'Mensaje <seguro>');
-  assert.equal(sent[0].html, undefined);
+  assert.match(sent[0].html, /Mensaje &lt;seguro&gt;/);
+  assert.match(sent[0].html, /Sergio &amp; Ventas/);
+  assert.match(sent[0].html, /<img src="https:\/\/images.example.com\/profile.webp"/);
   assert.equal(sent[0].senderPhotoUrl, profile.photoUrl);
 });
 
@@ -52,12 +54,14 @@ test('rechaza otro buzón, nombres con cabeceras y archivos demasiado grandes an
   assert.equal(uploads(), 0);
 });
 
-test('una foto de perfil no modifica el HTML ni la firma elegida por el usuario', async () => {
+test('la firma con foto se añade dentro del body y conserva el contenido del mensaje', async () => {
   const { service, record, sent } = setup();
   record.photoUrl = 'https://images.example.com/profile.webp';
   const html = '<html><body><p>Hola</p><div>Mi firma elegida</div></body></html>';
   await service.send({ ...context, to: ['to@example.com'], subject: 'Hola', text: 'Hola\nMi firma elegida', html });
-  assert.equal(sent[0].html, html);
+  assert.match(sent[0].html, /<p>Hola<\/p><div>Mi firma elegida<\/div>/);
+  assert.match(sent[0].html, /data-mailbox-profile/);
+  assert.ok(sent[0].html.indexOf('data-mailbox-profile') < sent[0].html.indexOf('</body>'));
   assert.equal(sent[0].text, 'Hola\nMi firma elegida');
   assert.equal(sent[0].senderPhotoUrl, record.photoUrl);
 });
